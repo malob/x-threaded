@@ -1,0 +1,372 @@
+:root {
+  --bg: #ffffff;
+  --text: #1a1a18;
+  --text-muted: #6b6b66;
+  --border: #d9d7d0;
+  --accent-bg: #eef4fb;
+  --link: #1d6fc4;
+  --thread: #8b83e0;
+  color-scheme: light dark;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #1e1e1c;
+    --text: #e8e6e1;
+    --text-muted: #97958e;
+    --border: #3d3d3a;
+    --accent-bg: #253243;
+    --link: #6ab0f3;
+    --thread: #7f77dd;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+main {
+  max-width: 760px;
+  margin: 0 auto;
+  padding: 1.5rem 1rem 4rem;
+}
+
+form.lookup {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 1.5rem;
+}
+
+form.lookup input {
+  flex: 1;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 14px;
+}
+
+button {
+  padding: 8px 14px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 14px;
+  cursor: pointer;
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.error {
+  border: 1px solid #c4483f;
+  border-radius: 6px;
+  padding: 8px 12px;
+  margin-bottom: 1rem;
+  color: #c4483f;
+}
+
+.notice {
+  color: var(--text-muted);
+  font-size: 13px;
+  margin-bottom: 1rem;
+}
+
+ul.conversations {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+ul.conversations li {
+  border-bottom: 1px solid var(--border);
+  padding: 10px 4px;
+  cursor: pointer;
+}
+
+ul.conversations li:hover {
+  background: var(--accent-bg);
+}
+
+.post {
+  padding: 6px 0 6px 10px;
+}
+
+.post.focused {
+  background: var(--accent-bg);
+  border-radius: 6px;
+}
+
+.post-meta {
+  color: var(--text-muted);
+  font-size: 12.5px;
+}
+
+.avatar {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  vertical-align: -5px;
+  margin-right: 5px;
+}
+
+.avatar-small {
+  width: 16px;
+  height: 16px;
+  vertical-align: -4px;
+}
+
+.post-counts {
+  color: var(--text-muted);
+  font-size: 12px;
+  margin-top: 3px;
+}
+
+.post-counts a {
+  color: inherit;
+  text-decoration: none;
+}
+
+.post-counts a:hover {
+  color: var(--link);
+  text-decoration: underline;
+}
+
+.post-meta .name {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.post-text {
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+  margin: 2px 0;
+}
+
+.orphan-badge {
+  color: var(--text-muted);
+  font-size: 11.5px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0 5px;
+  margin-left: 6px;
+}
+
+.children {
+  position: relative;
+  margin-left: 4px;
+  padding-left: 18px;
+  display: flow-root;
+}
+
+.rail {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 14px;
+  padding: 0;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  cursor: pointer;
+}
+
+.rail::before {
+  content: "";
+  position: absolute;
+  left: 6px;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  border-radius: 1px;
+  background: var(--border);
+}
+
+.rail:hover::before {
+  background: #4a8edb;
+}
+
+.collapse-stub {
+  display: block;
+  margin: 2px 0 6px 4px;
+  padding: 2px 6px;
+  border: none;
+  background: none;
+  color: var(--text-muted);
+  font-size: 12.5px;
+  cursor: pointer;
+}
+
+.collapse-stub:hover {
+  color: var(--text);
+}
+
+.post-text a,
+.post-meta a {
+  color: var(--link);
+  text-decoration: none;
+}
+
+.post-text a:hover,
+.post-meta a:hover {
+  text-decoration: underline;
+}
+
+.run-chain {
+  position: relative;
+}
+
+.run-rail {
+  position: absolute;
+  left: 4px;
+  top: 0;
+  bottom: 0;
+  width: 14px;
+  padding: 0;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  cursor: pointer;
+  z-index: 1;
+}
+
+.run-post {
+  position: relative;
+  padding-left: 26px;
+}
+
+.run-post::before {
+  content: "";
+  position: absolute;
+  left: 10px;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: var(--border);
+}
+
+.run-post.run-post-last::before {
+  bottom: auto;
+  height: 17px;
+}
+
+.run-post::after {
+  content: "";
+  position: absolute;
+  left: 10px;
+  top: 15px;
+  width: 10px;
+  height: 2px;
+  background: var(--border);
+}
+
+.run-post > .post::before {
+  content: "";
+  position: absolute;
+  left: 20px;
+  top: 12px;
+  width: 0;
+  height: 0;
+  border-top: 4px solid transparent;
+  border-bottom: 4px solid transparent;
+  border-left: 5px solid var(--border);
+}
+
+.run-rail:hover ~ .run-post::before,
+.run-rail:hover ~ .run-post::after {
+  background: #4a8edb;
+}
+
+.run-rail:hover ~ .run-post > .post::before {
+  border-left-color: #4a8edb;
+}
+
+.run-branches {
+  margin-left: 26px;
+}
+
+.spine {
+  border-left: 3px solid var(--thread);
+  padding-left: 12px;
+  margin-left: 4px;
+}
+
+.segment-replies {
+  margin-left: 12px;
+  margin-bottom: 6px;
+}
+
+.quote-card {
+  display: block;
+  max-width: 620px;
+  margin: 4px 0 2px;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: inherit;
+}
+
+.quote-card-link {
+  text-decoration: none;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.quote-card-link:hover {
+  background: var(--accent-bg);
+}
+
+.quote-open {
+  margin-left: 8px;
+  color: var(--link);
+  text-decoration: none;
+}
+
+.quote-card .quote-card {
+  margin-top: 6px;
+}
+
+.post-media {
+  margin-top: 6px;
+}
+
+.post-media a {
+  position: relative;
+  display: inline-block;
+  margin-right: 8px;
+}
+
+.post-media img {
+  display: block;
+  max-width: min(100%, 480px);
+  max-height: 420px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.quote-card .post-media img {
+  max-height: 280px;
+}
+
+.media-badge {
+  position: absolute;
+  left: 8px;
+  bottom: 8px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  background: rgba(0, 0, 0, 0.65);
+  color: #fff;
+  font-size: 12px;
+}
