@@ -1,6 +1,13 @@
 import { useEffect, useState } from "react";
 import type { ConversationResponse, ConversationSummary } from "../shared/types";
-import { getConversation, listConversations, loadConversation } from "./api";
+import {
+  getConversation,
+  listConversations,
+  loadConversation,
+  markConversationRead,
+  refreshConversation,
+  setReadState,
+} from "./api";
 import { Thread } from "./Thread";
 
 export function App() {
@@ -8,6 +15,8 @@ export function App() {
   const [conversations, setConversations] = useState<ConversationSummary[]>([]);
   const [current, setCurrent] = useState<ConversationResponse | null>(null);
   const [loading, setLoading] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
+  const [newCount, setNewCount] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const refreshList = () => {
@@ -16,17 +25,66 @@ export function App() {
 
   useEffect(refreshList, []);
 
-  const run = async (task: () => Promise<ConversationResponse>) => {
+  const autoRefresh = async (rootId: string) => {
+    setRefreshing(true);
+    try {
+      const fresh = await refreshConversation(rootId);
+      setCurrent(fresh);
+      setNewCount(fresh.newCount);
+      refreshList();
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setRefreshing(false);
+    }
+  };
+
+  const openConversation = async (rootId: string) => {
+    setError(null);
+    setNewCount(null);
+    try {
+      setCurrent(await getConversation(rootId));
+      void autoRefresh(rootId);
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  };
+
+  const submitUrl = async () => {
     setLoading(true);
     setError(null);
+    setNewCount(null);
     try {
-      setCurrent(await task());
+      const response = await loadConversation(url);
+      setCurrent(response);
       refreshList();
+      if (response.fromCache) void autoRefresh(response.rootId);
     } catch (e) {
       setError((e as Error).message);
     } finally {
       setLoading(false);
     }
+  };
+
+  const setRead = (ids: string[], read: boolean) => {
+    setCurrent((prev) => {
+      if (!prev) return prev;
+      setReadState(ids, read).then(refreshList).catch((e: Error) => setError(e.message));
+      const unread = new Set(prev.unreadIds);
+      for (const id of ids) {
+        if (read) unread.delete(id);
+        else unread.add(id);
+      }
+      return { ...prev, unreadIds: [...unread] };
+    });
+  };
+
+  const markAllRead = () => {
+    setCurrent((prev) => {
+      if (!prev) return prev;
+      markConversationRead(prev.rootId).then(refreshList).catch((e: Error) => setError(e.message));
+      return { ...prev, unreadIds: [] };
+    });
   };
 
   return (
@@ -35,7 +93,7 @@ export function App() {
         className="lookup"
         onSubmit={(e) => {
           e.preventDefault();
-          if (url.trim()) void run(() => loadConversation(url));
+          if (url.trim()) void submitUrl();
         }}
       >
         <input
@@ -47,7 +105,14 @@ export function App() {
           {loading ? "Loading…" : "Load"}
         </button>
         {current && (
-          <button type="button" onClick={() => setCurrent(null)}>
+          <button
+            type="button"
+            onClick={() => {
+              setCurrent(null);
+              setNewCount(null);
+              refreshList();
+            }}
+          >
             Back
           </button>
         )}
@@ -56,13 +121,21 @@ export function App() {
       {error && <div className="error">{error}</div>}
 
       {current ? (
-        <Thread conversation={current} />
+        <Thread
+          conversation={current}
+          refreshing={refreshing}
+          newCount={newCount}
+          onRefresh={() => void autoRefresh(current.rootId)}
+          onSetRead={setRead}
+          onMarkAllRead={markAllRead}
+        />
       ) : (
         <ul className="conversations">
           {conversations.map((c) => (
-            <li key={c.rootId} onClick={() => void run(() => getConversation(c.rootId))}>
+            <li key={c.rootId} onClick={() => void openConversation(c.rootId)}>
               <div className="post-meta">
                 <span className="name">@{c.rootAuthorHandle}</span> · {c.postCount} posts
+                {c.unreadCount > 0 && <span className="new-badge"> · {c.unreadCount} new</span>}
               </div>
               <div className="post-text">{c.rootText.slice(0, 140)}</div>
             </li>

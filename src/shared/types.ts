@@ -51,6 +51,7 @@ export interface ConversationSummary {
   rootText: string;
   rootCreatedAt: string;
   postCount: number;
+  unreadCount: number;
   fetchedAt: string;
 }
 
@@ -61,10 +62,19 @@ export interface ConversationResponse {
   posts: Post[];
   /** Posts quoted by posts in this conversation, keyed by ID. */
   quoted: Record<string, Post>;
+  /** IDs of posts not yet marked read. */
+  unreadIds: string[];
   /** True when the fetch stopped at MAX_POSTS_PER_FETCH. */
   truncated: boolean;
   /** True when served from the local cache without hitting the X API. */
   fromCache: boolean;
+}
+
+export interface RefreshResponse extends ConversationResponse {
+  /** Posts added by this refresh. */
+  newCount: number;
+  /** True when the refresh was a free same-day full re-read (metrics updated). */
+  metricsUpdated: boolean;
 }
 
 export interface ApiError {

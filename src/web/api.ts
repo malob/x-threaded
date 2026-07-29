@@ -1,4 +1,9 @@
-import type { ApiError, ConversationResponse, ConversationSummary } from "../shared/types";
+import type {
+  ApiError,
+  ConversationResponse,
+  ConversationSummary,
+  RefreshResponse,
+} from "../shared/types";
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, init);
@@ -23,5 +28,21 @@ export function loadConversation(url: string, force = false): Promise<Conversati
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ url, force }),
+  });
+}
+
+export function refreshConversation(rootId: string): Promise<RefreshResponse> {
+  return request(`/api/conversations/${rootId}/refresh`, { method: "POST" });
+}
+
+export function markConversationRead(rootId: string): Promise<{ ok: boolean }> {
+  return request(`/api/conversations/${rootId}/read`, { method: "POST" });
+}
+
+export function setReadState(postIds: string[], read: boolean): Promise<{ ok: boolean }> {
+  return request("/api/read-state", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ postIds, read }),
   });
 }

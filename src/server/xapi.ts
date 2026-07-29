@@ -149,11 +149,14 @@ export class XApi {
     let response = await fetch(url, {
       headers: { Authorization: `Bearer ${this.bearerToken}` },
     });
-    if (response.status === 429) {
+    if (response.status === 429 || response.status >= 500) {
       const resetHeader = response.headers.get("x-rate-limit-reset");
-      const waitMs = resetHeader
-        ? Math.max(0, Number(resetHeader) * 1000 - Date.now()) + 1000
-        : 5000;
+      const waitMs =
+        response.status === 429
+          ? resetHeader
+            ? Math.max(0, Number(resetHeader) * 1000 - Date.now()) + 1000
+            : 5000
+          : 2000;
       await Bun.sleep(Math.min(waitMs, 60_000));
       response = await fetch(url, {
         headers: { Authorization: `Bearer ${this.bearerToken}` },
@@ -208,7 +211,11 @@ export class XApi {
    * Stops at maxPosts and reports truncation. Billed $0.005 per post returned
    * (deduplicated within a 24h UTC window).
    */
-  async fetchConversation(conversationId: string, maxPosts: number): Promise<FetchedConversation> {
+  async fetchConversation(
+    conversationId: string,
+    maxPosts: number,
+    sinceId?: string,
+  ): Promise<FetchedConversation> {
     const fetchedAt = new Date().toISOString();
     const posts: Post[] = [];
     const referencedById = new Map<string, Post>();
@@ -225,6 +232,7 @@ export class XApi {
         "user.fields": USER_FIELDS,
         "media.fields": MEDIA_FIELDS,
       };
+      if (sinceId) params.since_id = sinceId;
       if (nextToken) params.next_token = nextToken;
 
       const page = await this.get<SearchPage>("/tweets/search/all", params);

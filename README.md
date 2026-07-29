@@ -30,8 +30,13 @@ proxying /api to :8787).
 ## Status
 
 - [x] Milestone 1 — fetch pipeline, SQLite cache, crude tree render
-- [ ] Milestone 2 — reading experience: single-child-run flattening, collapse,
-      keyboard navigation (j/k, n/p, arrows), deep-link focus
-- [ ] Milestone 3 — read/unread state, `since_id` refresh, unread rollups,
-      conversation inbox
+- [x] Milestone 2 (display) — thread spines with inline reply stubs, run
+      flattening with git-graph rails, per-block collapse, entity links,
+      inline media, quote cards (nested one level), metrics row, avatars
+- [x] Milestone 3 — read/unread state, refresh (`since_id`, with free
+      same-day full re-reads for metrics), unread rollups, conversation inbox
+- [x] Milestone 2 (navigation) — vim-idiomatic keyboard layer: cursor,
+      j/k/h/l + arrows, {/} sibling branches, n/N unread traversal
+      (auto-marks read), r/R read state, z-family folds, gx/yy, ? help
+- [ ] Deep-link routes (/c/:root/:post) with scroll-to-focus
 - [ ] Milestone 4 — deploy (Fly.io + volume) behind an auth gate

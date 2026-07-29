@@ -33,6 +33,11 @@ CREATE TABLE IF NOT EXISTS posts (
 );
 
 CREATE INDEX IF NOT EXISTS idx_posts_conversation ON posts(conversation_id);
+
+CREATE TABLE IF NOT EXISTS read_state (
+  post_id TEXT PRIMARY KEY,
+  read_at TEXT NOT NULL
+);
 `;
 
 interface PostRow {
@@ -64,6 +69,7 @@ interface ConversationRow {
   root_created_at: string;
   fetched_at: string;
   post_count: number;
+  unread_count: number;
 }
 
 function rowToPost(row: PostRow): Post {
@@ -99,6 +105,7 @@ function rowToSummary(row: ConversationRow): ConversationSummary {
     rootText: row.root_text,
     rootCreatedAt: row.root_created_at,
     postCount: row.post_count,
+    unreadCount: row.unread_count,
     fetchedAt: row.fetched_at,
   };
 }
@@ -128,7 +135,25 @@ export class Store {
     }
   }
 
-  upsertConversation(summary: Omit<ConversationSummary, "postCount">): void {
+  getConversationMeta(
+    rootId: string,
+  ): { rootAuthorHandle: string; rootText: string; rootCreatedAt: string; fetchedAt: string } | null {
+    const row = this.db
+      .query<
+        Omit<ConversationRow, "post_count" | "unread_count">,
+        { $id: string }
+      >(`SELECT * FROM conversations WHERE root_id = $id`)
+      .get({ $id: rootId });
+    if (!row) return null;
+    return {
+      rootAuthorHandle: row.root_author_handle,
+      rootText: row.root_text,
+      rootCreatedAt: row.root_created_at,
+      fetchedAt: row.fetched_at,
+    };
+  }
+
+  upsertConversation(summary: Omit<ConversationSummary, "postCount" | "unreadCount">): void {
     this.db
       .query(
         `INSERT INTO conversations (root_id, root_author_handle, root_text, root_created_at, fetched_at)
@@ -220,6 +245,20 @@ export class Store {
     return result;
   }
 
+  hasPost(id: string): boolean {
+    const row = this.db
+      .query<{ id: string }, { $id: string }>(`SELECT id FROM posts WHERE id = $id`)
+      .get({ $id: id });
+    return row !== null;
+  }
+
+  getPost(id: string): Post | null {
+    const row = this.db
+      .query<PostRow, { $id: string }>(`SELECT * FROM posts WHERE id = $id`)
+      .get({ $id: id });
+    return row ? rowToPost(row) : null;
+  }
+
   hasConversation(rootId: string): boolean {
     const row = this.db
       .query<{ root_id: string }, { $id: string }>(
@@ -232,13 +271,72 @@ export class Store {
   listConversations(): ConversationSummary[] {
     const rows = this.db
       .query<ConversationRow, []>(
-        `SELECT c.*, COUNT(p.id) AS post_count
+        `SELECT c.*, COUNT(p.id) AS post_count,
+                SUM(CASE WHEN p.id IS NOT NULL AND r.post_id IS NULL THEN 1 ELSE 0 END) AS unread_count
          FROM conversations c
          LEFT JOIN posts p ON p.conversation_id = c.root_id
+         LEFT JOIN read_state r ON r.post_id = p.id
          GROUP BY c.root_id
          ORDER BY c.fetched_at DESC`,
       )
       .all();
     return rows.map(rowToSummary);
+  }
+
+  getUnreadIds(conversationId: string): string[] {
+    return this.db
+      .query<{ id: string }, { $id: string }>(
+        `SELECT p.id FROM posts p
+         LEFT JOIN read_state r ON r.post_id = p.id
+         WHERE p.conversation_id = $id AND r.post_id IS NULL`,
+      )
+      .all({ $id: conversationId })
+      .map((row) => row.id);
+  }
+
+  /** Newest post ID in a conversation (string compare via length+lex; IDs exceed 2^53). */
+  newestPostId(conversationId: string): string | null {
+    const row = this.db
+      .query<{ id: string }, { $id: string }>(
+        `SELECT id FROM posts WHERE conversation_id = $id
+         ORDER BY LENGTH(id) DESC, id DESC LIMIT 1`,
+      )
+      .get({ $id: conversationId });
+    return row?.id ?? null;
+  }
+
+  existingPostIds(conversationId: string): Set<string> {
+    const rows = this.db
+      .query<{ id: string }, { $id: string }>(
+        `SELECT id FROM posts WHERE conversation_id = $id`,
+      )
+      .all({ $id: conversationId });
+    return new Set(rows.map((row) => row.id));
+  }
+
+  setReadState(postIds: string[], read: boolean): void {
+    if (postIds.length === 0) return;
+    if (read) {
+      const stmt = this.db.query(
+        `INSERT OR REPLACE INTO read_state (post_id, read_at) VALUES ($id, $at)`,
+      );
+      const at = new Date().toISOString();
+      const insertAll = this.db.transaction((ids: string[]) => {
+        for (const id of ids) stmt.run({ $id: id, $at: at });
+      });
+      insertAll(postIds);
+    } else {
+      const placeholders = postIds.map(() => "?").join(",");
+      this.db.run(`DELETE FROM read_state WHERE post_id IN (${placeholders})`, postIds);
+    }
+  }
+
+  markConversationRead(conversationId: string): void {
+    this.db
+      .query(
+        `INSERT OR REPLACE INTO read_state (post_id, read_at)
+         SELECT id, $at FROM posts WHERE conversation_id = $id`,
+      )
+      .run({ $at: new Date().toISOString(), $id: conversationId });
   }
 }
