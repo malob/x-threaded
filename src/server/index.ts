@@ -3,7 +3,12 @@ import { serveStatic } from "hono/bun";
 import { Store } from "./db";
 import { parsePostUrl } from "./urls";
 import { XApi, XApiError, type FetchedConversation } from "./xapi";
-import type { ConversationResponse, Post, RefreshResponse } from "../shared/types";
+import type {
+  ConversationListResponse,
+  ConversationResponse,
+  Post,
+  RefreshResponse,
+} from "../shared/types";
 
 const port = Number(process.env.PORT ?? 8787);
 const dbPath = process.env.DB_PATH ?? "data/x-threaded.sqlite";
@@ -76,7 +81,17 @@ app.onError((err, c) => {
 });
 
 app.get("/api/conversations", (c) => {
-  return c.json(store.listConversations());
+  const roots: Post[] = [];
+  const conversations = store
+    .listConversations()
+    .flatMap((row) => {
+      const root = store.getPost(row.rootId);
+      if (!root) return [];
+      roots.push(root);
+      return [{ root, postCount: row.postCount, unreadCount: row.unreadCount, fetchedAt: row.fetchedAt }];
+    });
+  const response: ConversationListResponse = { conversations, quoted: store.getQuotedFor(roots) };
+  return c.json(response);
 });
 
 app.get("/api/conversations/:rootId", (c) => {

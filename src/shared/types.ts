@@ -45,14 +45,17 @@ export interface Post {
   fetchedAt: string;
 }
 
-export interface ConversationSummary {
-  rootId: string;
-  rootAuthorHandle: string;
-  rootText: string;
-  rootCreatedAt: string;
+export interface ConversationListItem {
+  root: Post;
   postCount: number;
   unreadCount: number;
   fetchedAt: string;
+}
+
+export interface ConversationListResponse {
+  conversations: ConversationListItem[];
+  /** Posts quoted by any of the conversation roots, keyed by ID. */
+  quoted: Record<string, Post>;
 }
 
 export interface ConversationResponse {

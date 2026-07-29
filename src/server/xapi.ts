@@ -2,7 +2,7 @@ import type { MediaItem, Post, PostEntities, UrlEntity } from "../shared/types";
 
 const API_BASE = "https://api.x.com/2";
 const POST_FIELDS =
-  "created_at,public_metrics,author_id,conversation_id,referenced_tweets,entities,attachments";
+  "created_at,public_metrics,author_id,conversation_id,referenced_tweets,entities,attachments,note_tweet";
 const EXPANSIONS =
   "author_id,referenced_tweets.id,referenced_tweets.id.author_id,attachments.media_keys";
 const USER_FIELDS = "name,username,profile_image_url";
@@ -19,6 +19,8 @@ interface ApiTweet {
   referenced_tweets?: { type: string; id: string }[];
   entities?: { urls?: UrlEntity[] };
   attachments?: { media_keys?: string[] };
+  /** Full text of long posts; the plain text field is truncated to ~280. */
+  note_tweet?: { text: string; entities?: { urls?: UrlEntity[] } };
   public_metrics?: {
     like_count: number;
     reply_count: number;
@@ -94,8 +96,10 @@ function toPost(
   const author = users.get(tweet.author_id);
   const parent = tweet.referenced_tweets?.find((r) => r.type === "replied_to");
   const quoted = tweet.referenced_tweets?.find((r) => r.type === "quoted");
-  const entities: PostEntities | null = tweet.entities?.urls?.length
-    ? { urls: tweet.entities.urls.map(({ url, expanded_url, display_url }) => ({ url, expanded_url, display_url })) }
+  const text = tweet.note_tweet?.text ?? tweet.text;
+  const urls = tweet.note_tweet?.entities?.urls ?? tweet.entities?.urls;
+  const entities: PostEntities | null = urls?.length
+    ? { urls: urls.map(({ url, expanded_url, display_url }) => ({ url, expanded_url, display_url })) }
     : null;
   const media: MediaItem[] = (tweet.attachments?.media_keys ?? [])
     .map((key) => mediaByKey.get(key))
@@ -117,7 +121,7 @@ function toPost(
     authorHandle: author?.username ?? "unknown",
     authorName: author?.name ?? "Unknown",
     authorAvatarUrl: author?.profile_image_url ?? null,
-    text: unescapeText(tweet.text),
+    text: unescapeText(text),
     createdAt: tweet.created_at,
     metrics: {
       likes: m?.like_count ?? 0,

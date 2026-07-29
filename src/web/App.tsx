@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import type { ConversationResponse, ConversationSummary } from "../shared/types";
+import type { ConversationListResponse, ConversationResponse } from "../shared/types";
 import {
   getConversation,
   listConversations,
@@ -8,11 +8,12 @@ import {
   refreshConversation,
   setReadState,
 } from "./api";
+import { PostView } from "./PostView";
 import { Thread } from "./Thread";
 
 export function App() {
   const [url, setUrl] = useState("");
-  const [conversations, setConversations] = useState<ConversationSummary[]>([]);
+  const [inbox, setInbox] = useState<ConversationListResponse>({ conversations: [], quoted: {} });
   const [current, setCurrent] = useState<ConversationResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
@@ -20,7 +21,7 @@ export function App() {
   const [error, setError] = useState<string | null>(null);
 
   const refreshList = () => {
-    listConversations().then(setConversations).catch((e: Error) => setError(e.message));
+    listConversations().then(setInbox).catch((e: Error) => setError(e.message));
   };
 
   useEffect(refreshList, []);
@@ -131,13 +132,19 @@ export function App() {
         />
       ) : (
         <ul className="conversations">
-          {conversations.map((c) => (
-            <li key={c.rootId} onClick={() => void openConversation(c.rootId)}>
-              <div className="post-meta">
-                <span className="name">@{c.rootAuthorHandle}</span> · {c.postCount} posts
+          {inbox.conversations.map((c) => (
+            <li
+              key={c.root.id}
+              onClick={(e) => {
+                if ((e.target as HTMLElement).closest("a, button")) return;
+                void openConversation(c.root.id);
+              }}
+            >
+              <PostView post={c.root} quoted={inbox.quoted} />
+              <div className="post-meta inbox-meta">
+                {c.postCount - 1} {c.postCount === 2 ? "reply" : "replies"}
                 {c.unreadCount > 0 && <span className="new-badge"> · {c.unreadCount} new</span>}
               </div>
-              <div className="post-text">{c.rootText.slice(0, 140)}</div>
             </li>
           ))}
         </ul>

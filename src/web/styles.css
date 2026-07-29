@@ -91,8 +91,14 @@ ul.conversations {
 
 ul.conversations li {
   border-bottom: 1px solid var(--border);
-  padding: 10px 4px;
+  padding: 12px 4px;
   cursor: pointer;
+}
+
+.inbox-meta {
+  margin-top: 4px;
+  padding-left: 10px;
+  font-size: 12px;
 }
 
 ul.conversations li:hover {
@@ -215,6 +221,25 @@ ul.conversations li:hover {
   white-space: pre-wrap;
   overflow-wrap: break-word;
   margin: 2px 0;
+}
+
+.post-text.clamped {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.show-more {
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--link);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.show-more:hover {
+  text-decoration: underline;
 }
 
 .orphan-badge {

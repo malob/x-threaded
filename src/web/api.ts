@@ -1,7 +1,7 @@
 import type {
   ApiError,
+  ConversationListResponse,
   ConversationResponse,
-  ConversationSummary,
   RefreshResponse,
 } from "../shared/types";
 
@@ -15,7 +15,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return body as T;
 }
 
-export function listConversations(): Promise<ConversationSummary[]> {
+export function listConversations(): Promise<ConversationListResponse> {
   return request("/api/conversations");
 }
 

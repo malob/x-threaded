@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { ConversationResponse, Post } from "../shared/types";
 import {
   buildTree,
@@ -12,7 +12,7 @@ import {
   threadSpine,
   type TreeNode,
 } from "./tree";
-import { PostText } from "./PostText";
+import { PostView, postUrl } from "./PostView";
 
 interface Ctx {
   cursorId: string | null;
@@ -40,174 +40,31 @@ function NewBadge({ count }: { count: number }) {
   return <span className="new-badge"> · {count} new</span>;
 }
 
-function formatTime(iso: string): string {
-  return new Date(iso).toLocaleString(undefined, {
-    month: "short",
-    day: "numeric",
-    hour: "numeric",
-    minute: "2-digit",
-  });
-}
-
-function formatCount(n: number): string {
-  if (n < 1000) return String(n);
-  const scaled = n < 1_000_000 ? n / 1000 : n / 1_000_000;
-  const suffix = n < 1_000_000 ? "k" : "M";
-  return scaled.toFixed(1).replace(/\.0$/, "") + suffix;
-}
-
-function postUrl(post: Post): string {
-  return `https://x.com/${post.authorHandle}/status/${post.id}`;
-}
-
-function MetaCounts({ post }: { post: Post }) {
-  const m = post.metrics;
-  const items: { key: string; node: ReactNode }[] = [];
-  if (m.likes > 0) items.push({ key: "likes", node: <>♥ {formatCount(m.likes)}</> });
-  if (m.reposts > 0) {
-    items.push({
-      key: "reposts",
-      node: (
-        <a href={`${postUrl(post)}/retweets`} target="_blank" rel="noopener noreferrer">
-          ↻ {formatCount(m.reposts)}
-        </a>
-      ),
-    });
-  }
-  if (m.quotes > 0) {
-    items.push({
-      key: "quotes",
-      node: (
-        <a href={`${postUrl(post)}/quotes`} target="_blank" rel="noopener noreferrer">
-          ❝ {formatCount(m.quotes)}
-        </a>
-      ),
-    });
-  }
-  if (m.bookmarks > 0) items.push({ key: "bookmarks", node: <>⚑ {formatCount(m.bookmarks)}</> });
-  if (m.impressions > 0) {
-    items.push({ key: "views", node: <>{formatCount(m.impressions)} views</> });
-  }
-  if (items.length === 0) return null;
-  return (
-    <div className="post-counts">
-      {items.map((item, i) => (
-        <Fragment key={item.key}>
-          {i > 0 && " · "}
-          {item.node}
-        </Fragment>
-      ))}
-    </div>
-  );
-}
-
-function Avatar({ url, small }: { url: string | null; small?: boolean }) {
-  if (!url) return null;
-  return (
-    <img
-      className={small ? "avatar avatar-small" : "avatar"}
-      src={url}
-      alt=""
-      loading="lazy"
-      onError={(e) => {
-        e.currentTarget.style.display = "none";
-      }}
-    />
-  );
-}
-
-function MediaGrid({ post }: { post: Post }) {
-  if (!post.media?.length) return null;
-  return (
-    <div className="post-media">
-      {post.media.map((m, i) => {
-        const src = m.url ?? m.previewImageUrl;
-        if (!src) return null;
-        const href = m.type === "photo" ? `${postUrl(post)}/photo/${i + 1}` : postUrl(post);
-        return (
-          <a key={m.mediaKey} href={href} target="_blank" rel="noopener noreferrer">
-            <img src={src} alt={m.type === "photo" ? "attached image" : `${m.type} preview`} loading="lazy" />
-            {m.type !== "photo" && (
-              <span className="media-badge">{m.type === "animated_gif" ? "GIF" : "video"} ↗</span>
-            )}
-          </a>
-        );
-      })}
-    </div>
-  );
-}
-
-function QuoteCard({ quotedId, ctx, depth }: { quotedId: string; ctx: Ctx; depth: number }) {
-  const post = ctx.quoted[quotedId];
-  if (!post || depth > 2) {
-    return (
-      <a
-        className="quote-card quote-card-link"
-        href={`https://x.com/i/status/${quotedId}`}
-        target="_blank"
-        rel="noopener noreferrer"
-      >
-        quoted post on x.com ↗
-      </a>
-    );
-  }
-  return (
-    <div className="quote-card">
-      <div className="post-meta">
-        <Avatar url={post.authorAvatarUrl} small />
-        <span className="name">{post.authorName}</span> @{post.authorHandle} ·{" "}
-        {formatTime(post.createdAt)}
-        <a
-          className="quote-open"
-          href={postUrl(post)}
-          target="_blank"
-          rel="noopener noreferrer"
-          aria-label="Open on x.com"
-        >
-          ↗
-        </a>
-      </div>
-      <div className="post-text">
-        <PostText text={post.text} post={post} />
-      </div>
-      <MediaGrid post={post} />
-      {post.quotedPostId && <QuoteCard quotedId={post.quotedPostId} ctx={ctx} depth={depth + 1} />}
-    </div>
-  );
-}
-
 function PostCard({ node, ctx }: { node: TreeNode; ctx: Ctx }) {
   const { post, orphaned } = node;
   const isUnread = ctx.unread.has(post.id);
   return (
-    <div
+    <PostView
+      post={post}
+      quoted={ctx.quoted}
+      displayText={node.displayText}
       id={`post-${post.id}`}
       className={post.id === ctx.cursorId ? "post cursor" : "post"}
       onClick={(e) => {
         if (!(e.target as HTMLElement).closest("a, button")) ctx.setCursor(post.id);
       }}
-    >
-      <div className="post-meta">
-        {isUnread && (
+      leading={
+        isUnread ? (
           <button
             className="unread-dot"
             title="Mark as read"
             aria-label="Mark as read"
             onClick={() => ctx.setRead([post.id], true)}
           />
-        )}
-        <Avatar url={post.authorAvatarUrl} />
-        <span className="name">{post.authorName}</span> @{post.authorHandle} ·{" "}
-        {formatTime(post.createdAt)}
-        {orphaned && <span className="orphan-badge">parent unavailable</span>}
-      </div>
-      <div className="post-text">
-        <PostText text={node.displayText} post={post} />
-      </div>
-      <MediaGrid post={post} />
-      {post.quotedPostId && <QuoteCard quotedId={post.quotedPostId} ctx={ctx} depth={1} />}
-      <MetaCounts post={post} />
-    </div>
+        ) : undefined
+      }
+      metaSuffix={orphaned ? <span className="orphan-badge">parent unavailable</span> : undefined}
+    />
   );
 }
 

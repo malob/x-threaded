@@ -1,5 +1,20 @@
 import { Database } from "bun:sqlite";
-import type { ConversationSummary, MediaItem, Post, PostEntities } from "../shared/types";
+import type { MediaItem, Post, PostEntities } from "../shared/types";
+
+export interface ConversationMeta {
+  rootId: string;
+  rootAuthorHandle: string;
+  rootText: string;
+  rootCreatedAt: string;
+  fetchedAt: string;
+}
+
+export interface ConversationRowSummary {
+  rootId: string;
+  postCount: number;
+  unreadCount: number;
+  fetchedAt: string;
+}
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS conversations (
@@ -98,12 +113,9 @@ function rowToPost(row: PostRow): Post {
   };
 }
 
-function rowToSummary(row: ConversationRow): ConversationSummary {
+function rowToSummary(row: ConversationRow): ConversationRowSummary {
   return {
     rootId: row.root_id,
-    rootAuthorHandle: row.root_author_handle,
-    rootText: row.root_text,
-    rootCreatedAt: row.root_created_at,
     postCount: row.post_count,
     unreadCount: row.unread_count,
     fetchedAt: row.fetched_at,
@@ -137,7 +149,7 @@ export class Store {
 
   getConversationMeta(
     rootId: string,
-  ): { rootAuthorHandle: string; rootText: string; rootCreatedAt: string; fetchedAt: string } | null {
+  ): Omit<ConversationMeta, "rootId"> | null {
     const row = this.db
       .query<
         Omit<ConversationRow, "post_count" | "unread_count">,
@@ -153,7 +165,7 @@ export class Store {
     };
   }
 
-  upsertConversation(summary: Omit<ConversationSummary, "postCount" | "unreadCount">): void {
+  upsertConversation(summary: ConversationMeta): void {
     this.db
       .query(
         `INSERT INTO conversations (root_id, root_author_handle, root_text, root_created_at, fetched_at)
@@ -268,7 +280,7 @@ export class Store {
     return row !== null;
   }
 
-  listConversations(): ConversationSummary[] {
+  listConversations(): ConversationRowSummary[] {
     const rows = this.db
       .query<ConversationRow, []>(
         `SELECT c.*, COUNT(p.id) AS post_count,
