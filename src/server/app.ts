@@ -247,6 +247,27 @@ export function buildApp({ store, xapi, maxPosts, oauth = null }: AppDeps): Hono
    * conversations rooted by someone else — those are replies into other
    * people's threads, not the user's own posts.
    */
+  /**
+   * How many posts the thread itself is: the root plus its chain of
+   * self-replies. Counting every post the author has in the conversation
+   * would fold in their replies to other people — one two-post thread that
+   * sparked a long discussion measured 21 that way.
+   */
+  function spineLength(root: Post, ownPosts: Post[]): number {
+    const byParent = new Map<string, Post>();
+    for (const post of ownPosts) {
+      if (post.parentId) byParent.set(post.parentId, post);
+    }
+    let length = 1;
+    let current = root;
+    for (;;) {
+      const next = byParent.get(current.id);
+      if (!next) return length;
+      length++;
+      current = next;
+    }
+  }
+
   /** Group the user's posts into threads they started, newest activity first. */
   async function groupOwnThreads(posts: Post[], userId: string): Promise<OwnThread[]> {
     const byConversation = new Map<string, Post[]>();
@@ -281,7 +302,7 @@ export function buildApp({ store, xapi, maxPosts, oauth = null }: AppDeps): Hono
       );
       items.push({
         root,
-        ownPostCount: group.length,
+        ownPostCount: spineLength(root, group),
         latestAt,
         loaded: await store.hasConversation(conversationId),
       });
