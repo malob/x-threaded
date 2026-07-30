@@ -1,4 +1,5 @@
 import type { Post } from "../shared/types";
+import { MAX_SQL_PARAMS, chunked } from "./chunk";
 import {
   rowToPost,
   rowToSummary,
@@ -127,27 +128,35 @@ export class D1Store implements Storage {
     return results.map(rowToPost);
   }
 
+  /** Unordered: callers key the result by id (getQuotedFor, /api/saved). */
   async getPostsByIds(ids: string[]): Promise<Post[]> {
-    if (ids.length === 0) return [];
-    const placeholders = ids.map(() => "?").join(",");
-    const { results } = await this.db
-      .prepare(`SELECT * FROM posts WHERE id IN (${placeholders})`)
-      .bind(...ids)
-      .all<PostRow>();
-    return results.map(rowToPost);
+    const posts: Post[] = [];
+    for (const chunk of chunked(ids, MAX_SQL_PARAMS)) {
+      const placeholders = chunk.map(() => "?").join(",");
+      const { results } = await this.db
+        .prepare(`SELECT * FROM posts WHERE id IN (${placeholders})`)
+        .bind(...chunk)
+        .all<PostRow>();
+      posts.push(...results.map(rowToPost));
+    }
+    return posts;
   }
 
   async postIdsReadToday(ids: string[]): Promise<Set<string>> {
-    if (ids.length === 0) return new Set();
     const today = new Date().toISOString().slice(0, 10);
-    const placeholders = ids.map(() => "?").join(",");
-    const { results } = await this.db
-      .prepare(
-        `SELECT id FROM posts WHERE id IN (${placeholders}) AND substr(fetched_at, 1, 10) = ?`,
-      )
-      .bind(...ids, today)
-      .all<{ id: string }>();
-    return new Set((results ?? []).map((r) => r.id));
+    const found = new Set<string>();
+    // One short: `today` is bound alongside the ids in every statement.
+    for (const chunk of chunked(ids, MAX_SQL_PARAMS - 1)) {
+      const placeholders = chunk.map(() => "?").join(",");
+      const { results } = await this.db
+        .prepare(
+          `SELECT id FROM posts WHERE id IN (${placeholders}) AND substr(fetched_at, 1, 10) = ?`,
+        )
+        .bind(...chunk, today)
+        .all<{ id: string }>();
+      for (const row of results ?? []) found.add(row.id);
+    }
+    return found;
   }
 
   async getPost(id: string): Promise<Post | null> {
@@ -206,11 +215,15 @@ export class D1Store implements Storage {
       );
       await this.db.batch(postIds.map((id) => stmt.bind(id, at)));
     } else {
-      const placeholders = postIds.map(() => "?").join(",");
-      await this.db
-        .prepare(`DELETE FROM read_state WHERE post_id IN (${placeholders})`)
-        .bind(...postIds)
-        .run();
+      await this.db.batch(
+        chunked(postIds, MAX_SQL_PARAMS).map((chunk) =>
+          this.db
+            .prepare(
+              `DELETE FROM read_state WHERE post_id IN (${chunk.map(() => "?").join(",")})`,
+            )
+            .bind(...chunk),
+        ),
+      );
     }
   }
 

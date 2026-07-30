@@ -1,5 +1,6 @@
 import { Database } from "bun:sqlite";
 import type { Post } from "../shared/types";
+import { MAX_SQL_PARAMS, chunked } from "./chunk";
 import {
   SCHEMA,
   rowToPost,
@@ -154,25 +155,38 @@ export class SqliteStore implements Storage {
     return rows.map(rowToPost);
   }
 
+  /**
+   * Unordered: callers key the result by id (getQuotedFor, /api/saved).
+   * Chunked to match D1, which caps a statement at MAX_SQL_PARAMS bound
+   * parameters — bun:sqlite would take the whole list, but the two stores
+   * answering identically is worth more than the saved round trips.
+   */
   async getPostsByIds(ids: string[]): Promise<Post[]> {
-    if (ids.length === 0) return [];
-    const placeholders = ids.map(() => "?").join(",");
-    return this.db
-      .query<PostRow, string[]>(`SELECT * FROM posts WHERE id IN (${placeholders})`)
-      .all(...ids)
-      .map(rowToPost);
+    const posts: Post[] = [];
+    for (const chunk of chunked(ids, MAX_SQL_PARAMS)) {
+      const placeholders = chunk.map(() => "?").join(",");
+      const rows = this.db
+        .query<PostRow, string[]>(`SELECT * FROM posts WHERE id IN (${placeholders})`)
+        .all(...chunk);
+      posts.push(...rows.map(rowToPost));
+    }
+    return posts;
   }
 
   async postIdsReadToday(ids: string[]): Promise<Set<string>> {
-    if (ids.length === 0) return new Set();
     const today = new Date().toISOString().slice(0, 10);
-    const placeholders = ids.map(() => "?").join(",");
-    const rows = this.db
-      .query<{ id: string }, string[]>(
-        `SELECT id FROM posts WHERE id IN (${placeholders}) AND substr(fetched_at, 1, 10) = ?`,
-      )
-      .all(...ids, today);
-    return new Set(rows.map((r) => r.id));
+    const found = new Set<string>();
+    // One short: `today` is bound alongside the ids in every statement.
+    for (const chunk of chunked(ids, MAX_SQL_PARAMS - 1)) {
+      const placeholders = chunk.map(() => "?").join(",");
+      const rows = this.db
+        .query<{ id: string }, string[]>(
+          `SELECT id FROM posts WHERE id IN (${placeholders}) AND substr(fetched_at, 1, 10) = ?`,
+        )
+        .all(...chunk, today);
+      for (const row of rows) found.add(row.id);
+    }
+    return found;
   }
 
   async getPost(id: string): Promise<Post | null> {
@@ -231,8 +245,13 @@ export class SqliteStore implements Storage {
       });
       insertAll(postIds);
     } else {
-      const placeholders = postIds.map(() => "?").join(",");
-      this.db.run(`DELETE FROM read_state WHERE post_id IN (${placeholders})`, postIds);
+      const deleteAll = this.db.transaction((chunks: string[][]) => {
+        for (const chunk of chunks) {
+          const placeholders = chunk.map(() => "?").join(",");
+          this.db.run(`DELETE FROM read_state WHERE post_id IN (${placeholders})`, chunk);
+        }
+      });
+      deleteAll(chunked(postIds, MAX_SQL_PARAMS));
     }
   }
 

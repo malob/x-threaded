@@ -5,8 +5,8 @@ import type { D1Database, D1PreparedStatement } from "../src/server/store-d1";
 /**
  * D1 rejects a statement carrying more than this many bound parameters
  * (probed against the deployed Worker: 100 passes, 101 fails). Neither
- * bun:sqlite (999) nor local workerd enforces it, so the limit is only
- * testable through a fake that does.
+ * bun:sqlite (40k+ accepted in probes) nor local workerd enforces it, so the
+ * limit is only testable through a fake that does.
  */
 export const D1_MAX_BOUND_PARAMS = 100;
 

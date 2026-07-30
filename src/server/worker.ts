@@ -1,5 +1,6 @@
 import { checkAccess } from "./access";
 import { buildApp } from "./app";
+import { resolveMaxPosts } from "./config";
 import { D1Store, type D1Database } from "./store-d1";
 import { XApi } from "./xapi";
 
@@ -37,10 +38,22 @@ export default {
         { status: 500 },
       );
     }
+
+    // A malformed cap would silently uncap spending, so serve an error instead.
+    let maxPosts: number;
+    try {
+      maxPosts = resolveMaxPosts(env.MAX_POSTS_PER_FETCH);
+    } catch (error) {
+      return Response.json(
+        { error: error instanceof Error ? error.message : String(error) },
+        { status: 500 },
+      );
+    }
+
     const app = buildApp({
       store: new D1Store(env.DB),
       xapi: new XApi(env.X_BEARER_TOKEN),
-      maxPosts: Number(env.MAX_POSTS_PER_FETCH ?? 500),
+      maxPosts,
       oauth:
         env.X_OAUTH_CLIENT_ID && env.X_OAUTH_CLIENT_SECRET
           ? {
