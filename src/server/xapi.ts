@@ -225,28 +225,27 @@ export class XApi {
     return result.data ?? [];
   }
 
-  /** Posts saved in one bookmark folder (Owned Read). */
+  /**
+   * Posts saved in one bookmark folder.
+   *
+   * This endpoint accepts only id/folder_id/max_results/pagination_token —
+   * no field or expansion parameters — so it yields bare post stubs. The IDs
+   * are then hydrated through the lookup endpoint to get authors, entities,
+   * and media.
+   */
   async getBookmarksByFolder(
     accessToken: string,
     userId: string,
     folderId: string,
     max = 50,
   ): Promise<Post[]> {
-    const page = await this.get<SearchPage>(
+    const page = await this.get<{ data?: { id: string }[] }>(
       `/users/${userId}/bookmarks/folders/${folderId}`,
-      {
-        max_results: String(Math.min(Math.max(max, 1), 100)),
-        "tweet.fields": POST_FIELDS,
-        expansions: EXPANSIONS,
-        "user.fields": USER_FIELDS,
-        "media.fields": MEDIA_FIELDS,
-      },
+      { max_results: String(Math.min(Math.max(max, 1), 100)) },
       accessToken,
     );
-    const users = new Map((page.includes?.users ?? []).map((u) => [u.id, u]));
-    const media = mediaMap(page.includes);
-    const fetchedAt = new Date().toISOString();
-    return (page.data ?? []).map((tweet) => toPost(tweet, users, media, fetchedAt));
+    const ids = (page.data ?? []).map((t) => t.id);
+    return ids.length > 0 ? this.getPostsByIds(ids) : [];
   }
 
   /** Look up a single post ($0.005). */
