@@ -1,15 +1,14 @@
 import { useEffect, useState } from "react";
-import type { ConversationListResponse, ConversationResponse } from "../shared/types";
+import type { ConversationResponse } from "../shared/types";
 import {
   getConversation,
-  listConversations,
   loadConversation,
   markConversationRead,
   refreshConversation,
   resolvePost,
   setReadState,
 } from "./api";
-import { PostView } from "./PostView";
+import { Inbox } from "./Inbox";
 import { Thread } from "./Thread";
 
 /**
@@ -28,7 +27,6 @@ function postPath(handle: string | undefined, postId: string): string {
 
 export function App() {
   const [url, setUrl] = useState("");
-  const [inbox, setInbox] = useState<ConversationListResponse>({ conversations: [], quoted: {} });
   const [current, setCurrent] = useState<ConversationResponse | null>(null);
   /** Post ID from a deep link whose conversation isn't cached; awaiting consent to fetch. */
   const [pending, setPending] = useState<string | null>(null);
@@ -37,10 +35,8 @@ export function App() {
   const [newCount, setNewCount] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const refreshList = () => {
-    listConversations().then(setInbox).catch((e: Error) => setError(e.message));
-  };
-
+  // The inbox reloads itself whenever it mounts, so leaving a conversation is
+  // enough to pick up new read state — no cross-component refresh plumbing.
   const autoRefresh = async (rootId: string) => {
     setRefreshing(true);
     try {
@@ -48,7 +44,6 @@ export function App() {
       // Keep the deep-link focus; the refresh response doesn't know about it.
       setCurrent((prev) => ({ ...fresh, focusId: prev?.focusId ?? null }));
       setNewCount(fresh.newCount);
-      refreshList();
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -96,7 +91,6 @@ export function App() {
       const shownId = response.focusId ?? response.rootId;
       const post = response.posts.find((p) => p.id === shownId);
       history.replaceState({}, "", postPath(post?.authorHandle, shownId));
-      refreshList();
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -108,7 +102,6 @@ export function App() {
     setCurrent(null);
     setNewCount(null);
     setPending(null);
-    refreshList();
     if (push) history.pushState({}, "", "/");
   };
 
@@ -145,7 +138,6 @@ export function App() {
       const shownId = response.focusId ?? response.rootId;
       const post = response.posts.find((p) => p.id === shownId);
       history.pushState({}, "", postPath(post?.authorHandle, shownId));
-      refreshList();
       if (response.fromCache) void autoRefresh(response.rootId);
     } catch (e) {
       setError((e as Error).message);
@@ -157,7 +149,7 @@ export function App() {
   const setRead = (ids: string[], read: boolean) => {
     setCurrent((prev) => {
       if (!prev) return prev;
-      setReadState(ids, read).then(refreshList).catch((e: Error) => setError(e.message));
+      setReadState(ids, read).catch((e: Error) => setError(e.message));
       const unread = new Set(prev.unreadIds);
       for (const id of ids) {
         if (read) unread.delete(id);
@@ -170,7 +162,7 @@ export function App() {
   const markAllRead = () => {
     setCurrent((prev) => {
       if (!prev) return prev;
-      markConversationRead(prev.rootId).then(refreshList).catch((e: Error) => setError(e.message));
+      markConversationRead(prev.rootId).catch((e: Error) => setError(e.message));
       return { ...prev, unreadIds: [] };
     });
   };
@@ -224,23 +216,7 @@ export function App() {
           onMarkAllRead={markAllRead}
         />
       ) : (
-        <ul className="conversations">
-          {inbox.conversations.map((c) => (
-            <li
-              key={c.root.id}
-              onClick={(e) => {
-                if ((e.target as HTMLElement).closest("a, button")) return;
-                void openPost(c.root.id);
-              }}
-            >
-              <PostView post={c.root} quoted={inbox.quoted} />
-              <div className="post-meta inbox-meta">
-                {c.postCount - 1} {c.postCount === 2 ? "reply" : "replies"}
-                {c.unreadCount > 0 && <span className="new-badge"> · {c.unreadCount} new</span>}
-              </div>
-            </li>
-          ))}
-        </ul>
+        <Inbox onOpenPost={(postId) => void openPost(postId)} />
       )}
     </main>
   );

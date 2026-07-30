@@ -319,6 +319,12 @@ export function buildApp({ store, xapi, maxPosts, oauth = null }: AppDeps): Hono
     // reserved for posts that arrive later.
     if (firstFetch) await store.markConversationRead(rootId);
 
+    // Pasting a URL is a manual add: it belongs in the saved queue alongside
+    // bookmarked posts.
+    await store.addSavedItems([
+      { postId: rootId, source: "manual", addedAt: new Date().toISOString() },
+    ]);
+
     return c.json(
       await conversationResponse(rootId, focusId, {
         truncated: fetched.truncated,

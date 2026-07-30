@@ -83,3 +83,32 @@ export interface RefreshResponse extends ConversationResponse {
 export interface ApiError {
   error: string;
 }
+
+export interface SavedEntry {
+  post: Post;
+  /** "bookmark" (synced from the folder) or "manual" (added in the app). */
+  source: string;
+  addedAt: string;
+  rootId: string;
+  /** Whether the full conversation is already cached. */
+  loaded: boolean;
+}
+
+export interface SavedListResponse {
+  items: SavedEntry[];
+  quoted: Record<string, Post>;
+}
+
+export interface OwnPostsResponse {
+  posts: Post[];
+  quoted: Record<string, Post>;
+}
+
+export interface SettingsResponse {
+  bookmarkFolderId: string | null;
+  bookmarkFolderName: string | null;
+}
+
+export interface FoldersResponse {
+  folders: { id: string; name: string }[];
+}

@@ -2,7 +2,11 @@ import type {
   ApiError,
   ConversationListResponse,
   ConversationResponse,
+  FoldersResponse,
+  OwnPostsResponse,
   RefreshResponse,
+  SavedListResponse,
+  SettingsResponse,
 } from "../shared/types";
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -21,6 +25,41 @@ export function listConversations(): Promise<ConversationListResponse> {
 
 export function resolvePost(postId: string): Promise<{ rootId: string | null }> {
   return request(`/api/resolve/${postId}`);
+}
+
+export function getSaved(): Promise<SavedListResponse> {
+  return request("/api/saved");
+}
+
+export function removeSaved(postId: string): Promise<{ ok: boolean }> {
+  return request(`/api/saved/${postId}`, { method: "DELETE" });
+}
+
+export function getOwnPosts(max = 10): Promise<OwnPostsResponse> {
+  return request(`/api/me/posts?max=${max}`);
+}
+
+export function getSettings(): Promise<SettingsResponse> {
+  return request("/api/settings");
+}
+
+export function setBookmarkFolder(
+  bookmarkFolderId: string | null,
+  bookmarkFolderName: string,
+): Promise<SettingsResponse> {
+  return request("/api/settings", {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ bookmarkFolderId, bookmarkFolderName }),
+  });
+}
+
+export function getFolders(): Promise<FoldersResponse> {
+  return request("/api/bookmarks/folders");
+}
+
+export function syncBookmarks(): Promise<{ synced: number; added: number }> {
+  return request("/api/bookmarks/sync", { method: "POST" });
 }
 
 export function getConversation(rootId: string): Promise<ConversationResponse> {
