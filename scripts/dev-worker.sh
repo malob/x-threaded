@@ -1,34 +1,21 @@
 #!/usr/bin/env bash
 # Run the Cloudflare Worker locally (wrangler dev + local D1 simulation).
-# Writes X_BEARER_TOKEN into .dev.vars (gitignored) from the environment or
-# the 1Password-served secrets file, mirroring scripts/dev-server.sh.
+#
+# Config comes from .env, which wrangler reads natively — the same file the
+# Bun server uses, so local dev has one config surface. (A .dev.vars file
+# would silently suppress .env, so this script refuses to run with both.)
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-SECRETS_FILE="$HOME/.claude/secrets.env"
-if [[ -z "${X_BEARER_TOKEN:-}" && -e "$SECRETS_FILE" ]]; then
-  if [[ -p "$SECRETS_FILE" ]]; then
-    content=$(timeout 15 cat "$SECRETS_FILE" 2>/dev/null || true)
-    if [[ -n "$content" ]]; then
-      set -a
-      eval "$content"
-      set +a
-    fi
-  else
-    set -a
-    # shellcheck disable=SC1090
-    source "$SECRETS_FILE"
-    set +a
-  fi
-fi
-
-if [[ -z "${X_BEARER_TOKEN:-}" ]]; then
-  echo "X_BEARER_TOKEN is not set; expose it via ~/.claude/secrets.env or the environment." >&2
+if [[ -f .dev.vars ]]; then
+  echo "Both .dev.vars and .env would apply, and .dev.vars silently wins." >&2
+  echo "Delete .dev.vars; put local config in .env (see .env.example)." >&2
   exit 1
 fi
 
-# Subshell so the restrictive umask doesn't leak into wrangler (dirs created
-# with mode 600 are untraversable and break miniflare's temp handling).
-(umask 177 && printf 'X_BEARER_TOKEN=%s\n' "$X_BEARER_TOKEN" > .dev.vars)
+if [[ ! -f .env ]]; then
+  echo "No .env file. Copy .env.example to .env and fill in X_BEARER_TOKEN." >&2
+  exit 1
+fi
 
 exec npx wrangler dev --port "${WORKER_PORT:-8788}"
