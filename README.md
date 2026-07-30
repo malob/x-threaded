@@ -4,6 +4,13 @@ A threaded reader for X/Twitter reply trees. Paste a post URL, get the full
 conversation as a navigable tree — the thing x.com's flattened reply view
 can't do.
 
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/malob/x-threaded)
+
+Deploying your own instance is free (Cloudflare Workers + D1 free tiers, no
+card required); you bring your own X API token (`wrangler secret put
+X_BEARER_TOKEN`) and pay X per post you read. The deploy button activates
+once this repo is public on GitHub.
+
 Built on the X API's pay-per-use tier ($0.005/post read, deduplicated within a
 24-hour UTC window). A conversation is fetched once via full-archive search on
 its `conversation_id`, cached in SQLite forever, and later refreshed
@@ -59,4 +66,6 @@ API token with `wrangler secret put X_BEARER_TOKEN`.
 - [x] Deep-link routes mirroring x.com (`/<handle>/status/<id>` — swap the
       domain on any post URL) with scroll-to-focus and a fetch-consent prompt
       for uncached conversations
-- [ ] Milestone 4 — deploy (Fly.io + volume) behind an auth gate
+- [x] Milestone 4 — deployed on Cloudflare Workers + D1 (chosen over
+      Fly.io: free tier, one-click deploy button, D1 auto-provisioning);
+      auth gate via Cloudflare Access on the workers.dev domain
