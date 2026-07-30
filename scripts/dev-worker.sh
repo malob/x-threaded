@@ -13,9 +13,22 @@ if [[ -f .dev.vars ]]; then
   exit 1
 fi
 
-if [[ ! -f .env ]]; then
+if [[ ! -e .env ]]; then
   echo "No .env file. Copy .env.example to .env and fill in X_BEARER_TOKEN." >&2
   exit 1
+fi
+
+# A .env served as a named pipe (1Password and similar) isn't readable by
+# wrangler, so read it here and hand the values over via the process
+# environment instead.
+if [[ -p .env ]]; then
+  content=$(timeout 15 cat .env 2>/dev/null || true)
+  if [[ -n "$content" ]]; then
+    set -a
+    eval "$content"
+    set +a
+    export CLOUDFLARE_INCLUDE_PROCESS_ENV=true
+  fi
 fi
 
 exec npx wrangler dev --port "${WORKER_PORT:-8788}"
