@@ -191,6 +191,64 @@ export class XApi {
     return result.data;
   }
 
+  /** The signed-in user's own recent posts (Owned Read, $0.001 each). */
+  async getOwnPosts(
+    accessToken: string,
+    userId: string,
+    opts: { max?: number; excludeReplies?: boolean } = {},
+  ): Promise<Post[]> {
+    const params: Record<string, string> = {
+      max_results: String(Math.min(Math.max(opts.max ?? 10, 5), 100)),
+      "tweet.fields": POST_FIELDS,
+      expansions: EXPANSIONS,
+      "user.fields": USER_FIELDS,
+      "media.fields": MEDIA_FIELDS,
+    };
+    if (opts.excludeReplies !== false) params.exclude = "replies,retweets";
+    const page = await this.get<SearchPage>(`/users/${userId}/tweets`, params, accessToken);
+    const users = new Map((page.includes?.users ?? []).map((u) => [u.id, u]));
+    const media = mediaMap(page.includes);
+    const fetchedAt = new Date().toISOString();
+    return (page.data ?? []).map((tweet) => toPost(tweet, users, media, fetchedAt));
+  }
+
+  /** The user's bookmark folders (user context; requires bookmark.read). */
+  async getBookmarkFolders(
+    accessToken: string,
+    userId: string,
+  ): Promise<{ id: string; name: string }[]> {
+    const result = await this.get<{ data?: { id: string; name: string }[] }>(
+      `/users/${userId}/bookmarks/folders`,
+      {},
+      accessToken,
+    );
+    return result.data ?? [];
+  }
+
+  /** Posts saved in one bookmark folder (Owned Read). */
+  async getBookmarksByFolder(
+    accessToken: string,
+    userId: string,
+    folderId: string,
+    max = 50,
+  ): Promise<Post[]> {
+    const page = await this.get<SearchPage>(
+      `/users/${userId}/bookmarks/folders/${folderId}`,
+      {
+        max_results: String(Math.min(Math.max(max, 1), 100)),
+        "tweet.fields": POST_FIELDS,
+        expansions: EXPANSIONS,
+        "user.fields": USER_FIELDS,
+        "media.fields": MEDIA_FIELDS,
+      },
+      accessToken,
+    );
+    const users = new Map((page.includes?.users ?? []).map((u) => [u.id, u]));
+    const media = mediaMap(page.includes);
+    const fetchedAt = new Date().toISOString();
+    return (page.data ?? []).map((tweet) => toPost(tweet, users, media, fetchedAt));
+  }
+
   /** Look up a single post ($0.005). */
   async getPost(id: string): Promise<Post> {
     const result = await this.get<TweetLookup>(`/tweets/${id}`, {

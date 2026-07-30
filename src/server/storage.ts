@@ -40,6 +40,21 @@ export interface Storage {
 
   getOAuthTokens(id: string): Promise<OAuthTokens | null>;
   putOAuthTokens(id: string, tokens: OAuthTokens): Promise<void>;
+
+  getSetting(key: string): Promise<string | null>;
+  setSetting(key: string, value: string): Promise<void>;
+
+  /** Posts queued for reading, newest first. */
+  listSavedItems(): Promise<SavedItem[]>;
+  addSavedItems(items: SavedItem[]): Promise<void>;
+  removeSavedItem(postId: string): Promise<void>;
+}
+
+export interface SavedItem {
+  postId: string;
+  /** "bookmark" (synced from the folder) or "manual" (added in the app). */
+  source: string;
+  addedAt: string;
 }
 
 export interface OAuthTokens {
@@ -48,6 +63,8 @@ export interface OAuthTokens {
   /** Unix ms. */
   expiresAt: number;
   scope: string;
+  /** The authenticated user's ID, resolved lazily and cached. */
+  userId?: string | null;
 }
 
 /** Shared SQLite-dialect schema (bun:sqlite and D1 both speak it). */
@@ -95,7 +112,20 @@ CREATE TABLE IF NOT EXISTS oauth_tokens (
   refresh_token TEXT NOT NULL,
   expires_at INTEGER NOT NULL,
   scope TEXT NOT NULL DEFAULT '',
+  user_id TEXT,
   updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS settings (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS saved_items (
+  post_id TEXT PRIMARY KEY,
+  source TEXT NOT NULL,
+  added_at TEXT NOT NULL
 );
 `;
 

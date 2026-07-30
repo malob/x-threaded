@@ -9,6 +9,7 @@ import {
   type ConversationRowSummary,
   type OAuthTokens,
   type PostRow,
+  type SavedItem,
   type Storage,
 } from "./storage";
 
@@ -215,12 +216,60 @@ export class SqliteStore implements Storage {
     }
   }
 
+  async getSetting(key: string): Promise<string | null> {
+    const row = this.db
+      .query<{ value: string }, { $key: string }>(`SELECT value FROM settings WHERE key = $key`)
+      .get({ $key: key });
+    return row?.value ?? null;
+  }
+
+  async setSetting(key: string, value: string): Promise<void> {
+    this.db
+      .query(`INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES ($key, $value, $at)`)
+      .run({ $key: key, $value: value, $at: new Date().toISOString() });
+  }
+
+  async listSavedItems(): Promise<SavedItem[]> {
+    return this.db
+      .query<{ post_id: string; source: string; added_at: string }, []>(
+        `SELECT post_id, source, added_at FROM saved_items ORDER BY added_at DESC`,
+      )
+      .all()
+      .map((r) => ({ postId: r.post_id, source: r.source, addedAt: r.added_at }));
+  }
+
+  async addSavedItems(items: SavedItem[]): Promise<void> {
+    if (items.length === 0) return;
+    // INSERT OR IGNORE: re-syncing must not reset a row's original addedAt.
+    const stmt = this.db.query(
+      `INSERT OR IGNORE INTO saved_items (post_id, source, added_at) VALUES ($id, $source, $at)`,
+    );
+    const insertAll = this.db.transaction((rows: SavedItem[]) => {
+      for (const item of rows) {
+        stmt.run({ $id: item.postId, $source: item.source, $at: item.addedAt });
+      }
+    });
+    insertAll(items);
+  }
+
+  async removeSavedItem(postId: string): Promise<void> {
+    this.db.run(`DELETE FROM saved_items WHERE post_id = ?`, [postId]);
+  }
+
   async getOAuthTokens(id: string): Promise<OAuthTokens | null> {
     const row = this.db
       .query<
-        { access_token: string; refresh_token: string; expires_at: number; scope: string },
+        {
+          access_token: string;
+          refresh_token: string;
+          expires_at: number;
+          scope: string;
+          user_id: string | null;
+        },
         { $id: string }
-      >(`SELECT access_token, refresh_token, expires_at, scope FROM oauth_tokens WHERE id = $id`)
+      >(
+        `SELECT access_token, refresh_token, expires_at, scope, user_id FROM oauth_tokens WHERE id = $id`,
+      )
       .get({ $id: id });
     if (!row) return null;
     return {
@@ -228,6 +277,7 @@ export class SqliteStore implements Storage {
       refreshToken: row.refresh_token,
       expiresAt: row.expires_at,
       scope: row.scope,
+      userId: row.user_id,
     };
   }
 
@@ -235,8 +285,8 @@ export class SqliteStore implements Storage {
     this.db
       .query(
         `INSERT OR REPLACE INTO oauth_tokens
-           (id, access_token, refresh_token, expires_at, scope, updated_at)
-         VALUES ($id, $access, $refresh, $expires, $scope, $updated)`,
+           (id, access_token, refresh_token, expires_at, scope, user_id, updated_at)
+         VALUES ($id, $access, $refresh, $expires, $scope, $userId, $updated)`,
       )
       .run({
         $id: id,
@@ -244,6 +294,7 @@ export class SqliteStore implements Storage {
         $refresh: tokens.refreshToken,
         $expires: tokens.expiresAt,
         $scope: tokens.scope,
+        $userId: tokens.userId ?? null,
         $updated: new Date().toISOString(),
       });
   }

@@ -26,6 +26,9 @@ export interface AppDeps {
   oauth?: OAuthConfig | null;
 }
 
+const BOOKMARK_FOLDER_KEY = "bookmark_folder_id";
+const BOOKMARK_FOLDER_NAME_KEY = "bookmark_folder_name";
+
 /** The API routes, independent of runtime (Bun server or Cloudflare Worker). */
 export function buildApp({ store, xapi, maxPosts, oauth = null }: AppDeps): Hono {
   async function conversationResponse(
@@ -127,6 +130,101 @@ export function buildApp({ store, xapi, maxPosts, oauth = null }: AppDeps): Hono
     const tokens = await exchangeCode(store, oauth, code, verifier, redirectUri);
     c.header("Set-Cookie", "x_pkce=; HttpOnly; Secure; SameSite=Lax; Path=/auth; Max-Age=0");
     return c.json({ ok: true, scopes: tokens.scope.split(" ") });
+  });
+
+  /**
+   * A user-context access token plus the signed-in user's ID. The ID is
+   * resolved once via /2/users/me (a billable user read) and cached with
+   * the tokens. Throws when user context isn't configured.
+   */
+  async function userContext(): Promise<{ token: string; userId: string }> {
+    const token = oauth ? await getUserAccessToken(store, oauth) : null;
+    if (!token) throw new XApiError("user context is not configured — visit /auth/login", 401);
+    const stored = await store.getOAuthTokens("self");
+    if (stored?.userId) return { token, userId: stored.userId };
+    const me = await xapi.getMe(token);
+    if (stored) await store.putOAuthTokens("self", { ...stored, userId: me.id });
+    return { token, userId: me.id };
+  }
+
+  /** Bookmark folders, for choosing which one feeds the saved tab. */
+  app.get("/api/bookmarks/folders", async (c) => {
+    const { token, userId } = await userContext();
+    return c.json({ folders: await xapi.getBookmarkFolders(token, userId) });
+  });
+
+  app.get("/api/settings", async (c) => {
+    return c.json({
+      bookmarkFolderId: await store.getSetting(BOOKMARK_FOLDER_KEY),
+      bookmarkFolderName: await store.getSetting(BOOKMARK_FOLDER_NAME_KEY),
+    });
+  });
+
+  app.patch("/api/settings", async (c) => {
+    const body = await c.req.json<{ bookmarkFolderId?: string | null; bookmarkFolderName?: string }>();
+    if (body.bookmarkFolderId !== undefined) {
+      await store.setSetting(BOOKMARK_FOLDER_KEY, body.bookmarkFolderId ?? "");
+      await store.setSetting(BOOKMARK_FOLDER_NAME_KEY, body.bookmarkFolderName ?? "");
+    }
+    return c.json({
+      bookmarkFolderId: await store.getSetting(BOOKMARK_FOLDER_KEY),
+      bookmarkFolderName: await store.getSetting(BOOKMARK_FOLDER_NAME_KEY),
+    });
+  });
+
+  /**
+   * Pull the chosen bookmark folder into the saved list. One-way from X:
+   * new bookmarks appear here, and un-bookmarking on X leaves what's already
+   * been pulled (along with its cached conversation and read state) alone.
+   */
+  app.post("/api/bookmarks/sync", async (c) => {
+    const folderId = await store.getSetting(BOOKMARK_FOLDER_KEY);
+    if (!folderId) return c.json({ error: "no bookmark folder selected" }, 400);
+    const { token, userId } = await userContext();
+    const posts = await xapi.getBookmarksByFolder(token, userId, folderId);
+    await store.upsertPosts(posts);
+    const known = new Set((await store.listSavedItems()).map((i) => i.postId));
+    const fresh = posts.filter((p) => !known.has(p.id));
+    await store.addSavedItems(
+      fresh.map((p) => ({ postId: p.id, source: "bookmark", addedAt: new Date().toISOString() })),
+    );
+    return c.json({ synced: posts.length, added: fresh.length });
+  });
+
+  /** The saved queue: bookmarked and manually added posts, newest first. */
+  app.get("/api/saved", async (c) => {
+    const items = await store.listSavedItems();
+    const posts = await store.getPostsByIds(items.map((i) => i.postId));
+    const byId = new Map(posts.map((p) => [p.id, p]));
+    const entries = [];
+    for (const item of items) {
+      const post = byId.get(item.postId);
+      if (!post) continue;
+      // A conversation is "loaded" when we've cached its whole tree.
+      const rootId = post.conversationId;
+      entries.push({
+        post,
+        source: item.source,
+        addedAt: item.addedAt,
+        rootId,
+        loaded: await store.hasConversation(rootId),
+      });
+    }
+    return c.json({ items: entries, quoted: await getQuotedFor(store, posts) });
+  });
+
+  app.delete("/api/saved/:postId", async (c) => {
+    await store.removeSavedItem(c.req.param("postId"));
+    return c.json({ ok: true });
+  });
+
+  /** The signed-in user's recent top-level posts (Owned Reads). */
+  app.get("/api/me/posts", async (c) => {
+    const { token, userId } = await userContext();
+    const max = Number(c.req.query("max") ?? 10);
+    const posts = await xapi.getOwnPosts(token, userId, { max });
+    await store.upsertPosts(posts);
+    return c.json({ posts, quoted: await getQuotedFor(store, posts) });
   });
 
   /** Whether user-context features (own posts, bookmarks) are available. */

@@ -7,6 +7,7 @@ import {
   type ConversationRowSummary,
   type OAuthTokens,
   type PostRow,
+  type SavedItem,
   type Storage,
 } from "./storage";
 
@@ -210,17 +211,70 @@ export class D1Store implements Storage {
       .run();
   }
 
+  async getSetting(key: string): Promise<string | null> {
+    const row = await this.db
+      .prepare(`SELECT value FROM settings WHERE key = ?`)
+      .bind(key)
+      .first<{ value: string }>();
+    return row?.value ?? null;
+  }
+
+  async setSetting(key: string, value: string): Promise<void> {
+    await this.db
+      .prepare(
+        `INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES (?, ?, ?)`,
+      )
+      .bind(key, value, new Date().toISOString())
+      .run();
+  }
+
+  async listSavedItems(): Promise<SavedItem[]> {
+    const { results } = await this.db
+      .prepare(`SELECT post_id, source, added_at FROM saved_items ORDER BY added_at DESC`)
+      .all<{ post_id: string; source: string; added_at: string }>();
+    return (results ?? []).map((r) => ({
+      postId: r.post_id,
+      source: r.source,
+      addedAt: r.added_at,
+    }));
+  }
+
+  async addSavedItems(items: SavedItem[]): Promise<void> {
+    if (items.length === 0) return;
+    // INSERT OR IGNORE: re-syncing must not reset a row's original addedAt.
+    await this.db.batch(
+      items.map((item) =>
+        this.db
+          .prepare(`INSERT OR IGNORE INTO saved_items (post_id, source, added_at) VALUES (?, ?, ?)`)
+          .bind(item.postId, item.source, item.addedAt),
+      ),
+    );
+  }
+
+  async removeSavedItem(postId: string): Promise<void> {
+    await this.db.prepare(`DELETE FROM saved_items WHERE post_id = ?`).bind(postId).run();
+  }
+
   async getOAuthTokens(id: string): Promise<OAuthTokens | null> {
     const row = await this.db
-      .prepare(`SELECT access_token, refresh_token, expires_at, scope FROM oauth_tokens WHERE id = ?`)
+      .prepare(
+        `SELECT access_token, refresh_token, expires_at, scope, user_id FROM oauth_tokens WHERE id = ?`,
+      )
       .bind(id)
-      .first<{ access_token: string; refresh_token: string; expires_at: number; scope: string }>();
+      .first<{
+        access_token: string;
+        refresh_token: string;
+        expires_at: number;
+        scope: string;
+        user_id: string | null;
+      }>();
     if (!row) return null;
     return {
       accessToken: row.access_token,
       refreshToken: row.refresh_token,
       expiresAt: row.expires_at,
       scope: row.scope,
+      userId: row.user_id,
     };
   }
 
@@ -228,8 +282,8 @@ export class D1Store implements Storage {
     await this.db
       .prepare(
         `INSERT OR REPLACE INTO oauth_tokens
-           (id, access_token, refresh_token, expires_at, scope, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?)`,
+           (id, access_token, refresh_token, expires_at, scope, user_id, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
       )
       .bind(
         id,
@@ -237,6 +291,7 @@ export class D1Store implements Storage {
         tokens.refreshToken,
         tokens.expiresAt,
         tokens.scope,
+        tokens.userId ?? null,
         new Date().toISOString(),
       )
       .run();
