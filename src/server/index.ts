@@ -80,6 +80,14 @@ app.onError((err, c) => {
   return c.json({ error: err.message }, 500);
 });
 
+// Resolve a post ID to its cached conversation, without touching the X API.
+// null means the conversation isn't cached; the client offers to fetch it.
+app.get("/api/resolve/:postId", (c) => {
+  const post = store.getPost(c.req.param("postId"));
+  const rootId = post && store.hasConversation(post.conversationId) ? post.conversationId : null;
+  return c.json({ rootId });
+});
+
 app.get("/api/conversations", (c) => {
   const roots: Post[] = [];
   const conversations = store

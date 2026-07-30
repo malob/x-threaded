@@ -1,15 +1,17 @@
 /**
  * Extract a post ID from an x.com / twitter.com status URL or a bare numeric ID.
- * Handles www/mobile subdomains, query strings, and trailing segments like
- * /photo/1 or /video/1. Returns null when nothing parseable is found.
+ * Handles missing protocols, www/mobile subdomains, query strings, and
+ * trailing segments like /photo/1 or /video/1. Returns null when nothing
+ * parseable is found.
  */
 export function parsePostUrl(input: string): string | null {
   const trimmed = input.trim();
   if (/^\d{5,}$/.test(trimmed)) return trimmed;
 
+  const withScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`;
   let url: URL;
   try {
-    url = new URL(trimmed);
+    url = new URL(withScheme);
   } catch {
     return null;
   }

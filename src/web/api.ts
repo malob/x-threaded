@@ -19,6 +19,10 @@ export function listConversations(): Promise<ConversationListResponse> {
   return request("/api/conversations");
 }
 
+export function resolvePost(postId: string): Promise<{ rootId: string | null }> {
+  return request(`/api/resolve/${postId}`);
+}
+
 export function getConversation(rootId: string): Promise<ConversationResponse> {
   return request(`/api/conversations/${rootId}`);
 }

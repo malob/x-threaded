@@ -247,7 +247,7 @@ const HELP: [string, string][] = [
   ["gg / G", "first / last post"],
   ["zz", "center current post"],
   ["gx", "open post on x.com"],
-  ["yy", "copy post link"],
+  ["yy / Y", "copy x.com link / app deep link"],
   ["?", "toggle this help"],
 ];
 
@@ -291,9 +291,19 @@ export function Thread({
   const scrollModeRef = useRef<ScrollLogicalPosition>("nearest");
 
   useEffect(() => {
-    setFolds(new Map());
+    // A deep-linked focus post may sit behind closed folds; open its ancestry.
+    const opened = new Map<string, boolean>();
+    if (conversation.focusId) {
+      let current = parents.get(conversation.focusId) ?? null;
+      while (current !== null) {
+        opened.set(current, true);
+        current = parents.get(current) ?? null;
+      }
+      scrollModeRef.current = "center";
+    }
+    setFolds(opened);
     setCursorId(conversation.focusId ?? conversation.rootId);
-    if (conversation.focusId) scrollModeRef.current = "center";
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [conversation.rootId, conversation.focusId]);
 
   useEffect(() => {
@@ -500,6 +510,13 @@ export function Thread({
           }
           case "R":
             if (cursor) onSetRead(scopeIds(cursor, spine), false);
+            break;
+          case "Y":
+            if (cursor) {
+              void navigator.clipboard.writeText(
+                `${location.origin}/${cursor.post.authorHandle}/status/${cursor.post.id}`,
+              );
+            }
             break;
           case "Enter": {
             const owner = cursorId ? ownedBy(cursorId) : null;

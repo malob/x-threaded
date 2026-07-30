@@ -261,6 +261,16 @@ ul.conversations li:hover {
   text-decoration: underline;
 }
 
+.load-prompt {
+  padding: 12px 4px;
+}
+
+.load-prompt a {
+  color: var(--link);
+  text-decoration: none;
+  margin-left: 10px;
+}
+
 .hidden-replies {
   margin: 0 0 4px;
   padding-left: 10px;
