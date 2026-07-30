@@ -7,6 +7,7 @@ import {
   type ConversationMeta,
   type ConversationRow,
   type ConversationRowSummary,
+  type OAuthTokens,
   type PostRow,
   type Storage,
 } from "./storage";
@@ -212,6 +213,39 @@ export class SqliteStore implements Storage {
       const placeholders = postIds.map(() => "?").join(",");
       this.db.run(`DELETE FROM read_state WHERE post_id IN (${placeholders})`, postIds);
     }
+  }
+
+  async getOAuthTokens(id: string): Promise<OAuthTokens | null> {
+    const row = this.db
+      .query<
+        { access_token: string; refresh_token: string; expires_at: number; scope: string },
+        { $id: string }
+      >(`SELECT access_token, refresh_token, expires_at, scope FROM oauth_tokens WHERE id = $id`)
+      .get({ $id: id });
+    if (!row) return null;
+    return {
+      accessToken: row.access_token,
+      refreshToken: row.refresh_token,
+      expiresAt: row.expires_at,
+      scope: row.scope,
+    };
+  }
+
+  async putOAuthTokens(id: string, tokens: OAuthTokens): Promise<void> {
+    this.db
+      .query(
+        `INSERT OR REPLACE INTO oauth_tokens
+           (id, access_token, refresh_token, expires_at, scope, updated_at)
+         VALUES ($id, $access, $refresh, $expires, $scope, $updated)`,
+      )
+      .run({
+        $id: id,
+        $access: tokens.accessToken,
+        $refresh: tokens.refreshToken,
+        $expires: tokens.expiresAt,
+        $scope: tokens.scope,
+        $updated: new Date().toISOString(),
+      });
   }
 
   async markConversationRead(conversationId: string): Promise<void> {

@@ -37,6 +37,17 @@ export interface Storage {
   getUnreadIds(conversationId: string): Promise<string[]>;
   setReadState(postIds: string[], read: boolean): Promise<void>;
   markConversationRead(conversationId: string): Promise<void>;
+
+  getOAuthTokens(id: string): Promise<OAuthTokens | null>;
+  putOAuthTokens(id: string, tokens: OAuthTokens): Promise<void>;
+}
+
+export interface OAuthTokens {
+  accessToken: string;
+  refreshToken: string;
+  /** Unix ms. */
+  expiresAt: number;
+  scope: string;
 }
 
 /** Shared SQLite-dialect schema (bun:sqlite and D1 both speak it). */
@@ -76,6 +87,15 @@ CREATE INDEX IF NOT EXISTS idx_posts_conversation ON posts(conversation_id);
 CREATE TABLE IF NOT EXISTS read_state (
   post_id TEXT PRIMARY KEY,
   read_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS oauth_tokens (
+  id TEXT PRIMARY KEY,
+  access_token TEXT NOT NULL,
+  refresh_token TEXT NOT NULL,
+  expires_at INTEGER NOT NULL,
+  scope TEXT NOT NULL DEFAULT '',
+  updated_at TEXT NOT NULL
 );
 `;
 

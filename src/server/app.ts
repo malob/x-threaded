@@ -5,6 +5,14 @@ import type {
   Post,
   RefreshResponse,
 } from "../shared/types";
+import {
+  authorizeUrl,
+  createPkce,
+  exchangeCode,
+  getUserAccessToken,
+  newState,
+  type OAuthConfig,
+} from "./oauth";
 import { getQuotedFor, type Storage } from "./storage";
 import { parsePostUrl } from "./urls";
 import { XApiError, type FetchedConversation, type XApi } from "./xapi";
@@ -14,10 +22,12 @@ export interface AppDeps {
   xapi: XApi;
   /** Safety cap on posts fetched per conversation load. */
   maxPosts: number;
+  /** Null when the deployment has no OAuth user context configured. */
+  oauth?: OAuthConfig | null;
 }
 
 /** The API routes, independent of runtime (Bun server or Cloudflare Worker). */
-export function buildApp({ store, xapi, maxPosts }: AppDeps): Hono {
+export function buildApp({ store, xapi, maxPosts, oauth = null }: AppDeps): Hono {
   async function conversationResponse(
     rootId: string,
     focusId: string | null,
@@ -79,6 +89,63 @@ export function buildApp({ store, xapi, maxPosts }: AppDeps): Hono {
     }
     console.error(err);
     return c.json({ error: (err as Error).message }, 500);
+  });
+
+  /**
+   * Interactive consent. Tokens minted in the developer portal lack
+   * bookmark.read, so this flow is how the app gets a fully-scoped token.
+   * The PKCE verifier and state ride in a short-lived httpOnly cookie
+   * rather than server state.
+   */
+  app.get("/auth/login", async (c) => {
+    if (!oauth) return c.json({ error: "OAuth is not configured" }, 400);
+    const { verifier, challenge } = await createPkce();
+    const state = newState();
+    const redirectUri = new URL("/auth/callback", c.req.url).toString();
+    c.header(
+      "Set-Cookie",
+      `x_pkce=${verifier}.${state}; HttpOnly; Secure; SameSite=Lax; Path=/auth; Max-Age=600`,
+    );
+    return c.redirect(authorizeUrl(oauth, redirectUri, state, challenge));
+  });
+
+  app.get("/auth/callback", async (c) => {
+    if (!oauth) return c.json({ error: "OAuth is not configured" }, 400);
+    const code = c.req.query("code");
+    const state = c.req.query("state");
+    const denied = c.req.query("error");
+    if (denied) return c.json({ error: `authorization denied: ${denied}` }, 400);
+    if (!code || !state) return c.json({ error: "missing code or state" }, 400);
+
+    const cookie = /(?:^|;\s*)x_pkce=([^;]+)/.exec(c.req.header("Cookie") ?? "")?.[1];
+    const [verifier, expectedState] = (cookie ?? "").split(".");
+    if (!verifier || !expectedState || expectedState !== state) {
+      return c.json({ error: "state mismatch — restart the login" }, 400);
+    }
+
+    const redirectUri = new URL("/auth/callback", c.req.url).toString();
+    const tokens = await exchangeCode(store, oauth, code, verifier, redirectUri);
+    c.header("Set-Cookie", "x_pkce=; HttpOnly; Secure; SameSite=Lax; Path=/auth; Max-Age=0");
+    return c.json({ ok: true, scopes: tokens.scope.split(" ") });
+  });
+
+  /** Whether user-context features (own posts, bookmarks) are available. */
+  app.get("/api/auth/status", async (c) => {
+    if (!oauth) return c.json({ configured: false });
+    try {
+      const token = await getUserAccessToken(store, oauth);
+      if (!token) return c.json({ configured: false });
+      const me = await xapi.getMe(token);
+      const stored = await store.getOAuthTokens("self");
+      return c.json({
+        configured: true,
+        user: me,
+        scopes: stored?.scope ? stored.scope.split(" ") : [],
+        expiresAt: stored?.expiresAt ?? null,
+      });
+    } catch (err) {
+      return c.json({ configured: true, error: (err as Error).message }, 502);
+    }
   });
 
   // Resolve a post ID to its cached conversation, without touching the X API.

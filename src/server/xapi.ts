@@ -147,14 +147,21 @@ function mediaMap(includes: Includes | undefined): Map<string, ApiMedia> {
 export class XApi {
   constructor(private readonly bearerToken: string) {}
 
-  private async get<T>(path: string, params: Record<string, string>): Promise<T> {
+  /**
+   * @param token overrides the app-only bearer, for user-context endpoints
+   * (own posts, bookmarks) that the app-only token can't reach.
+   */
+  private async get<T>(
+    path: string,
+    params: Record<string, string>,
+    token?: string,
+  ): Promise<T> {
     const url = new URL(`${API_BASE}${path}`);
     for (const [key, value] of Object.entries(params)) {
       url.searchParams.set(key, value);
     }
-    let response = await fetch(url, {
-      headers: { Authorization: `Bearer ${this.bearerToken}` },
-    });
+    const headers = { Authorization: `Bearer ${token ?? this.bearerToken}` };
+    let response = await fetch(url, { headers });
     if (response.status === 429 || response.status >= 500) {
       const resetHeader = response.headers.get("x-rate-limit-reset");
       const waitMs =
@@ -164,15 +171,24 @@ export class XApi {
             : 5000
           : 2000;
       await sleep(Math.min(waitMs, 60_000));
-      response = await fetch(url, {
-        headers: { Authorization: `Bearer ${this.bearerToken}` },
-      });
+      response = await fetch(url, { headers });
     }
     if (!response.ok) {
       const body = await response.text();
       throw new XApiError(`X API ${response.status} on ${path}: ${body}`, response.status);
     }
     return (await response.json()) as T;
+  }
+
+  /** The authenticated user (user-context). Confirms the token works. */
+  async getMe(accessToken: string): Promise<{ id: string; username: string; name: string }> {
+    const result = await this.get<{ data?: { id: string; username: string; name: string } }>(
+      "/users/me",
+      {},
+      accessToken,
+    );
+    if (!result.data) throw new XApiError("could not resolve the authenticated user", 401);
+    return result.data;
   }
 
   /** Look up a single post ($0.005). */

@@ -5,6 +5,7 @@ import {
   type ConversationMeta,
   type ConversationRow,
   type ConversationRowSummary,
+  type OAuthTokens,
   type PostRow,
   type Storage,
 } from "./storage";
@@ -206,6 +207,38 @@ export class D1Store implements Storage {
          SELECT id, ? FROM posts WHERE conversation_id = ?`,
       )
       .bind(new Date().toISOString(), conversationId)
+      .run();
+  }
+
+  async getOAuthTokens(id: string): Promise<OAuthTokens | null> {
+    const row = await this.db
+      .prepare(`SELECT access_token, refresh_token, expires_at, scope FROM oauth_tokens WHERE id = ?`)
+      .bind(id)
+      .first<{ access_token: string; refresh_token: string; expires_at: number; scope: string }>();
+    if (!row) return null;
+    return {
+      accessToken: row.access_token,
+      refreshToken: row.refresh_token,
+      expiresAt: row.expires_at,
+      scope: row.scope,
+    };
+  }
+
+  async putOAuthTokens(id: string, tokens: OAuthTokens): Promise<void> {
+    await this.db
+      .prepare(
+        `INSERT OR REPLACE INTO oauth_tokens
+           (id, access_token, refresh_token, expires_at, scope, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      )
+      .bind(
+        id,
+        tokens.accessToken,
+        tokens.refreshToken,
+        tokens.expiresAt,
+        tokens.scope,
+        new Date().toISOString(),
+      )
       .run();
   }
 }

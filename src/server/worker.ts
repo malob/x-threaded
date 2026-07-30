@@ -11,6 +11,11 @@ interface Env {
   POLICY_AUD?: string;
   /** https://<team>.cloudflareaccess.com */
   TEAM_DOMAIN?: string;
+  /** OAuth 2.0 user context; absent means user-context features are off. */
+  X_OAUTH_CLIENT_ID?: string;
+  X_OAUTH_CLIENT_SECRET?: string;
+  X_OAUTH_ACCESS_TOKEN?: string;
+  X_OAUTH_REFRESH_TOKEN?: string;
 }
 
 /**
@@ -36,6 +41,15 @@ export default {
       store: new D1Store(env.DB),
       xapi: new XApi(env.X_BEARER_TOKEN),
       maxPosts: Number(env.MAX_POSTS_PER_FETCH ?? 500),
+      oauth:
+        env.X_OAUTH_CLIENT_ID && env.X_OAUTH_CLIENT_SECRET
+          ? {
+              clientId: env.X_OAUTH_CLIENT_ID,
+              clientSecret: env.X_OAUTH_CLIENT_SECRET,
+              seedAccessToken: env.X_OAUTH_ACCESS_TOKEN,
+              seedRefreshToken: env.X_OAUTH_REFRESH_TOKEN,
+            }
+          : null,
     });
     return app.fetch(request, env, ctx as Parameters<typeof app.fetch>[2]);
   },

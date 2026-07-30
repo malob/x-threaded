@@ -6,14 +6,18 @@
   "assets": {
     "directory": "./dist",
     "not_found_handling": "single-page-application",
-    "run_worker_first": ["/api/*"]
+    // Both prefixes must reach the Worker; anything else falls through to the
+    // static SPA, which would swallow the OAuth routes.
+    "run_worker_first": ["/api/*", "/auth/*"]
   },
   // Cloudflare Access enforcement inside the Worker (defense in depth behind
   // the Access gate). Both values are public — the AUD tag appears in Access
   // login redirects. Remove them to run this deployment without Access.
   "vars": {
     "POLICY_AUD": "9a3bdede89f0d54b261d7bb52235c2f82ebbf43f804c9e3000d14588453ee9f4",
-    "TEAM_DOMAIN": "https://malob-x.cloudflareaccess.com"
+    "TEAM_DOMAIN": "https://malob-x.cloudflareaccess.com",
+    // Public half of the OAuth 2.0 client; the secret is a Worker secret.
+    "X_OAUTH_CLIENT_ID": "Um1od2llOVloRmRvWTBpM1M3T1A6MTpjaQ"
   },
   "d1_databases": [
     {
