@@ -149,8 +149,42 @@ async function refresh(config: OAuthConfig, refreshToken: string): Promise<OAuth
     // A rotated refresh token should always come back; keep the old one if not.
     refreshToken: body.refresh_token ?? refreshToken,
     expiresAt: Date.now() + body.expires_in * 1000,
+    // Empty when X omits it — the response describes the new token pair only,
+    // so the caller carries the previously granted scope forward.
     scope: body.scope ?? "",
   };
+}
+
+/**
+ * Refreshes currently in flight, keyed by the store they write to. Two
+ * concurrent callers past the expiry margin would otherwise present the same
+ * single-use refresh token to X: the loser gets `invalid_grant`, and X's reuse
+ * detection can revoke the whole token family. Joining the in-flight promise
+ * makes that impossible *within one isolate only* — coordinating across
+ * isolates needs the durable lease protocol (Stage 3).
+ */
+const refreshesInFlight = new WeakMap<Storage, Promise<string>>();
+
+/**
+ * Refresh, merge, persist, and hand back the new access token. The refresh
+ * response covers the token pair alone: X never echoes the user ID, and omits
+ * `scope` when it hasn't changed. Both are carried forward from the stored
+ * row, because `putOAuthTokens` replaces the whole row — dropping them would
+ * erase the cached user ID (costing a billable `getMe()` to re-resolve) and
+ * the granted scopes that gate features.
+ */
+async function refreshAndStore(
+  store: Storage,
+  config: OAuthConfig,
+  tokens: OAuthTokens,
+): Promise<string> {
+  const refreshed = await refresh(config, tokens.refreshToken);
+  await store.putOAuthTokens(SELF, {
+    ...refreshed,
+    scope: refreshed.scope || tokens.scope,
+    userId: tokens.userId ?? null,
+  });
+  return refreshed.accessToken;
 }
 
 /**
@@ -182,9 +216,16 @@ export async function getUserAccessToken(
     return tokens.accessToken;
   }
 
-  const refreshed = await refresh(config, tokens.refreshToken);
-  await store.putOAuthTokens(SELF, refreshed);
-  return refreshed.accessToken;
+  const pending = refreshesInFlight.get(store);
+  if (pending) return await pending;
+
+  const attempt = refreshAndStore(store, config, tokens);
+  refreshesInFlight.set(store, attempt);
+  try {
+    return await attempt;
+  } finally {
+    refreshesInFlight.delete(store);
+  }
 }
 
 /** Scopes granted to the stored token, for feature gating and diagnostics. */
