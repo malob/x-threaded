@@ -16,6 +16,12 @@ Single TypeScript repo: Bun + Hono server (X API proxy, SQLite cache via
 
 ## Running
 
+Two interchangeable server targets share the same app code
+(`src/server/app.ts`) behind an async storage interface: Bun + SQLite file,
+or Cloudflare Workers + D1.
+
+### Bun (local)
+
 ```
 bun install
 bun run build          # build the SPA into dist/
@@ -26,6 +32,18 @@ bun run dev:server     # start the server on :8787 (sources X_BEARER_TOKEN
 
 For frontend work with HMR, also run `bun run dev:web` (Vite on :5173,
 proxying /api to :8787).
+
+### Cloudflare Workers (local simulation or deployed)
+
+```
+bun install && bun run build
+npx wrangler d1 migrations apply x-threaded --local
+./scripts/dev-worker.sh          # wrangler dev on :8788, local D1
+```
+
+To deploy: `wrangler login`, `wrangler deploy` (auto-provisions the D1
+database), `wrangler d1 migrations apply x-threaded --remote`, and set the
+API token with `wrangler secret put X_BEARER_TOKEN`.
 
 ## Status
 
