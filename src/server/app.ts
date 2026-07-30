@@ -230,25 +230,8 @@ export function buildApp({ store, xapi, maxPosts, oauth = null }: AppDeps): Hono
    * conversations rooted by someone else — those are replies into other
    * people's threads, not the user's own posts.
    */
-  app.get("/api/me/posts", async (c) => {
-    const { token, userId } = await userContext();
-    const target = Number(c.req.query("threads") ?? 10);
-    // Posts are billed per post returned, so pull pages until there are
-    // enough distinct threads rather than fetching a big fixed window.
-    const posts: Post[] = [];
-    let paginationToken: string | undefined;
-    // Re-scanning for a larger target is nearly free: posts already read
-    // today don't bill again (24h dedup), so only genuinely new ground costs.
-    const MAX_SCAN = Math.min(Math.max(target * 20, 200), 600);
-    do {
-      const page = await xapi.getOwnPosts(token, userId, { max: 50, paginationToken });
-      posts.push(...page.posts);
-      paginationToken = page.nextToken;
-      const distinct = new Set(posts.map((p) => p.conversationId)).size;
-      if (distinct >= target || page.posts.length === 0) break;
-    } while (paginationToken && posts.length < MAX_SCAN);
-    await store.upsertPosts(posts);
-
+  /** Group the user's posts into threads they started, newest activity first. */
+  async function groupOwnThreads(posts: Post[], userId: string): Promise<OwnThread[]> {
     const byConversation = new Map<string, Post[]>();
     for (const post of posts) {
       const group = byConversation.get(post.conversationId) ?? [];
@@ -272,6 +255,8 @@ export function buildApp({ store, xapi, maxPosts, oauth = null }: AppDeps): Hono
     for (const [conversationId, group] of byConversation) {
       const root =
         group.find((p) => p.id === conversationId) ?? (await store.getPost(conversationId));
+      // Conversations rooted by someone else are replies into their threads,
+      // not the user's own posts.
       if (!root || root.authorId !== userId) continue;
       const latestAt = group.reduce(
         (latest, p) => (p.createdAt > latest ? p.createdAt : latest),
@@ -285,6 +270,30 @@ export function buildApp({ store, xapi, maxPosts, oauth = null }: AppDeps): Hono
       });
     }
     items.sort((a, b) => b.latestAt.localeCompare(a.latestAt));
+    return items;
+  }
+
+  app.get("/api/me/posts", async (c) => {
+    const { token, userId } = await userContext();
+    const target = Number(c.req.query("threads") ?? 10);
+    // Keep scanning until there are enough threads the user actually
+    // started. Counting raw conversations would overshoot, because replies
+    // into other people's threads get filtered out afterwards.
+    // Re-scanning for a larger target is nearly free: posts already read
+    // today don't bill again (24h dedup), so only new ground costs.
+    const MAX_SCAN = Math.min(Math.max(target * 30, 300), 900);
+    const posts: Post[] = [];
+    let paginationToken: string | undefined;
+    let items: OwnThread[] = [];
+    for (;;) {
+      const page = await xapi.getOwnPosts(token, userId, { max: 50, paginationToken });
+      posts.push(...page.posts);
+      paginationToken = page.nextToken;
+      await store.upsertPosts(page.posts);
+      items = await groupOwnThreads(posts, userId);
+      if (items.length >= target || !paginationToken || page.posts.length === 0) break;
+      if (posts.length >= MAX_SCAN) break;
+    }
 
     const shown = items.slice(0, target);
     const response: OwnPostsResponse = {
@@ -293,7 +302,8 @@ export function buildApp({ store, xapi, maxPosts, oauth = null }: AppDeps): Hono
         store,
         shown.map((i) => i.root),
       ),
-      hasMore: items.length > target || (items.length === target && paginationToken !== undefined),
+      // More to find if the timeline isn't exhausted, or we trimmed the list.
+      hasMore: items.length > target || paginationToken !== undefined,
     };
     return c.json(response);
   });
