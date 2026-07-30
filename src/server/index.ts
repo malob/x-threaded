@@ -1,7 +1,8 @@
 import { serveStatic } from "hono/bun";
 import { buildApp } from "./app";
 import { resolveMaxPosts } from "./config";
-import { SqliteStore } from "./store-sqlite";
+import { bunDriver } from "./db/bun";
+import { SqlStore } from "./db/store";
 import { XApi } from "./xapi";
 
 const port = Number(process.env.PORT ?? 8788);
@@ -43,7 +44,7 @@ if (!clientId || !clientSecret) {
  * authorizing separately at /auth/login gives this instance its own.
  */
 const app = buildApp({
-  store: new SqliteStore(dbPath),
+  store: new SqlStore(bunDriver(dbPath)),
   xapi: new XApi(bearerToken),
   maxPosts,
   oauth: clientId && clientSecret ? { clientId, clientSecret } : null,

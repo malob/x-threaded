@@ -1,14 +1,15 @@
 import { describe, expect, it } from "bun:test";
+import { bunDriver } from "../src/server/db/bun";
+import { SqlStore } from "../src/server/db/store";
 import { getUserAccessToken, SELF_ID, type OAuthConfig } from "../src/server/oauth";
-import { SqliteStore } from "../src/server/store-sqlite";
 import { withMockFetch } from "./setup";
 
 const TOKEN_URL = "https://api.x.com/2/oauth2/token";
 const CONFIG: OAuthConfig = { clientId: "client-id", clientSecret: "client-secret" };
 const GRANTED_SCOPE = "tweet.read users.read bookmark.read offline.access";
 
-function newStore(): SqliteStore {
-  return new SqliteStore(":memory:");
+function newStore(): SqlStore {
+  return new SqlStore(bunDriver(":memory:"));
 }
 
 /** A token endpoint that counts hits and hands back a fresh, unexpired pair. */

@@ -1,11 +1,12 @@
 import { describe, expect, it } from "bun:test";
 import { SELF_ID } from "../src/server/oauth";
-import type { OwnPostsResponse, Post } from "../src/shared/types";
+import type { OwnPostsResponse, Post, SavedListResponse } from "../src/shared/types";
 import { makePost } from "./fixtures";
 import {
   SELF_USER_ID,
   TEST_OAUTH,
   fetchConversationRequest,
+  idsRequested,
   makeAuthedApp,
   makeTestApp,
   methods,
@@ -208,6 +209,113 @@ describe("GET /api/me/posts — threads param", () => {
     const high = await app.request("/api/me/posts?threads=999");
     expect(high.status).toBe(200);
     expect(((await high.json()) as OwnPostsResponse).items).toHaveLength(3);
+  });
+});
+
+/**
+ * The `loaded` flag on both list routes used to be one store query per row,
+ * inside the loop; it is now one set-returning query per page (2026-07-30
+ * review, S3). These pin the answers, not the query count.
+ */
+describe("GET /api/saved — hydration and the loaded flag", () => {
+  it("resolves each entry's root and whether that conversation is cached", async () => {
+    const { app, store } = makeTestApp();
+    const cachedRoot = makePost();
+    const cachedReply = replyTo(cachedRoot);
+    await seedConversation(store, cachedRoot, [cachedReply]);
+    // A bookmarked post whose tree has never been pulled.
+    const loose = makePost();
+    await store.upsertPosts([loose]);
+    await store.addSavedItems([
+      { postId: cachedReply.id, source: "bookmark", addedAt: "2024-01-02T00:00:00.000Z" },
+      { postId: loose.id, source: "manual", addedAt: "2024-01-01T00:00:00.000Z" },
+    ]);
+
+    const response = await app.request("/api/saved");
+
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as SavedListResponse;
+    // Newest first, and both entries carry their own root and loaded state.
+    expect(body.items.map((i) => [i.post.id, i.rootId, i.loaded, i.source])).toEqual([
+      [cachedReply.id, cachedRoot.id, true, "bookmark"],
+      [loose.id, loose.id, false, "manual"],
+    ]);
+  });
+
+  it("skips a saved id whose post was never stored", async () => {
+    const { app, store } = makeTestApp();
+    const stored = makePost();
+    await store.upsertPosts([stored]);
+    await store.addSavedItems([
+      { postId: stored.id, source: "manual", addedAt: "2024-01-02T00:00:00.000Z" },
+      { postId: "1796000000000000000", source: "manual", addedAt: "2024-01-03T00:00:00.000Z" },
+    ]);
+
+    const body = (await (await app.request("/api/saved")).json()) as SavedListResponse;
+
+    expect(body.items.map((i) => i.post.id)).toEqual([stored.id]);
+  });
+});
+
+describe("GET /api/me/posts — grouping into threads", () => {
+  const EARLIER = "2024-05-01T00:00:00.000Z";
+  const LATER = "2024-06-01T00:00:00.000Z";
+
+  it("marks a thread loaded only when its conversation is cached", async () => {
+    const { app, store, xapi } = await makeAuthedApp();
+    const cached = makePost({ authorId: SELF_USER_ID, createdAt: LATER });
+    const uncached = makePost({ authorId: SELF_USER_ID, createdAt: EARLIER });
+    await seedConversation(store, cached);
+    xapi.onGetOwnPosts = () => ({ posts: [cached, uncached] });
+
+    const body = (await (await app.request("/api/me/posts")).json()) as OwnPostsResponse;
+
+    expect(body.items.map((i) => [i.root.id, i.loaded])).toEqual([
+      [cached.id, true],
+      [uncached.id, false],
+    ]);
+  });
+
+  it("recovers a root the timeline page didn't return from the store, free", async () => {
+    const { app, store, xapi } = await makeAuthedApp();
+    const root = makePost({ authorId: SELF_USER_ID, createdAt: EARLIER });
+    const continuation = replyTo(root, { authorId: SELF_USER_ID, createdAt: LATER });
+    await store.upsertPosts([root]);
+    xapi.onGetOwnPosts = () => ({ posts: [continuation] });
+
+    const body = (await (await app.request("/api/me/posts")).json()) as OwnPostsResponse;
+
+    expect(body.items.map((i) => [i.root.id, i.ownPostCount, i.latestAt])).toEqual([
+      [root.id, 2, LATER],
+    ]);
+    // The root was already cached, so nothing was bought to recover it.
+    expect(methods(xapi)).toEqual(["getOwnPosts"]);
+  });
+
+  it("buys a root neither the page nor the store has, once, in one batch", async () => {
+    const { app, xapi } = await makeAuthedApp();
+    const root = makePost({ authorId: SELF_USER_ID, createdAt: EARLIER });
+    const continuation = replyTo(root, { authorId: SELF_USER_ID, createdAt: LATER });
+    xapi.onGetOwnPosts = () => ({ posts: [continuation] });
+    xapi.onGetPostsByIds = (ids) => (ids.includes(root.id) ? [root] : []);
+
+    const body = (await (await app.request("/api/me/posts")).json()) as OwnPostsResponse;
+
+    expect(idsRequested(xapi)).toEqual([[root.id]]);
+    expect(body.items.map((i) => i.root.id)).toEqual([root.id]);
+  });
+
+  it("drops conversations someone else started", async () => {
+    const { app, store, xapi } = await makeAuthedApp();
+    const theirs = makePost({ authorId: "999", createdAt: EARLIER });
+    const ourReply = replyTo(theirs, { authorId: SELF_USER_ID, createdAt: LATER });
+    const ours = makePost({ authorId: SELF_USER_ID, createdAt: LATER });
+    await store.upsertPosts([theirs]);
+    xapi.onGetOwnPosts = () => ({ posts: [ourReply, ours] });
+
+    const body = (await (await app.request("/api/me/posts")).json()) as OwnPostsResponse;
+
+    expect(body.items.map((i) => i.root.id)).toEqual([ours.id]);
   });
 });
 

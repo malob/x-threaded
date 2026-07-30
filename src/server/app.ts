@@ -140,7 +140,7 @@ export function buildApp({ store, xapi, maxPosts, oauth = null }: AppDeps): Hono
     const gone = complete
       ? existing.filter((i) => i.source === "bookmark" && !inFolder.has(i.postId))
       : [];
-    for (const item of gone) await store.removeSavedItem(item.postId);
+    await store.removeSavedItems(gone.map((i) => i.postId));
 
     return c.json({ synced: posts.length, added: fresh.length, removed: gone.length, complete });
   });
@@ -150,26 +150,28 @@ export function buildApp({ store, xapi, maxPosts, oauth = null }: AppDeps): Hono
     const items = await store.listSavedItems();
     const posts = await store.getPostsByIds(items.map((i) => i.postId));
     const byId = new Map(posts.map((p) => [p.id, p]));
-    const entries = [];
-    for (const item of items) {
+    const hydrated = items.flatMap((item) => {
       const post = byId.get(item.postId);
-      if (!post) continue;
-      // A conversation is "loaded" when we've cached its whole tree.
-      const rootId = post.conversationId;
-      entries.push({
-        post,
-        source: item.source,
-        addedAt: item.addedAt,
-        rootId,
-        loaded: await store.hasConversation(rootId),
-      });
-    }
+      return post ? [{ item, post }] : [];
+    });
+    // A conversation is "loaded" when we've cached its whole tree. One query
+    // for the page rather than one per row (2026-07-30 review, S3).
+    const loaded = await store.hasConversations([
+      ...new Set(hydrated.map(({ post }) => post.conversationId)),
+    ]);
+    const entries = hydrated.map(({ item, post }) => ({
+      post,
+      source: item.source,
+      addedAt: item.addedAt,
+      rootId: post.conversationId,
+      loaded: loaded.has(post.conversationId),
+    }));
     return c.json({ items: entries, quoted: await getQuotedFor(store, posts) });
   });
 
   app.delete("/api/saved/:postId", async (c) => {
     const postId = c.req.param("postId");
-    const item = (await store.listSavedItems()).find((i) => i.postId === postId);
+    const item = await store.getSavedItem(postId);
     if (item?.source === "bookmark") {
       // Removing it here would be undone by the next sync; the folder on X is
       // the source of truth for these.

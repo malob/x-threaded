@@ -37,36 +37,42 @@ export async function groupOwnThreads(
     byConversation.set(post.conversationId, group);
   }
 
-  // Roots older than the scan window aren't in the timeline response; pull
-  // any we don't already have in one batch.
-  const missing: string[] = [];
-  for (const [conversationId, group] of byConversation) {
-    const known =
-      group.some((p) => p.id === conversationId) || (await store.hasPost(conversationId));
-    if (!known) missing.push(conversationId);
-  }
+  // Roots the scan didn't return, read from the store in one query rather
+  // than one per conversation: this runs inside the pagination loop, so a
+  // per-row lookup is a sequential D1 round trip per thread per page
+  // (2026-07-30 review, S3).
+  const wanted = [...byConversation]
+    .filter(([conversationId, group]) => !group.some((p) => p.id === conversationId))
+    .map(([conversationId]) => conversationId);
+  const roots = new Map((await store.getPostsByIds(wanted)).map((p) => [p.id, p]));
+
+  // Roots older than the scan window aren't cached either; pull those from X
+  // in one batch, then read them back the way every other root arrives here.
+  const missing = wanted.filter((id) => !roots.has(id));
   if (missing.length > 0) {
     await store.upsertPosts(await xapi.getPostsByIds(missing));
+    for (const post of await store.getPostsByIds(missing)) roots.set(post.id, post);
   }
 
-  const items: OwnThread[] = [];
+  const found: { conversationId: string; root: Post; group: Post[] }[] = [];
   for (const [conversationId, group] of byConversation) {
-    const root =
-      group.find((p) => p.id === conversationId) ?? (await store.getPost(conversationId));
+    const root = group.find((p) => p.id === conversationId) ?? roots.get(conversationId);
     // Conversations rooted by someone else are replies into their threads,
     // not the user's own posts.
     if (!root || root.authorId !== userId) continue;
-    const latestAt = group.reduce(
+    found.push({ conversationId, root, group });
+  }
+
+  const loaded = await store.hasConversations(found.map((f) => f.conversationId));
+  const items: OwnThread[] = found.map(({ conversationId, root, group }) => ({
+    root,
+    ownPostCount: spineLength(root, group),
+    latestAt: group.reduce(
       (latest, p) => (p.createdAt > latest ? p.createdAt : latest),
       group[0]!.createdAt,
-    );
-    items.push({
-      root,
-      ownPostCount: spineLength(root, group),
-      latestAt,
-      loaded: await store.hasConversation(conversationId),
-    });
-  }
+    ),
+    loaded: loaded.has(conversationId),
+  }));
   items.sort((a, b) => b.latestAt.localeCompare(a.latestAt));
   return items;
 }

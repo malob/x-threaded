@@ -1,7 +1,8 @@
 import { checkAccess } from "./access";
 import { buildApp } from "./app";
 import { resolveMaxPosts } from "./config";
-import { D1Store, type D1Database } from "./store-d1";
+import { d1Driver, type D1Database } from "./db/d1";
+import { SqlStore } from "./db/store";
 import { XApi } from "./xapi";
 
 interface Env {
@@ -56,7 +57,7 @@ export default {
     // Bindings are stable within a deployment; new deploys start new isolates.
     if (!cachedApp) {
       cachedApp = buildApp({
-        store: new D1Store(env.DB),
+        store: new SqlStore(d1Driver(env.DB)),
         xapi: new XApi(env.X_BEARER_TOKEN),
         maxPosts,
         oauth:

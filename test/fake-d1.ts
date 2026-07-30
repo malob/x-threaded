@@ -1,6 +1,6 @@
 import { Database, type SQLQueryBindings } from "bun:sqlite";
+import type { D1Database, D1PreparedStatement } from "../src/server/db/d1";
 import { SCHEMA } from "../src/server/storage";
-import type { D1Database, D1PreparedStatement } from "../src/server/store-d1";
 
 /**
  * D1 rejects a statement carrying more than this many bound parameters
@@ -26,8 +26,8 @@ class FakeD1PreparedStatement implements D1PreparedStatement {
     if (values.length > D1_MAX_BOUND_PARAMS) {
       throw new Error("D1_ERROR: too many SQL variables");
     }
-    // A new statement, not a mutation: D1Store.upsertPosts binds one prepared
-    // statement once per post and batches the results.
+    // A new statement, not a mutation: the D1 driver may bind one prepared
+    // statement once per row and batch the results.
     return new FakeD1PreparedStatement(this.db, this.sql, values as SQLQueryBindings[]);
   }
 

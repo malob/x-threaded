@@ -121,7 +121,7 @@ describe("FakeD1Database", () => {
   });
 });
 
-describe("D1Store over the fake", () => {
+describe("SqlStore over the D1 fake", () => {
   it("round-trips posts", async () => {
     const store = makeD1TestStore();
     const root = makePost({ text: "the root" });

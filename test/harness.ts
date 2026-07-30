@@ -1,9 +1,10 @@
 import type { Hono } from "hono";
 import { buildApp } from "../src/server/app";
+import { bunDriver } from "../src/server/db/bun";
+import { d1Driver } from "../src/server/db/d1";
+import { SqlStore } from "../src/server/db/store";
 import { SELF_ID, type OAuthConfig } from "../src/server/oauth";
 import type { Storage } from "../src/server/storage";
-import { SqliteStore } from "../src/server/store-sqlite";
-import { D1Store } from "../src/server/store-d1";
 import type { FetchedConversation } from "../src/server/xapi";
 import type { Post } from "../src/shared/types";
 import { FakeD1Database } from "./fake-d1";
@@ -17,7 +18,7 @@ export interface TestAppOptions {
 
 export interface TestApp {
   app: Hono;
-  store: SqliteStore;
+  store: SqlStore;
   xapi: FakeXApi;
 }
 
@@ -32,7 +33,7 @@ export const SELF_USER_ID = "100";
  * Drive it with app.request(); nothing here can reach the network.
  */
 export function makeTestApp(opts: TestAppOptions = {}): TestApp {
-  const store = new SqliteStore(":memory:");
+  const store = new SqlStore(bunDriver(":memory:"));
   const xapi = new FakeXApi();
   const app = buildApp({
     store,
@@ -87,9 +88,9 @@ export async function makeBookmarkApp(
   return harness;
 }
 
-/** The Worker's store, over a fresh D1 stand-in. */
-export function makeD1TestStore(): D1Store {
-  return new D1Store(new FakeD1Database());
+/** The same SqlStore the Worker runs, over a fresh D1 stand-in. */
+export function makeD1TestStore(): SqlStore {
+  return new SqlStore(d1Driver(new FakeD1Database()));
 }
 
 /** POST /api/conversations with the usual JSON body. */

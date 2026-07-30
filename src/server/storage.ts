@@ -17,6 +17,12 @@ export interface Storage {
   getConversationMeta(rootId: string): Promise<Omit<ConversationMeta, "rootId"> | null>;
   upsertConversation(meta: ConversationMeta): Promise<void>;
   hasConversation(rootId: string): Promise<boolean>;
+  /**
+   * Which of these conversations are cached. The set form exists because the
+   * callers ask about a whole page at once, and one query per row is a
+   * sequential D1 round trip each (2026-07-30 review, S3).
+   */
+  hasConversations(rootIds: string[]): Promise<Set<string>>;
 
   upsertPosts(posts: Post[]): Promise<void>;
   getPosts(conversationId: string): Promise<Post[]>;
@@ -44,8 +50,11 @@ export interface Storage {
 
   /** Posts queued for reading, newest first. */
   listSavedItems(): Promise<SavedItem[]>;
+  getSavedItem(postId: string): Promise<SavedItem | null>;
   addSavedItems(items: SavedItem[]): Promise<void>;
   removeSavedItem(postId: string): Promise<void>;
+  /** Remove several at once, all or nothing. */
+  removeSavedItems(postIds: string[]): Promise<void>;
 }
 
 export interface SavedItem {
