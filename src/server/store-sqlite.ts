@@ -24,21 +24,29 @@ export class SqliteStore implements Storage {
     this.db = new Database(path, { create: true });
     this.db.run("PRAGMA journal_mode = WAL;");
     this.db.run(SCHEMA);
-    const columns = this.db
-      .query<{ name: string }, []>(`PRAGMA table_info(posts)`)
-      .all()
-      .map((c) => c.name);
-    if (!columns.includes("entities_json")) {
-      this.db.run("ALTER TABLE posts ADD COLUMN entities_json TEXT");
-    }
-    if (!columns.includes("quoted_post_id")) {
-      this.db.run("ALTER TABLE posts ADD COLUMN quoted_post_id TEXT");
-    }
-    if (!columns.includes("media_json")) {
-      this.db.run("ALTER TABLE posts ADD COLUMN media_json TEXT");
-    }
-    if (!columns.includes("bookmarks")) {
-      this.db.run("ALTER TABLE posts ADD COLUMN bookmarks INTEGER NOT NULL DEFAULT 0");
+    // CREATE TABLE IF NOT EXISTS won't add columns to a table that predates
+    // them, so bring older local databases forward. (The Worker gets the
+    // equivalent from migrations/.)
+    this.addMissingColumns("posts", {
+      entities_json: "TEXT",
+      quoted_post_id: "TEXT",
+      media_json: "TEXT",
+      bookmarks: "INTEGER NOT NULL DEFAULT 0",
+    });
+    this.addMissingColumns("oauth_tokens", { user_id: "TEXT" });
+  }
+
+  private addMissingColumns(table: string, columns: Record<string, string>): void {
+    const existing = new Set(
+      this.db
+        .query<{ name: string }, []>(`PRAGMA table_info(${table})`)
+        .all()
+        .map((c) => c.name),
+    );
+    for (const [name, definition] of Object.entries(columns)) {
+      if (!existing.has(name)) {
+        this.db.run(`ALTER TABLE ${table} ADD COLUMN ${name} ${definition}`);
+      }
     }
   }
 

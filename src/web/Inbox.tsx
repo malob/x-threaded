@@ -1,6 +1,12 @@
 import { useEffect, useState } from "react";
-import type { OwnPostsResponse, SavedListResponse, SettingsResponse } from "../shared/types";
+import type {
+  AuthStatus,
+  OwnPostsResponse,
+  SavedListResponse,
+  SettingsResponse,
+} from "../shared/types";
 import {
+  getAuthStatus,
   getFolders,
   getOwnPosts,
   getSaved,
@@ -12,6 +18,28 @@ import {
 import { PostView } from "./PostView";
 
 type Tab = "saved" | "yours";
+
+/** Prompt to authorize X, shown wherever user-context features are needed. */
+function ConnectPrompt({ auth }: { auth: AuthStatus | null }) {
+  if (!auth || auth.authorized) return null;
+  if (!auth.configured) {
+    return (
+      <p className="notice">
+        user-context features are off — this deployment has no OAuth credentials (see
+        .env.example)
+      </p>
+    );
+  }
+  return (
+    <p className="notice">
+      <a className="connect-link" href="/auth/login">
+        Connect your X account
+      </a>{" "}
+      to sync bookmarks and see your posts
+      {auth.error && <span className="new-badge"> · {auth.error}</span>}
+    </p>
+  );
+}
 
 /** Folder picker plus sync control for the saved tab. */
 function FolderBar({
@@ -108,6 +136,7 @@ export function Inbox({ onOpenPost }: { onOpenPost: (postId: string) => void }) 
   const [loadingOwn, setLoadingOwn] = useState(false);
   /** How many threads the Your posts tab is currently asking for. */
   const [ownTarget, setOwnTarget] = useState(10);
+  const [auth, setAuth] = useState<AuthStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const loadSaved = () => {
@@ -121,6 +150,9 @@ export function Inbox({ onOpenPost }: { onOpenPost: (postId: string) => void }) 
     getSettings()
       .then(setSettings)
       .catch(() => setSettings(null));
+    getAuthStatus()
+      .then(setAuth)
+      .catch(() => setAuth(null));
   }, []);
 
   const loadOwn = (threads = ownTarget) => {
@@ -137,9 +169,9 @@ export function Inbox({ onOpenPost }: { onOpenPost: (postId: string) => void }) 
 
   // Your posts cost real API reads, so fetch them on first view, not on mount.
   useEffect(() => {
-    if (tab === "yours" && !own && !loadingOwn) loadOwn();
+    if (tab === "yours" && auth?.authorized && !own && !loadingOwn) loadOwn();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tab]);
+  }, [tab, auth]);
 
   const sync = async () => {
     setSyncing(true);
@@ -185,16 +217,19 @@ export function Inbox({ onOpenPost }: { onOpenPost: (postId: string) => void }) 
       </div>
 
       {error && <div className="error">{error}</div>}
+      <ConnectPrompt auth={auth} />
 
       {tab === "saved" ? (
         <>
-          <FolderBar
-            settings={settings}
-            onChange={changeFolder}
-            onSync={() => void sync()}
-            syncing={syncing}
-            syncNote={syncNote}
-          />
+          {auth?.authorized && (
+            <FolderBar
+              settings={settings}
+              onChange={changeFolder}
+              onSync={() => void sync()}
+              syncing={syncing}
+              syncNote={syncNote}
+            />
+          )}
           <ul className="conversations">
             {saved?.items.map((item) => (
               <li
@@ -221,9 +256,10 @@ export function Inbox({ onOpenPost }: { onOpenPost: (postId: string) => void }) 
             </p>
           )}
         </>
-      ) : (
+      ) : !auth?.authorized ? null : (
         <>
           <p className="notice">
+            {auth.user ? `@${auth.user.username} · ` : ""}
             your recent threads{own ? ` (${own.items.length})` : ""} ·{" "}
             <button className="notice-btn" onClick={() => loadOwn(10)} disabled={loadingOwn}>
               {loadingOwn ? "loading…" : "refresh"}

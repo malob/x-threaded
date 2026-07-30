@@ -1,5 +1,6 @@
 import type {
   ApiError,
+  AuthStatus,
   ConversationListResponse,
   ConversationResponse,
   FoldersResponse,
@@ -56,6 +57,12 @@ export function setBookmarkFolder(
 
 export function getFolders(): Promise<FoldersResponse> {
   return request("/api/bookmarks/folders");
+}
+
+export async function getAuthStatus(): Promise<AuthStatus> {
+  // Unlike other endpoints, a non-2xx here is still a meaningful answer.
+  const response = await fetch("/api/auth/status");
+  return (await response.json()) as AuthStatus;
 }
 
 export function syncBookmarks(): Promise<{ synced: number; added: number }> {

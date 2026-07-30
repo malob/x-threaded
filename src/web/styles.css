@@ -297,6 +297,21 @@ ul.conversations li:hover {
   text-decoration: underline;
 }
 
+.connect-link {
+  display: inline-block;
+  padding: 4px 12px;
+  border: 1px solid var(--border-strong, var(--border));
+  border-radius: 6px;
+  background: var(--accent-bg);
+  color: var(--link);
+  font-size: 13px;
+  text-decoration: none;
+}
+
+.connect-link:hover {
+  border-color: var(--link);
+}
+
 .load-prompt {
   padding: 12px 4px;
 }

@@ -124,3 +124,14 @@ export interface SettingsResponse {
 export interface FoldersResponse {
   folders: { id: string; name: string }[];
 }
+
+export interface AuthStatus {
+  /** This deployment has OAuth client credentials. */
+  configured: boolean;
+  /** Someone has completed the consent flow on it. */
+  authorized: boolean;
+  user?: { id: string; username: string; name: string };
+  scopes?: string[];
+  expiresAt?: number | null;
+  error?: string;
+}

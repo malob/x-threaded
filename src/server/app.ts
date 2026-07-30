@@ -129,9 +129,10 @@ export function buildApp({ store, xapi, maxPosts, oauth = null }: AppDeps): Hono
     }
 
     const redirectUri = new URL("/auth/callback", c.req.url).toString();
-    const tokens = await exchangeCode(store, oauth, code, verifier, redirectUri);
+    await exchangeCode(store, oauth, code, verifier, redirectUri);
     c.header("Set-Cookie", "x_pkce=; HttpOnly; Secure; SameSite=Lax; Path=/auth; Max-Age=0");
-    return c.json({ ok: true, scopes: tokens.scope.split(" ") });
+    // Back to the app rather than a JSON dump; the inbox reflects the new state.
+    return c.redirect("/");
   });
 
   /**
@@ -297,22 +298,32 @@ export function buildApp({ store, xapi, maxPosts, oauth = null }: AppDeps): Hono
     return c.json(response);
   });
 
-  /** Whether user-context features (own posts, bookmarks) are available. */
+  /**
+   * Whether user-context features (own posts, bookmarks) are available.
+   * `configured` means this deployment has OAuth client credentials;
+   * `authorized` means someone has completed /auth/login on it.
+   */
   app.get("/api/auth/status", async (c) => {
-    if (!oauth) return c.json({ configured: false });
+    if (!oauth) return c.json({ configured: false, authorized: false });
     try {
       const token = await getUserAccessToken(store, oauth);
-      if (!token) return c.json({ configured: false });
+      if (!token) {
+        return c.json({ configured: true, authorized: false, loginUrl: "/auth/login" });
+      }
       const me = await xapi.getMe(token);
       const stored = await store.getOAuthTokens("self");
       return c.json({
         configured: true,
+        authorized: true,
         user: me,
         scopes: stored?.scope ? stored.scope.split(" ") : [],
         expiresAt: stored?.expiresAt ?? null,
       });
     } catch (err) {
-      return c.json({ configured: true, error: (err as Error).message }, 502);
+      return c.json(
+        { configured: true, authorized: false, error: (err as Error).message },
+        502,
+      );
     }
   });
 
