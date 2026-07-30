@@ -1,7 +1,6 @@
 import type {
   ApiError,
   AuthStatus,
-  ConversationListResponse,
   ConversationResponse,
   FoldersResponse,
   OwnPostsResponse,
@@ -18,10 +17,6 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     throw new Error(message);
   }
   return body as T;
-}
-
-export function listConversations(): Promise<ConversationListResponse> {
-  return request("/api/conversations");
 }
 
 export function resolvePost(

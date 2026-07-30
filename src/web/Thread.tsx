@@ -15,6 +15,7 @@ import {
 } from "./tree";
 import { PostView, postUrl } from "./PostView";
 import { formatUsd } from "../shared/pricing";
+import { appPath, xPostUrl } from "../shared/urls";
 
 interface Ctx {
   cursorId: string | null;
@@ -61,7 +62,7 @@ function PostCard({ node, ctx }: { node: TreeNode; ctx: Ctx }) {
         }}
       >
         unavailable post (deleted or private) ·{" "}
-        <a href={`https://x.com/i/status/${post.id}`} target="_blank" rel="noopener noreferrer">
+        <a href={xPostUrl(undefined, post.id)} target="_blank" rel="noopener noreferrer">
           view on x.com ↗
         </a>
       </div>
@@ -530,7 +531,7 @@ export function Thread({
           case "Y":
             if (cursor) {
               void navigator.clipboard.writeText(
-                `${location.origin}/${cursor.post.authorHandle}/status/${cursor.post.id}`,
+                `${location.origin}${appPath(cursor.post.authorHandle, cursor.post.id)}`,
               );
             }
             break;

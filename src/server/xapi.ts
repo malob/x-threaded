@@ -381,9 +381,12 @@ export class XApi {
     // days and an older conversation comes back missing its history — no error,
     // no truncation flag. The root's ID dates the conversation, so bound the
     // window there. since_id already bounds it, and the two can't both apply.
-    const startTime = sinceId
-      ? undefined
-      : rfc3339(snowflakeMs(conversationId) - START_TIME_MARGIN_MS);
+    // A conversation ID that isn't a snowflake can't date anything: send no
+    // start_time and let X apply its default rather than fabricate a bound —
+    // the search itself will come back empty for an ID this malformed anyway.
+    const conversationMs = sinceId ? null : snowflakeMs(conversationId);
+    const startTime =
+      conversationMs === null ? undefined : rfc3339(conversationMs - START_TIME_MARGIN_MS);
 
     for (;;) {
       // Ask for no more than the budget allows: checking the cap only after a

@@ -45,19 +45,6 @@ export interface Post {
   fetchedAt: string;
 }
 
-export interface ConversationListItem {
-  root: Post;
-  postCount: number;
-  unreadCount: number;
-  fetchedAt: string;
-}
-
-export interface ConversationListResponse {
-  conversations: ConversationListItem[];
-  /** Posts quoted by any of the conversation roots, keyed by ID. */
-  quoted: Record<string, Post>;
-}
-
 export interface ConversationResponse {
   rootId: string;
   /** Post the pasted URL pointed at, when it wasn't the root. */
@@ -87,8 +74,6 @@ export interface FetchCost {
 export interface RefreshResponse extends ConversationResponse {
   /** Posts added by this refresh. */
   newCount: number;
-  /** True when the refresh was a free same-day full re-read (metrics updated). */
-  metricsUpdated: boolean;
   cost?: FetchCost;
 }
 

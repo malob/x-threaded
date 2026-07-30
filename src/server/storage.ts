@@ -8,13 +8,6 @@ export interface ConversationMeta {
   fetchedAt: string;
 }
 
-export interface ConversationRowSummary {
-  rootId: string;
-  postCount: number;
-  unreadCount: number;
-  fetchedAt: string;
-}
-
 /**
  * Storage backend for conversations, posts, and read state. Async so the
  * same interface can be backed by bun:sqlite (sync under the hood, used by
@@ -24,7 +17,6 @@ export interface Storage {
   getConversationMeta(rootId: string): Promise<Omit<ConversationMeta, "rootId"> | null>;
   upsertConversation(meta: ConversationMeta): Promise<void>;
   hasConversation(rootId: string): Promise<boolean>;
-  listConversations(): Promise<ConversationRowSummary[]>;
 
   upsertPosts(posts: Post[]): Promise<void>;
   getPosts(conversationId: string): Promise<Post[]>;
@@ -163,8 +155,6 @@ export interface ConversationRow {
   root_text: string;
   root_created_at: string;
   fetched_at: string;
-  post_count: number;
-  unread_count: number;
 }
 
 export function rowToPost(row: PostRow): Post {
@@ -189,15 +179,6 @@ export function rowToPost(row: PostRow): Post {
     entities: row.entities_json ? (JSON.parse(row.entities_json) as PostEntities) : null,
     quotedPostId: row.quoted_post_id,
     media: row.media_json ? (JSON.parse(row.media_json) as MediaItem[]) : null,
-    fetchedAt: row.fetched_at,
-  };
-}
-
-export function rowToSummary(row: ConversationRow): ConversationRowSummary {
-  return {
-    rootId: row.root_id,
-    postCount: row.post_count,
-    unreadCount: row.unread_count,
     fetchedAt: row.fetched_at,
   };
 }

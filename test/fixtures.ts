@@ -33,7 +33,15 @@ function identity(
   createdAt: string | undefined,
 ): { id: string; createdAt: string } {
   if (id !== undefined && createdAt !== undefined) return { id, createdAt };
-  if (id !== undefined) return { id, createdAt: new Date(snowflakeMs(id)).toISOString() };
+  if (id !== undefined) {
+    const ms = snowflakeMs(id);
+    if (ms === null) {
+      throw new Error(
+        `makePost: id ${id} is not a snowflake, so createdAt can't be derived — pass createdAt too`,
+      );
+    }
+    return { id, createdAt: new Date(ms).toISOString() };
+  }
   if (createdAt !== undefined) return { id: snowflakeId(createdAt), createdAt };
   const ms = BASE_MS + nextIndex++ * STEP_MS;
   return { id: snowflakeId(ms), createdAt: new Date(ms).toISOString() };

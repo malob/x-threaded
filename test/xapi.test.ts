@@ -3,7 +3,8 @@ import { XApi } from "../src/server/xapi";
 import { snowflakeMs } from "../src/shared/snowflake";
 import type { Post } from "../src/shared/types";
 import { makePost, snowflakeId } from "./fixtures";
-import { makeTestApp } from "./harness";
+import { makeBookmarkApp, makeTestApp } from "./harness";
+import type { Storage } from "../src/server/storage";
 import { withMockFetch } from "./setup";
 
 /** A conversation root old enough to be outside any default search window. */
@@ -122,7 +123,7 @@ describe("fetchConversation search window", () => {
       const startTime = urls[0]?.searchParams.get("start_time") ?? "";
       // Second-precision RFC3339 is what /tweets/search/all documents.
       expect(startTime).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/);
-      expect(Date.parse(startTime)).toBe(snowflakeMs(ROOT_ID) - HOUR_MS);
+      expect(Date.parse(startTime)).toBe(snowflakeMs(ROOT_ID)! - HOUR_MS);
     } finally {
       restore();
     }
@@ -218,33 +219,8 @@ describe("getBookmarksByFolder completeness", () => {
 });
 
 describe("POST /api/bookmarks/sync reconciliation", () => {
-  /** The sync route with a folder chosen and a canned folder enumeration. */
-  async function syncApp(folderPosts: Post[], complete: boolean) {
-    const { app, store, xapi } = makeTestApp({
-      oauth: { clientId: "client", clientSecret: "secret" },
-    });
-    // An unexpired token with the user ID already cached: userContext resolves
-    // from the store alone, so neither a refresh nor getMe reaches the network.
-    await store.putOAuthTokens("self", {
-      accessToken: "user-token",
-      refreshToken: "refresh-token",
-      expiresAt: Date.now() + 60 * 60 * 1000,
-      scope: "tweet.read users.read bookmark.read",
-      userId: "u1",
-    });
-    await app.request("/api/settings", {
-      method: "PATCH",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ bookmarkFolderId: "folder1", bookmarkFolderName: "Reading" }),
-    });
-    xapi.onGetBookmarksByFolder = () => ({ posts: folderPosts, complete });
-    return { app, store, xapi };
-  }
-
   /** A bookmark-sourced saved item the enumeration didn't return. */
-  async function seedUnseenBookmark(
-    store: Awaited<ReturnType<typeof syncApp>>["store"],
-  ): Promise<Post> {
+  async function seedUnseenBookmark(store: Storage): Promise<Post> {
     const post = makePost();
     await store.upsertPosts([post]);
     await store.addSavedItems([
@@ -255,7 +231,7 @@ describe("POST /api/bookmarks/sync reconciliation", () => {
 
   it("keeps unseen bookmarks when the folder scan didn't finish", async () => {
     const inFolder = makePost();
-    const { app, store } = await syncApp([inFolder], false);
+    const { app, store } = await makeBookmarkApp([inFolder], false);
     const beyondTheCap = await seedUnseenBookmark(store);
 
     const response = await app.request("/api/bookmarks/sync", { method: "POST" });
@@ -269,7 +245,7 @@ describe("POST /api/bookmarks/sync reconciliation", () => {
 
   it("removes vanished bookmarks once the whole folder was seen", async () => {
     const inFolder = makePost();
-    const { app, store } = await syncApp([inFolder], true);
+    const { app, store } = await makeBookmarkApp([inFolder], true);
     const unbookmarked = await seedUnseenBookmark(store);
 
     const response = await app.request("/api/bookmarks/sync", { method: "POST" });

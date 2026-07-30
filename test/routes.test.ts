@@ -1,65 +1,17 @@
 import { describe, expect, it } from "bun:test";
-import type { Hono } from "hono";
-import type { OAuthConfig } from "../src/server/oauth";
-import type { Storage } from "../src/server/storage";
+import { SELF_ID } from "../src/server/oauth";
 import type { OwnPostsResponse, Post } from "../src/shared/types";
 import { makePost } from "./fixtures";
-import { makeTestApp } from "./harness";
-
-const OAUTH: OAuthConfig = { clientId: "client", clientSecret: "secret" };
-/** The user ID makePost attributes its posts to. */
-const SELF_USER_ID = "100";
-
-/**
- * An app with OAuth configured and unexpired tokens stored, including the
- * cached user ID — so userContext() resolves without a refresh or a getMe and
- * any X call a test records is one the route itself chose to make.
- */
-async function makeAuthedApp(): Promise<ReturnType<typeof makeTestApp>> {
-  const harness = makeTestApp({ oauth: OAUTH });
-  await harness.store.putOAuthTokens("self", {
-    accessToken: "access",
-    refreshToken: "refresh",
-    expiresAt: Date.now() + 60 * 60 * 1000,
-    scope: "tweet.read users.read",
-    userId: SELF_USER_ID,
-  });
-  return harness;
-}
-
-/** POST /api/conversations with the usual JSON body. */
-async function fetchConversationRequest(
-  app: Hono,
-  url: string,
-  extra: Record<string, unknown> = {},
-): Promise<Response> {
-  return await app.request("/api/conversations", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ url, ...extra }),
-  });
-}
-
-/** Posts plus the conversation row — i.e. what a completed fetch leaves behind. */
-async function seedConversation(store: Storage, root: Post, replies: Post[] = []): Promise<void> {
-  await store.upsertPosts([root, ...replies]);
-  await store.upsertConversation({
-    rootId: root.id,
-    rootAuthorHandle: root.authorHandle,
-    rootText: root.text,
-    rootCreatedAt: root.createdAt,
-    fetchedAt: new Date().toISOString(),
-  });
-}
-
-/** The method names of every X call the route made, in order. */
-function methods(xapi: { calls: { method: string }[] }): string[] {
-  return xapi.calls.map((call) => call.method);
-}
-
-function replyTo(root: Post, overrides: Partial<Post> = {}): Post {
-  return makePost({ conversationId: root.id, parentId: root.id, ...overrides });
-}
+import {
+  SELF_USER_ID,
+  TEST_OAUTH,
+  fetchConversationRequest,
+  makeAuthedApp,
+  makeTestApp,
+  methods,
+  replyTo,
+  seedConversation,
+} from "./harness";
 
 describe("POST /api/conversations — cache-first resolution", () => {
   it("serves a cached conversation without any X call", async () => {
@@ -270,7 +222,7 @@ describe("GET /api/auth/status — answered from the store", () => {
     expect(body).toMatchObject({
       configured: true,
       authorized: true,
-      scopes: ["tweet.read", "users.read"],
+      scopes: ["tweet.read", "users.read", "bookmark.read"],
     });
     expect(body.expiresAt).toBeNumber();
     // Deferred to Stage 3's token model; the inbox already guards it.
@@ -279,8 +231,8 @@ describe("GET /api/auth/status — answered from the store", () => {
   });
 
   it("still reports authorized when the stored token has expired", async () => {
-    const { app, store, xapi } = makeTestApp({ oauth: OAUTH });
-    await store.putOAuthTokens("self", {
+    const { app, store, xapi } = makeTestApp({ oauth: TEST_OAUTH });
+    await store.putOAuthTokens(SELF_ID, {
       accessToken: "stale",
       refreshToken: "refresh",
       expiresAt: Date.now() - 60 * 1000,
@@ -298,7 +250,7 @@ describe("GET /api/auth/status — answered from the store", () => {
   });
 
   it("offers the login URL when nothing is stored", async () => {
-    const { app, xapi } = makeTestApp({ oauth: OAUTH });
+    const { app, xapi } = makeTestApp({ oauth: TEST_OAUTH });
 
     const response = await app.request("/api/auth/status");
 
@@ -324,9 +276,9 @@ describe("GET /api/auth/status — answered from the store", () => {
 
 describe("userContext token writes", () => {
   it("does not revive a pre-rotation token when a refresh lands during getMe", async () => {
-    const { app, store, xapi } = makeTestApp({ oauth: OAUTH });
+    const { app, store, xapi } = makeTestApp({ oauth: TEST_OAUTH });
     // Valid tokens with no cached user ID, so userContext must call getMe.
-    await store.putOAuthTokens("self", {
+    await store.putOAuthTokens(SELF_ID, {
       accessToken: "access",
       refreshToken: "refresh-old",
       expiresAt: Date.now() + 60 * 60 * 1000,
@@ -336,7 +288,7 @@ describe("userContext token writes", () => {
     xapi.onGetMe = async () => {
       // A rotation lands while getMe is in flight; writing the earlier
       // snapshot back would revive the dead refresh token.
-      await store.putOAuthTokens("self", {
+      await store.putOAuthTokens(SELF_ID, {
         accessToken: "access-rotated",
         refreshToken: "refresh-rotated",
         expiresAt: Date.now() + 2 * 60 * 60 * 1000,
@@ -350,7 +302,7 @@ describe("userContext token writes", () => {
     const response = await app.request("/api/bookmarks/folders");
     expect(response.status).toBe(200);
 
-    const stored = await store.getOAuthTokens("self");
+    const stored = await store.getOAuthTokens(SELF_ID);
     expect(stored?.refreshToken).toBe("refresh-rotated");
     expect(stored?.userId).toBe("42");
   });

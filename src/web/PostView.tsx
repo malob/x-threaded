@@ -7,6 +7,7 @@ import {
   type ReactNode,
 } from "react";
 import type { Post } from "../shared/types";
+import { xPostUrl } from "../shared/urls";
 import { PostText } from "./PostText";
 
 /**
@@ -40,7 +41,7 @@ function ClampedText({ lines, children }: { lines: number; children: ReactNode }
 }
 
 export function postUrl(post: Post): string {
-  return `https://x.com/${post.authorHandle}/status/${post.id}`;
+  return xPostUrl(post.authorHandle, post.id);
 }
 
 function formatTime(iso: string): string {
@@ -158,7 +159,7 @@ function QuoteCard({
     return (
       <a
         className="quote-card quote-card-link"
-        href={`https://x.com/i/status/${quotedId}`}
+        href={xPostUrl(undefined, quotedId)}
         target="_blank"
         rel="noopener noreferrer"
       >
@@ -203,7 +204,6 @@ export function PostView({
   className,
   onClick,
   leading,
-  metaSuffix,
 }: {
   post: Post;
   quoted: Record<string, Post>;
@@ -214,8 +214,6 @@ export function PostView({
   onClick?: MouseEventHandler<HTMLDivElement>;
   /** Rendered before the avatar in the header (e.g. an unread dot). */
   leading?: ReactNode;
-  /** Rendered at the end of the header (e.g. an orphan badge). */
-  metaSuffix?: ReactNode;
 }) {
   return (
     <div id={id} className={className ?? "post"} onClick={onClick}>
@@ -224,7 +222,6 @@ export function PostView({
         <Avatar url={post.authorAvatarUrl} />
         <span className="name">{post.authorName}</span> @{post.authorHandle} ·{" "}
         {formatTime(post.createdAt)}
-        {metaSuffix}
       </div>
       <ClampedText lines={6}>
         <PostText text={displayText ?? post.text} post={post} />

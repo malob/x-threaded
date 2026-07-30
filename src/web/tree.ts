@@ -284,9 +284,19 @@ function attachPlaceholders(
     if (deficit > 0) deficits.set(node.post.id, deficit);
   }
 
-  const missingIds = [...orphansByParent.keys()].sort((a, b) => snowflakeMs(a) - snowflakeMs(b));
-  for (const missingId of missingIds) {
+  // A missing parent's ID is the only clock we have for it, so one that isn't
+  // a snowflake can be neither dated nor placed. Its replies attach to the
+  // root directly — the same fallback an ambiguous placement takes — rather
+  // than getting a placeholder with an invented timestamp.
+  const missing: { id: string; createdMs: number }[] = [];
+  for (const [missingId, children] of orphansByParent) {
     const createdMs = snowflakeMs(missingId);
+    if (createdMs === null) root.children.push(...children);
+    else missing.push({ id: missingId, createdMs });
+  }
+
+  missing.sort((a, b) => a.createdMs - b.createdMs);
+  for (const { id: missingId, createdMs } of missing) {
     const candidates = [...deficits.keys()].filter(
       (id) => Date.parse(nodes.get(id)!.post.createdAt) < createdMs,
     );

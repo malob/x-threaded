@@ -11,20 +11,7 @@ import {
 import { Inbox } from "./Inbox";
 import { Thread } from "./Thread";
 import { estimateFetchUsd, formatUsd } from "../shared/pricing";
-
-/**
- * Routes mirror x.com so a post URL becomes an app URL by swapping the
- * domain: /<handle>/status/<postId>. The handle is decorative (as on X);
- * the post ID identifies both the conversation and the focus post.
- */
-function parseRoute(pathname: string): { postId: string } | null {
-  const match = pathname.match(/^\/[A-Za-z0-9_]{1,15}\/status(?:es)?\/(\d+)/);
-  return match ? { postId: match[1]! } : null;
-}
-
-function postPath(handle: string | undefined, postId: string): string {
-  return `/${handle ?? "i"}/status/${postId}`;
-}
+import { appPath, parsePostPath, xPostUrl } from "../shared/urls";
 
 export function App() {
   const [url, setUrl] = useState("");
@@ -78,7 +65,7 @@ export function App() {
         // Route to the post anyway, so reloading returns to this prompt
         // rather than the inbox. The handle is unknown until it's fetched;
         // "i" is the same placeholder x.com uses.
-        if (push) history.pushState({}, "", postPath(undefined, postId));
+        if (push) history.pushState({}, "", appPath(undefined, postId));
         return;
       }
       const cached = await getConversation(rootId);
@@ -86,7 +73,7 @@ export function App() {
       setCurrent({ ...cached, focusId });
       if (push) {
         const post = cached.posts.find((p) => p.id === postId);
-        history.pushState({}, "", postPath(post?.authorHandle, postId));
+        history.pushState({}, "", appPath(post?.authorHandle, postId));
       }
       void autoRefresh(rootId);
     } catch (e) {
@@ -104,7 +91,7 @@ export function App() {
       setPending(null);
       const shownId = response.focusId ?? response.rootId;
       const post = response.posts.find((p) => p.id === shownId);
-      const path = postPath(post?.authorHandle, shownId);
+      const path = appPath(post?.authorHandle, shownId);
       if (push) history.pushState({}, "", path);
       else history.replaceState({}, "", path);
     } catch (e) {
@@ -127,8 +114,8 @@ export function App() {
 
   useEffect(() => {
     const applyLocation = () => {
-      const route = parseRoute(location.pathname);
-      if (route) void openPost(route.postId, false);
+      const postId = parsePostPath(location.pathname);
+      if (postId) void openPost(postId, false);
       else goHome(false);
     };
     applyLocation();
@@ -157,7 +144,7 @@ export function App() {
       setPending(null);
       const shownId = response.focusId ?? response.rootId;
       const post = response.posts.find((p) => p.id === shownId);
-      history.pushState({}, "", postPath(post?.authorHandle, shownId));
+      history.pushState({}, "", appPath(post?.authorHandle, shownId));
       if (response.fromCache) void autoRefresh(response.rootId);
     } catch (e) {
       setError((e as Error).message);
@@ -224,7 +211,7 @@ export function App() {
               <span className="post-meta"> {formatUsd(pendingCost)}</span>
             )}
             {"  "}
-            <a href={`https://x.com/i/status/${pending}`} target="_blank" rel="noopener noreferrer">
+            <a href={xPostUrl(undefined, pending)} target="_blank" rel="noopener noreferrer">
               view on x.com ↗
             </a>
           </p>

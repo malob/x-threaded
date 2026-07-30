@@ -4,10 +4,8 @@ import { MAX_SQL_PARAMS, chunked } from "./chunk";
 import {
   SCHEMA,
   rowToPost,
-  rowToSummary,
   type ConversationMeta,
   type ConversationRow,
-  type ConversationRowSummary,
   type OAuthTokens,
   type PostRow,
   type SavedItem,
@@ -53,10 +51,7 @@ export class SqliteStore implements Storage {
 
   async getConversationMeta(rootId: string): Promise<Omit<ConversationMeta, "rootId"> | null> {
     const row = this.db
-      .query<
-        Omit<ConversationRow, "post_count" | "unread_count">,
-        { $id: string }
-      >(`SELECT * FROM conversations WHERE root_id = $id`)
+      .query<ConversationRow, { $id: string }>(`SELECT * FROM conversations WHERE root_id = $id`)
       .get({ $id: rootId });
     if (!row) return null;
     return {
@@ -90,21 +85,6 @@ export class SqliteStore implements Storage {
       )
       .get({ $id: rootId });
     return row !== null;
-  }
-
-  async listConversations(): Promise<ConversationRowSummary[]> {
-    const rows = this.db
-      .query<ConversationRow, []>(
-        `SELECT c.*, COUNT(p.id) AS post_count,
-                SUM(CASE WHEN p.id IS NOT NULL AND r.post_id IS NULL THEN 1 ELSE 0 END) AS unread_count
-         FROM conversations c
-         LEFT JOIN posts p ON p.conversation_id = c.root_id
-         LEFT JOIN read_state r ON r.post_id = p.id
-         GROUP BY c.root_id
-         ORDER BY c.fetched_at DESC`,
-      )
-      .all();
-    return rows.map(rowToSummary);
   }
 
   async upsertPosts(posts: Post[]): Promise<void> {

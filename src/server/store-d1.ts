@@ -2,10 +2,8 @@ import type { Post } from "../shared/types";
 import { MAX_SQL_PARAMS, chunked } from "./chunk";
 import {
   rowToPost,
-  rowToSummary,
   type ConversationMeta,
   type ConversationRow,
-  type ConversationRowSummary,
   type OAuthTokens,
   type PostRow,
   type SavedItem,
@@ -40,7 +38,7 @@ export class D1Store implements Storage {
     const row = await this.db
       .prepare(`SELECT * FROM conversations WHERE root_id = ?`)
       .bind(rootId)
-      .first<Omit<ConversationRow, "post_count" | "unread_count">>();
+      .first<ConversationRow>();
     if (!row) return null;
     return {
       rootAuthorHandle: row.root_author_handle,
@@ -67,21 +65,6 @@ export class D1Store implements Storage {
       .bind(rootId)
       .first<{ root_id: string }>();
     return row !== null;
-  }
-
-  async listConversations(): Promise<ConversationRowSummary[]> {
-    const { results } = await this.db
-      .prepare(
-        `SELECT c.*, COUNT(p.id) AS post_count,
-                SUM(CASE WHEN p.id IS NOT NULL AND r.post_id IS NULL THEN 1 ELSE 0 END) AS unread_count
-         FROM conversations c
-         LEFT JOIN posts p ON p.conversation_id = c.root_id
-         LEFT JOIN read_state r ON r.post_id = p.id
-         GROUP BY c.root_id
-         ORDER BY c.fetched_at DESC`,
-      )
-      .all<ConversationRow>();
-    return results.map(rowToSummary);
   }
 
   async upsertPosts(posts: Post[]): Promise<void> {

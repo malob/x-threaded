@@ -10,16 +10,15 @@ const AUTHORIZE_URL = "https://x.com/i/oauth2/authorize";
 export const SCOPES = ["tweet.read", "users.read", "bookmark.read", "offline.access"];
 /** Refresh this long before actual expiry so in-flight requests don't race it. */
 const REFRESH_MARGIN_MS = 5 * 60 * 1000;
-/** Row id for the single-user deployment. */
-const SELF = "self";
+/**
+ * Row id for the single-user deployment: every stored grant, and every route
+ * that reads one, keys off this one constant rather than a loose "self".
+ */
+export const SELF_ID = "self";
 
 export interface OAuthConfig {
   clientId: string;
   clientSecret: string;
-  /** Seeds the token store on first use (from the developer portal's
-   * "generate access and refresh token for your own account"). */
-  seedAccessToken?: string;
-  seedRefreshToken?: string;
 }
 
 export class OAuthError extends Error {}
@@ -100,7 +99,7 @@ export async function exchangeCode(
     expiresAt: Date.now() + body.expires_in * 1000,
     scope: body.scope ?? SCOPES.join(" "),
   };
-  await store.putOAuthTokens(SELF, tokens);
+  await store.putOAuthTokens(SELF_ID, tokens);
   return tokens;
 }
 
@@ -116,9 +115,6 @@ interface TokenResponse {
   error?: string;
   error_description?: string;
 }
-
-/** Row id for the single-user deployment (exported for callers that reset it). */
-export const SELF_ID = SELF;
 
 /**
  * Exchange a refresh token for a new access token. X rotates refresh tokens:
@@ -179,7 +175,7 @@ async function refreshAndStore(
   tokens: OAuthTokens,
 ): Promise<string> {
   const refreshed = await refresh(config, tokens.refreshToken);
-  await store.putOAuthTokens(SELF, {
+  await store.putOAuthTokens(SELF_ID, {
     ...refreshed,
     scope: refreshed.scope || tokens.scope,
     userId: tokens.userId ?? null,
@@ -198,19 +194,10 @@ export async function getUserAccessToken(
 ): Promise<string | null> {
   if (!config) return null;
 
-  let tokens = await store.getOAuthTokens(SELF);
-
-  if (!tokens) {
-    if (!config.seedAccessToken || !config.seedRefreshToken) return null;
-    // Treat the seed as already expired: the very first call refreshes it,
-    // which both validates the pair and starts rotation in the database.
-    tokens = {
-      accessToken: config.seedAccessToken,
-      refreshToken: config.seedRefreshToken,
-      expiresAt: 0,
-      scope: "",
-    };
-  }
+  // Only /auth/login mints a grant; with no stored row the deployment has
+  // simply never been authorized.
+  const tokens = await store.getOAuthTokens(SELF_ID);
+  if (!tokens) return null;
 
   if (Date.now() < tokens.expiresAt - REFRESH_MARGIN_MS) {
     return tokens.accessToken;
@@ -228,8 +215,3 @@ export async function getUserAccessToken(
   }
 }
 
-/** Scopes granted to the stored token, for feature gating and diagnostics. */
-export async function getGrantedScopes(store: Storage): Promise<string[]> {
-  const tokens = await store.getOAuthTokens(SELF);
-  return tokens?.scope ? tokens.scope.split(" ") : [];
-}

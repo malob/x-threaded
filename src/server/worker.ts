@@ -15,8 +15,6 @@ interface Env {
   /** OAuth 2.0 user context; absent means user-context features are off. */
   X_OAUTH_CLIENT_ID?: string;
   X_OAUTH_CLIENT_SECRET?: string;
-  X_OAUTH_ACCESS_TOKEN?: string;
-  X_OAUTH_REFRESH_TOKEN?: string;
 }
 
 /**
@@ -56,12 +54,7 @@ export default {
       maxPosts,
       oauth:
         env.X_OAUTH_CLIENT_ID && env.X_OAUTH_CLIENT_SECRET
-          ? {
-              clientId: env.X_OAUTH_CLIENT_ID,
-              clientSecret: env.X_OAUTH_CLIENT_SECRET,
-              seedAccessToken: env.X_OAUTH_ACCESS_TOKEN,
-              seedRefreshToken: env.X_OAUTH_REFRESH_TOKEN,
-            }
+          ? { clientId: env.X_OAUTH_CLIENT_ID, clientSecret: env.X_OAUTH_CLIENT_SECRET }
           : null,
     });
     return app.fetch(request, env, ctx as Parameters<typeof app.fetch>[2]);

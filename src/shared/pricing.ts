@@ -3,7 +3,6 @@
  * https://docs.x.com/x-api/getting-started/pricing
  */
 export const POST_READ_USD = 0.005;
-export const OWNED_READ_USD = 0.001;
 
 /**
  * Posts a conversation is likely to contain, from its root's reply count.

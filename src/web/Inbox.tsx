@@ -17,6 +17,7 @@ import {
 } from "./api";
 import { PostView } from "./PostView";
 import { estimateFetchUsd, formatUsd } from "../shared/pricing";
+import { xPostUrl } from "../shared/urls";
 
 type Tab = "saved" | "yours";
 
@@ -276,7 +277,7 @@ export function Inbox({ onOpenPost }: { onOpenPost: (postId: string) => void }) 
                     // The folder is the source of truth: removing it here
                     // would just come back on the next sync.
                     <a
-                      href={`https://x.com/${item.post.authorHandle}/status/${item.post.id}`}
+                      href={xPostUrl(item.post.authorHandle, item.post.id)}
                       target="_blank"
                       rel="noopener noreferrer"
                       title="Un-bookmark on x.com to remove it from this list"
