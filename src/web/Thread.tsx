@@ -288,7 +288,13 @@ export function Thread({
   const [cursorId, setCursorId] = useState<string | null>(null);
   const [helpOpen, setHelpOpen] = useState(false);
   const pendingRef = useRef<string | null>(null);
-  const scrollModeRef = useRef<ScrollLogicalPosition>("nearest");
+  /**
+   * Scroll-to-cursor happens only when something explicitly requests it
+   * (keyboard motions, unread jumps, deep-link focus) — never as a side
+   * effect of fold or cursor state changing, so mouse clicks don't yank the
+   * viewport back to the cursor.
+   */
+  const scrollRequestRef = useRef<ScrollLogicalPosition | null>(null);
 
   useEffect(() => {
     // A deep-linked focus post may sit behind closed folds; open its ancestry.
@@ -299,7 +305,7 @@ export function Thread({
         opened.set(current, true);
         current = parents.get(current) ?? null;
       }
-      scrollModeRef.current = "center";
+      scrollRequestRef.current = "center";
     }
     setFolds(opened);
     setCursorId(conversation.focusId ?? conversation.rootId);
@@ -307,11 +313,12 @@ export function Thread({
   }, [conversation.rootId, conversation.focusId]);
 
   useEffect(() => {
-    if (!cursorId) return;
+    const mode = scrollRequestRef.current;
+    if (!mode || !cursorId) return;
+    scrollRequestRef.current = null;
     document
       .getElementById(`post-${cursorId}`)
-      ?.scrollIntoView({ block: scrollModeRef.current, behavior: "auto" });
-    scrollModeRef.current = "nearest";
+      ?.scrollIntoView({ block: mode, behavior: "auto" });
   }, [cursorId, folds]);
 
   const isOpen = (id: string): boolean => folds.get(id) ?? !owners.segmentFolds.has(id);
@@ -354,7 +361,9 @@ export function Thread({
       return null;
     };
     const moveCursor = (id: string | undefined) => {
-      if (id) setCursorId(id);
+      if (!id) return;
+      scrollRequestRef.current ??= "nearest";
+      setCursorId(id);
     };
     const openAncestors = (id: string) => {
       setFolds((prev) => {
@@ -375,7 +384,7 @@ export function Thread({
         const node = allOrder[i]!;
         if (unread.has(node.post.id)) {
           openAncestors(node.post.id);
-          scrollModeRef.current = "center";
+          scrollRequestRef.current = "center";
           setCursorId(node.post.id);
           onSetRead([node.post.id], true);
           return;
@@ -405,12 +414,17 @@ export function Thread({
         else handled = false;
       } else if (pending === "z") {
         const owner = cursorId ? ownedBy(cursorId) : null;
+        // Keyboard fold changes keep the cursor in view; mouse ones don't.
+        const foldAndFollow = (id: string, open: boolean) => {
+          scrollRequestRef.current ??= "nearest";
+          setFold(id, open);
+        };
         switch (key) {
           case "a":
-            if (owner) setFold(owner, !isOpen(owner));
+            if (owner) foldAndFollow(owner, !isOpen(owner));
             break;
           case "o":
-            if (owner) setFold(owner, true);
+            if (owner) foldAndFollow(owner, true);
             break;
           case "c":
             if (owner) {
@@ -422,6 +436,7 @@ export function Thread({
           case "C": {
             if (!cursor) break;
             const open = key === "O";
+            scrollRequestRef.current ??= "nearest";
             setFolds((prev) => {
               const next = new Map(prev);
               for (const id of scopeIds(cursor, spine)) {
@@ -434,13 +449,13 @@ export function Thread({
           case "R":
           case "M": {
             const open = key === "R";
+            scrollRequestRef.current ??= "nearest";
             setFolds(new Map(allOwnerIds.map((id) => [id, open])));
             if (key === "M") moveCursor(conversation.rootId);
             break;
           }
           case "z":
             if (cursorId) {
-              scrollModeRef.current = "center";
               document
                 .getElementById(`post-${cursorId}`)
                 ?.scrollIntoView({ block: "center" });
@@ -520,7 +535,10 @@ export function Thread({
             break;
           case "Enter": {
             const owner = cursorId ? ownedBy(cursorId) : null;
-            if (owner) setFold(owner, !isOpen(owner));
+            if (owner) {
+              scrollRequestRef.current ??= "nearest";
+              setFold(owner, !isOpen(owner));
+            }
             break;
           }
           case "g":
