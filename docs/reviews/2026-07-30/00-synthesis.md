@@ -22,9 +22,9 @@ Seven independent reviewers, each covering the whole repo from its specialty, re
 
 Every finding below was then re-verified against the source by the session lead before
 inclusion — file:line references checked, dead-code claims re-grepped, the two
-Codex-unique discoveries confirmed in code. One finding (D1’s bound-parameter limit)
-rests on Cloudflare’s documented limit plus code inspection; the deployed probe that
-settles it empirically is Stage 0B item 1.
+Codex-unique discoveries confirmed in code. The D1 bound-parameter limit was
+additionally confirmed *empirically against the deployed Worker* (see C1): exactly
+100 parameters, bisected live on 2026-07-30.
 
 After synthesis, the plan was stress-tested in a four-round adversarial dialogue
 between Claude and Codex (Part 5); the findings and roadmap below incorporate its
@@ -72,9 +72,13 @@ data.” Also breaks: `/api/saved` past 100 items, quoted-post hydration past 10
 distinct quotes (making a *cached* conversation unviewable), and `R` on a 100+ post
 subtree. bun:sqlite allows 32k parameters, so local dev can never reproduce it — and
 (established in round 2 via miniflare source) **local workerd doesn’t either**: the
-limit is a D1 *service policy* not enforced by any local simulation, so the only
-honest gate is unit tests against a limit-enforcing fake plus a one-time deployed
-probe (150 fake IDs through `read-state` with `read: false` — harmless by design).
+limit is a D1 *service policy* not enforced by any local simulation, so the honest
+gate is unit tests against a limit-enforcing fake plus a one-time deployed probe.
+
+**Probe executed 2026-07-30 against the live Worker** (fake 9×10¹⁸-range IDs through
+`read-state` with `read: false`, matching zero rows): 100 bound params → 200 OK;
+101 → 500 `D1_ERROR: too many SQL variables`. The limit is exactly 100, confirmed in
+production. Chunk sizes of 99 (queries with one fixed extra binding) and 100 stand.
 
 **Fix:** chunking in `SqlStore`, sized by the driver’s declared `maxParams` (a raw
 driver can’t parse SQL, so the store owns it) and counting fixed extra bindings like
