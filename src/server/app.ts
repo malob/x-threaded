@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import { clamp, parseIntStrict } from "../shared/num";
 import { POST_READ_USD } from "../shared/pricing";
 import type {
   ConversationListResponse,
@@ -31,6 +32,11 @@ export interface AppDeps {
 
 const BOOKMARK_FOLDER_KEY = "bookmark_folder_id";
 const BOOKMARK_FOLDER_NAME_KEY = "bookmark_folder_name";
+
+/** How many of the user's threads /api/me/posts returns when it isn't told. */
+const DEFAULT_THREADS = 10;
+/** Every extra thread asked for is more timeline to page through, and pages bill. */
+const MAX_THREADS = 50;
 
 /** The API routes, independent of runtime (Bun server or Cloudflare Worker). */
 export function buildApp({ store, xapi, maxPosts, oauth = null }: AppDeps): Hono {
@@ -324,8 +330,17 @@ export function buildApp({ store, xapi, maxPosts, oauth = null }: AppDeps): Hono
   }
 
   app.get("/api/me/posts", async (c) => {
+    // Parse before spending: Number("abc") is NaN, which makes both loop
+    // guards below permanently false and pages the whole timeline for an
+    // empty response (2026-07-30 review, C2).
+    const raw = c.req.query("threads");
+    const requestedThreads = raw === undefined ? DEFAULT_THREADS : parseIntStrict(raw);
+    if (requestedThreads === null) {
+      return c.json({ error: "threads must be an integer" }, 400);
+    }
+    const target = clamp(requestedThreads, 1, MAX_THREADS);
+
     const { token, userId } = await userContext();
-    const target = Number(c.req.query("threads") ?? 10);
     // Keep scanning until there are enough threads the user actually
     // started. Counting raw conversations would overshoot, because replies
     // into other people's threads get filtered out afterwards.
@@ -362,29 +377,27 @@ export function buildApp({ store, xapi, maxPosts, oauth = null }: AppDeps): Hono
    * Whether user-context features (own posts, bookmarks) are available.
    * `configured` means this deployment has OAuth client credentials;
    * `authorized` means someone has completed /auth/login on it.
+   *
+   * Answered entirely from the stored row: the inbox mounts this on every
+   * visit, and the old version paid a billable /2/users/me and could burn a
+   * single-use refresh token to answer it (2026-07-30 review, H1). An expired
+   * token still reads as authorized — renewing it is the next real request's
+   * job, and a grant that has actually gone bad is that request's error to
+   * report. The `user` field is therefore absent until Stage 3's token model
+   * persists the profile; the inbox already treats it as optional.
    */
   app.get("/api/auth/status", async (c) => {
     if (!oauth) return c.json({ configured: false, authorized: false });
-    try {
-      const token = await getUserAccessToken(store, oauth);
-      if (!token) {
-        return c.json({ configured: true, authorized: false, loginUrl: "/auth/login" });
-      }
-      const me = await xapi.getMe(token);
-      const stored = await store.getOAuthTokens("self");
-      return c.json({
-        configured: true,
-        authorized: true,
-        user: me,
-        scopes: stored?.scope ? stored.scope.split(" ") : [],
-        expiresAt: stored?.expiresAt ?? null,
-      });
-    } catch (err) {
-      return c.json(
-        { configured: true, authorized: false, error: (err as Error).message },
-        502,
-      );
+    const stored = await store.getOAuthTokens("self");
+    if (!stored) {
+      return c.json({ configured: true, authorized: false, loginUrl: "/auth/login" });
     }
+    return c.json({
+      configured: true,
+      authorized: true,
+      scopes: stored.scope ? stored.scope.split(" ") : [],
+      expiresAt: stored.expiresAt,
+    });
   });
 
   // Resolve a post ID to its cached conversation, without touching the X API.
@@ -434,7 +447,10 @@ export function buildApp({ store, xapi, maxPosts, oauth = null }: AppDeps): Hono
       return c.json({ error: "could not parse a post URL or ID from input" }, 400);
     }
 
-    const requested = await xapi.getPost(postId);
+    // Cache first: a stored post already carries its conversation ID, so a
+    // conversation we've fetched before is resolvable — and servable — for
+    // free. Only a post we've never seen is worth a billable lookup.
+    const requested = (await store.getPost(postId)) ?? (await xapi.getPost(postId));
     const rootId = requested.conversationId;
     const focusId = postId === rootId ? null : postId;
     const firstFetch = !(await store.hasConversation(rootId));
@@ -449,6 +465,24 @@ export function buildApp({ store, xapi, maxPosts, oauth = null }: AppDeps): Hono
       fetched.referenced.find((p) => p.id === rootId) ??
       (requested.id === rootId ? requested : await xapi.getPost(rootId));
 
+    const cost = await ingest(fetched, [requested, root]);
+
+    // A conversation you just pulled up is one you're about to read; unread is
+    // reserved for posts that arrive later.
+    if (firstFetch) await store.markConversationRead(rootId);
+
+    // Every explicit fetch lands in the saved queue as a manual entry —
+    // pasted URLs, but since ed8ea1a also inbox card clicks and deep links,
+    // so your own threads and a second root-keyed entry beside a bookmark
+    // both end up here. Whether that's wanted is Stage 5a's call (H5).
+    await store.addSavedItems([
+      { postId: rootId, source: "manual", addedAt: new Date().toISOString() },
+    ]);
+
+    // The row is the "cached" marker, so it commits last: anything that throws
+    // above leaves nothing to serve rather than an empty conversation the
+    // retry mistakes for a hit. Stage 5b's explicit lifecycle state replaces
+    // this ordering, which incremental page persistence will conflict with.
     await store.upsertConversation({
       rootId,
       rootAuthorHandle: root.authorHandle,
@@ -456,17 +490,6 @@ export function buildApp({ store, xapi, maxPosts, oauth = null }: AppDeps): Hono
       rootCreatedAt: root.createdAt,
       fetchedAt: new Date().toISOString(),
     });
-    const cost = await ingest(fetched, [requested, root]);
-
-    // A conversation you just pulled up is one you're about to read; unread is
-    // reserved for posts that arrive later.
-    if (firstFetch) await store.markConversationRead(rootId);
-
-    // Pasting a URL is a manual add: it belongs in the saved queue alongside
-    // bookmarked posts.
-    await store.addSavedItems([
-      { postId: rootId, source: "manual", addedAt: new Date().toISOString() },
-    ]);
 
     return c.json({
       ...(await conversationResponse(rootId, focusId, {
