@@ -137,6 +137,19 @@ export class D1Store implements Storage {
     return results.map(rowToPost);
   }
 
+  async postIdsReadToday(ids: string[]): Promise<Set<string>> {
+    if (ids.length === 0) return new Set();
+    const today = new Date().toISOString().slice(0, 10);
+    const placeholders = ids.map(() => "?").join(",");
+    const { results } = await this.db
+      .prepare(
+        `SELECT id FROM posts WHERE id IN (${placeholders}) AND substr(fetched_at, 1, 10) = ?`,
+      )
+      .bind(...ids, today)
+      .all<{ id: string }>();
+    return new Set((results ?? []).map((r) => r.id));
+  }
+
   async getPost(id: string): Promise<Post | null> {
     const row = await this.db
       .prepare(`SELECT * FROM posts WHERE id = ?`)

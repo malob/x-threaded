@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import { POST_READ_USD } from "../shared/pricing";
 import type {
   ConversationListResponse,
   ConversationResponse,
@@ -75,14 +76,25 @@ export function buildApp({ store, xapi, maxPosts, oauth = null }: AppDeps): Hono
     }
   }
 
-  /** Upsert a fetch result (posts + referenced) and resolve its quotes. */
-  async function ingest(fetched: FetchedConversation, extra: Post[] = []): Promise<void> {
+  /**
+   * Upsert a fetch result (posts + referenced) and resolve its quotes.
+   * Returns what it actually cost: posts we hadn't already read today, since
+   * same-day re-reads don't bill.
+   */
+  async function ingest(
+    fetched: FetchedConversation,
+    extra: Post[] = [],
+  ): Promise<{ posts: number; billable: number; usd: number }> {
     const byId = new Map(fetched.posts.map((p) => [p.id, p]));
     for (const post of extra) if (!byId.has(post.id)) byId.set(post.id, post);
     for (const post of fetched.referenced) if (!byId.has(post.id)) byId.set(post.id, post);
     const all = [...byId.values()];
+    // Check before upserting: writing the posts overwrites fetched_at.
+    const free = await store.postIdsReadToday(all.map((p) => p.id));
     await store.upsertPosts(all);
     await resolveQuotedPosts(all, byId);
+    const billable = all.length - free.size;
+    return { posts: all.length, billable, usd: billable * POST_READ_USD };
   }
 
   const app = new Hono();
@@ -381,7 +393,9 @@ export function buildApp({ store, xapi, maxPosts, oauth = null }: AppDeps): Hono
     const post = await store.getPost(c.req.param("postId"));
     const rootId =
       post && (await store.hasConversation(post.conversationId)) ? post.conversationId : null;
-    return c.json({ rootId });
+    // The reply count lets the client estimate a fetch before committing to
+    // it; null when we've never seen the post, so no estimate is shown.
+    return c.json({ rootId, replyCount: post?.metrics.replies ?? null });
   });
 
   app.get("/api/conversations", async (c) => {
@@ -442,7 +456,7 @@ export function buildApp({ store, xapi, maxPosts, oauth = null }: AppDeps): Hono
       rootCreatedAt: root.createdAt,
       fetchedAt: new Date().toISOString(),
     });
-    await ingest(fetched, [requested, root]);
+    const cost = await ingest(fetched, [requested, root]);
 
     // A conversation you just pulled up is one you're about to read; unread is
     // reserved for posts that arrive later.
@@ -454,12 +468,13 @@ export function buildApp({ store, xapi, maxPosts, oauth = null }: AppDeps): Hono
       { postId: rootId, source: "manual", addedAt: new Date().toISOString() },
     ]);
 
-    return c.json(
-      await conversationResponse(rootId, focusId, {
+    return c.json({
+      ...(await conversationResponse(rootId, focusId, {
         truncated: fetched.truncated,
         fromCache: false,
-      }),
-    );
+      })),
+      cost,
+    });
   });
 
   app.post("/api/conversations/:rootId/refresh", async (c) => {
@@ -476,15 +491,16 @@ export function buildApp({ store, xapi, maxPosts, oauth = null }: AppDeps): Hono
     const sameUtcDay = meta.fetchedAt.slice(0, 10) === new Date().toISOString().slice(0, 10);
     let truncated = false;
 
+    let cost: { posts: number; billable: number; usd: number };
     if (sameUtcDay) {
       const fetched = await xapi.fetchConversation(rootId, maxPosts);
-      await ingest(fetched);
+      cost = await ingest(fetched);
       await store.upsertConversation({ rootId, ...meta, fetchedAt: new Date().toISOString() });
       truncated = fetched.truncated;
     } else {
       const sinceId = await store.newestPostId(rootId);
       const fetched = await xapi.fetchConversation(rootId, maxPosts, sinceId ?? undefined);
-      await ingest(fetched);
+      cost = await ingest(fetched);
     }
 
     const newCount = (await store.existingPostIds(rootId)).size - before.size;
@@ -492,6 +508,7 @@ export function buildApp({ store, xapi, maxPosts, oauth = null }: AppDeps): Hono
       ...(await conversationResponse(rootId, null, { truncated, fromCache: false })),
       newCount,
       metricsUpdated: sameUtcDay,
+      cost,
     };
     return c.json(response);
   });

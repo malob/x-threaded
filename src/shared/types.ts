@@ -71,6 +71,17 @@ export interface ConversationResponse {
   truncated: boolean;
   /** True when served from the local cache without hitting the X API. */
   fromCache: boolean;
+  /** Present when this response involved API reads. */
+  cost?: FetchCost;
+}
+
+/** What an API call actually cost, after same-day deduplication. */
+export interface FetchCost {
+  /** Posts returned. */
+  posts: number;
+  /** Of those, ones we hadn't already read today — the ones that bill. */
+  billable: number;
+  usd: number;
 }
 
 export interface RefreshResponse extends ConversationResponse {
@@ -78,6 +89,7 @@ export interface RefreshResponse extends ConversationResponse {
   newCount: number;
   /** True when the refresh was a free same-day full re-read (metrics updated). */
   metricsUpdated: boolean;
+  cost?: FetchCost;
 }
 
 export interface ApiError {

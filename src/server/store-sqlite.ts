@@ -163,6 +163,18 @@ export class SqliteStore implements Storage {
       .map(rowToPost);
   }
 
+  async postIdsReadToday(ids: string[]): Promise<Set<string>> {
+    if (ids.length === 0) return new Set();
+    const today = new Date().toISOString().slice(0, 10);
+    const placeholders = ids.map(() => "?").join(",");
+    const rows = this.db
+      .query<{ id: string }, string[]>(
+        `SELECT id FROM posts WHERE id IN (${placeholders}) AND substr(fetched_at, 1, 10) = ?`,
+      )
+      .all(...ids, today);
+    return new Set(rows.map((r) => r.id));
+  }
+
   async getPost(id: string): Promise<Post | null> {
     const row = this.db
       .query<PostRow, { $id: string }>(`SELECT * FROM posts WHERE id = $id`)

@@ -14,6 +14,7 @@ import {
   type TreeNode,
 } from "./tree";
 import { PostView, postUrl } from "./PostView";
+import { formatUsd } from "../shared/pricing";
 
 interface Ctx {
   cursorId: string | null;
@@ -580,6 +581,12 @@ export function Thread({
     <div>
       <p className="notice">
         {conversation.posts.length} posts
+        {conversation.cost &&
+          (conversation.cost.billable > 0 ? (
+            <> · cost {formatUsd(conversation.cost.usd, false)}</>
+          ) : (
+            <> · free (already read today)</>
+          ))}
         {conversation.truncated && " · truncated at fetch cap"}
         {unread.size > 0 && (
           <>

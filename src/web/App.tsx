@@ -10,6 +10,7 @@ import {
 } from "./api";
 import { Inbox } from "./Inbox";
 import { Thread } from "./Thread";
+import { estimateFetchUsd, formatUsd } from "../shared/pricing";
 
 /**
  * Routes mirror x.com so a post URL becomes an app URL by swapping the
@@ -30,6 +31,8 @@ export function App() {
   const [current, setCurrent] = useState<ConversationResponse | null>(null);
   /** Post ID from a deep link whose conversation isn't cached; awaiting consent to fetch. */
   const [pending, setPending] = useState<string | null>(null);
+  /** Estimated cost of fetching `pending`, when the post itself is cached. */
+  const [pendingCost, setPendingCost] = useState<number | null>(null);
   const [loading, setLoading] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [newCount, setNewCount] = useState<number | null>(null);
@@ -52,19 +55,26 @@ export function App() {
   };
 
   /**
-   * Open the conversation containing a post, focused on it. When the
-   * conversation isn't cached, don't fetch — set `pending` so the UI can
-   * offer to (deep links must not spend API credits without a click).
+   * Open the conversation containing a post, focused on it.
+   *
+   * When it isn't cached, a deep link stops and asks first — the visitor has
+   * seen no price. Inbox cards pass `fetchIfMissing` because they display
+   * the estimated cost, so the click is already informed consent.
    */
-  const openPost = async (postId: string, push = true) => {
+  const openPost = async (postId: string, push = true, fetchIfMissing = false) => {
     setError(null);
     setNewCount(null);
     setPending(null);
     try {
-      const { rootId } = await resolvePost(postId);
+      const { rootId, replyCount } = await resolvePost(postId);
       if (!rootId) {
+        if (fetchIfMissing) {
+          await fetchConversation(postId, push);
+          return;
+        }
         setCurrent(null);
         setPending(postId);
+        setPendingCost(replyCount === null ? null : estimateFetchUsd(replyCount));
         // Route to the post anyway, so reloading returns to this prompt
         // rather than the inbox. The handle is unknown until it's fetched;
         // "i" is the same placeholder x.com uses.
@@ -84,22 +94,28 @@ export function App() {
     }
   };
 
-  const fetchPending = async () => {
-    if (!pending) return;
+  /** Fetch a conversation from the API and show it. */
+  const fetchConversation = async (postId: string, push = true) => {
     setLoading(true);
     setError(null);
     try {
-      const response = await loadConversation(pending);
+      const response = await loadConversation(postId);
       setCurrent(response);
       setPending(null);
       const shownId = response.focusId ?? response.rootId;
       const post = response.posts.find((p) => p.id === shownId);
-      history.replaceState({}, "", postPath(post?.authorHandle, shownId));
+      const path = postPath(post?.authorHandle, shownId);
+      if (push) history.pushState({}, "", path);
+      else history.replaceState({}, "", path);
     } catch (e) {
       setError((e as Error).message);
     } finally {
       setLoading(false);
     }
+  };
+
+  const fetchPending = async () => {
+    if (pending) await fetchConversation(pending, false);
   };
 
   const goHome = (push = true) => {
@@ -204,6 +220,9 @@ export function App() {
             <button onClick={() => void fetchPending()} disabled={loading}>
               {loading ? "Fetching…" : "Fetch conversation"}
             </button>
+            {pendingCost !== null && (
+              <span className="post-meta"> {formatUsd(pendingCost)}</span>
+            )}
             {"  "}
             <a href={`https://x.com/i/status/${pending}`} target="_blank" rel="noopener noreferrer">
               view on x.com ↗
@@ -220,7 +239,7 @@ export function App() {
           onMarkAllRead={markAllRead}
         />
       ) : (
-        <Inbox onOpenPost={(postId) => void openPost(postId)} />
+        <Inbox onOpenPost={(postId) => void openPost(postId, true, true)} />
       )}
     </main>
   );

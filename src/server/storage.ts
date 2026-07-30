@@ -29,6 +29,12 @@ export interface Storage {
   upsertPosts(posts: Post[]): Promise<void>;
   getPosts(conversationId: string): Promise<Post[]>;
   getPostsByIds(ids: string[]): Promise<Post[]>;
+  /**
+   * Which of these posts we already read today (UTC). X deduplicates reads
+   * within a UTC day, so those are free to read again — this is how actual
+   * spend is computed rather than guessed.
+   */
+  postIdsReadToday(ids: string[]): Promise<Set<string>>;
   getPost(id: string): Promise<Post | null>;
   hasPost(id: string): Promise<boolean>;
   newestPostId(conversationId: string): Promise<string | null>;

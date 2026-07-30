@@ -16,8 +16,22 @@ import {
   syncBookmarks,
 } from "./api";
 import { PostView } from "./PostView";
+import { estimateFetchUsd, formatUsd } from "../shared/pricing";
 
 type Tab = "saved" | "yours";
+
+/**
+ * Whether opening this card costs anything, shown so clicking is informed
+ * consent — inbox clicks fetch straight away rather than prompting.
+ */
+function FetchCost({ loaded, replyCount }: { loaded: boolean; replyCount: number }) {
+  if (loaded) return <span className="cost-tag cost-free">loaded · free</span>;
+  return (
+    <span className="cost-tag" title="Estimated from the reply count; the real total is usually within about 30%">
+      unfetched · {formatUsd(estimateFetchUsd(replyCount))}
+    </span>
+  );
+}
 
 /** Prompt to authorize X, shown wherever user-context features are needed. */
 function ConnectPrompt({ auth }: { auth: AuthStatus | null }) {
@@ -253,8 +267,8 @@ export function Inbox({ onOpenPost }: { onOpenPost: (postId: string) => void }) 
               >
                 <PostView post={item.post} quoted={saved.quoted} />
                 <div className="post-meta inbox-meta">
-                  {item.source === "bookmark" ? "bookmarked" : "added here"}
-                  {item.loaded ? " · conversation loaded" : " · not loaded yet"} ·{" "}
+                  <FetchCost loaded={item.loaded} replyCount={item.post.metrics.replies} />
+                  {item.source === "bookmark" ? "bookmarked" : "added here"} ·{" "}
                   {item.source === "bookmark" ? (
                     // The folder is the source of truth: removing it here
                     // would just come back on the next sync.
@@ -301,10 +315,10 @@ export function Inbox({ onOpenPost }: { onOpenPost: (postId: string) => void }) 
               >
                 <PostView post={item.root} quoted={own.quoted} />
                 <div className="post-meta inbox-meta">
+                  <FetchCost loaded={item.loaded} replyCount={item.root.metrics.replies} />
                   {item.ownPostCount > 1 && <>thread of {item.ownPostCount} · </>}
                   {item.root.metrics.replies}{" "}
                   {item.root.metrics.replies === 1 ? "reply" : "replies"}
-                  {item.loaded ? " · loaded" : ""}
                 </div>
               </li>
             ))}

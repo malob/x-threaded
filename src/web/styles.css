@@ -137,6 +137,16 @@ select {
   font-size: 12px;
 }
 
+/* Cost sits at the far right of the meta line, away from the content. */
+.cost-tag {
+  float: right;
+  color: var(--text-muted);
+}
+
+.cost-free {
+  color: #1d9e75;
+}
+
 ul.conversations li:hover {
   background: var(--accent-bg);
 }
