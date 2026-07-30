@@ -65,6 +65,10 @@ export function App() {
       if (!rootId) {
         setCurrent(null);
         setPending(postId);
+        // Route to the post anyway, so reloading returns to this prompt
+        // rather than the inbox. The handle is unknown until it's fetched;
+        // "i" is the same placeholder x.com uses.
+        if (push) history.pushState({}, "", postPath(undefined, postId));
         return;
       }
       const cached = await getConversation(rootId);
