@@ -1,4 +1,9 @@
+import { snowflakeMs } from "../shared/snowflake";
 import type { Post } from "../shared/types";
+
+// Re-exported: the definition moved to shared/ once the server needed to date
+// a conversation from its root ID, and this module's importers predate that.
+export { snowflakeMs };
 
 export interface TreeNode {
   post: Post;
@@ -16,11 +21,6 @@ export interface TreeNode {
   placementInferred?: boolean;
   /** Post text with reply-context @mentions stripped from the front. */
   displayText: string;
-}
-
-/** Creation time encoded in a post ID (snowflake: ms since the X epoch). */
-export function snowflakeMs(postId: string): number {
-  return Number(BigInt(postId) >> 22n) + 1288834974657;
 }
 
 /** Stand-in Post for a missing parent; handle "i" makes x.com/i/status/<id> links work. */

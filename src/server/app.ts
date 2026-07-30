@@ -199,12 +199,16 @@ export function buildApp({ store, xapi, maxPosts, oauth = null }: AppDeps): Hono
    * (source "bookmark") are reconciled — posts added by hand in the app are
    * left alone — and removal drops the queue entry only, never the cached
    * conversation or its read state.
+   *
+   * Removal happens only when the folder scan finished; a folder past the
+   * scan's page cap syncs additions and reports `complete: false` rather than
+   * treating everything it didn't reach as un-bookmarked.
    */
   app.post("/api/bookmarks/sync", async (c) => {
     const folderId = await store.getSetting(BOOKMARK_FOLDER_KEY);
     if (!folderId) return c.json({ error: "no bookmark folder selected" }, 400);
     const { token, userId } = await userContext();
-    const posts = await xapi.getBookmarksByFolder(token, userId, folderId);
+    const { posts, complete } = await xapi.getBookmarksByFolder(token, userId, folderId);
     await store.upsertPosts(posts);
 
     const inFolder = new Set(posts.map((p) => p.id));
@@ -216,10 +220,16 @@ export function buildApp({ store, xapi, maxPosts, oauth = null }: AppDeps): Hono
       fresh.map((p) => ({ postId: p.id, source: "bookmark", addedAt: new Date().toISOString() })),
     );
 
-    const gone = existing.filter((i) => i.source === "bookmark" && !inFolder.has(i.postId));
+    // Removing is only safe once the whole folder has been enumerated: on a
+    // partial scan the unread tail is indistinguishable from un-bookmarking,
+    // so a large folder would delete its own live entries. Adding is safe
+    // either way, so an incomplete sync still makes progress.
+    const gone = complete
+      ? existing.filter((i) => i.source === "bookmark" && !inFolder.has(i.postId))
+      : [];
     for (const item of gone) await store.removeSavedItem(item.postId);
 
-    return c.json({ synced: posts.length, added: fresh.length, removed: gone.length });
+    return c.json({ synced: posts.length, added: fresh.length, removed: gone.length, complete });
   });
 
   /** The saved queue: bookmarked and manually added posts, newest first. */

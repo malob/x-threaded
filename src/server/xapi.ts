@@ -1,3 +1,4 @@
+import { snowflakeMs } from "../shared/snowflake";
 import type { MediaItem, Post, PostEntities, UrlEntity } from "../shared/types";
 
 const API_BASE = "https://api.x.com/2";
@@ -8,9 +9,26 @@ const EXPANSIONS =
 const USER_FIELDS = "name,username,profile_image_url";
 const MEDIA_FIELDS = "type,url,preview_image_url,width,height";
 const PAGE_SIZE = 100;
+/** Smallest page /tweets/search/all accepts; asking for less is a 400. */
+const MIN_PAGE_SIZE = 10;
 const PAGE_DELAY_MS = 1100;
+/**
+ * How far before the root's own timestamp the search window opens. The root
+ * can't have replies older than itself; the margin only absorbs the slop
+ * between a snowflake's encoded time and X's indexing time.
+ */
+const START_TIME_MARGIN_MS = 60 * 60 * 1000;
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+/**
+ * RFC3339 at second precision, the grammar /tweets/search/all documents for
+ * start_time — toISOString's milliseconds aren't part of it. Truncation lands
+ * in the past, which only widens the window.
+ */
+function rfc3339(ms: number): string {
+  return new Date(ms).toISOString().replace(/\.\d{3}Z$/, "Z");
+}
 
 interface ApiTweet {
   id: string;
@@ -160,8 +178,20 @@ export type XApiClient = Pick<
   | "getBookmarksByFolder"
 >;
 
+export interface XApiOptions {
+  /** Pause between paginated requests; 0 in tests, which don't rate-limit. */
+  pageDelayMs?: number;
+}
+
 export class XApi {
-  constructor(private readonly bearerToken: string) {}
+  private readonly pageDelayMs: number;
+
+  constructor(
+    private readonly bearerToken: string,
+    opts: XApiOptions = {},
+  ) {
+    this.pageDelayMs = opts.pageDelayMs ?? PAGE_DELAY_MS;
+  }
 
   /**
    * @param token overrides the app-only bearer, for user-context endpoints
@@ -260,17 +290,21 @@ export class XApi {
    * no field or expansion parameters — so it yields bare post stubs. The IDs
    * are then hydrated through the lookup endpoint to get authors, entities,
    * and media.
+   *
+   * `complete` is false when maxPages ran out with the folder still going.
+   * Callers reconcile against this list, and a partial one is indistinguishable
+   * from the user having un-bookmarked everything past the cap — so the flag
+   * is what lets them refuse to act on a half-read folder.
    */
   async getBookmarksByFolder(
     accessToken: string,
     userId: string,
     folderId: string,
     maxPages = 10,
-  ): Promise<Post[]> {
-    // Page through the whole folder: callers reconcile against this list, so
-    // a partial one would look like the user had un-bookmarked things.
+  ): Promise<{ posts: Post[]; complete: boolean }> {
     const ids: string[] = [];
     let paginationToken: string | undefined;
+    let complete = false;
     for (let page = 0; page < maxPages; page++) {
       const params: Record<string, string> = { max_results: "100" };
       if (paginationToken) params.pagination_token = paginationToken;
@@ -280,9 +314,12 @@ export class XApi {
       }>(`/users/${userId}/bookmarks/folders/${folderId}`, params, accessToken);
       ids.push(...(result.data ?? []).map((t) => t.id));
       paginationToken = result.meta?.next_token;
-      if (!paginationToken) break;
+      if (!paginationToken) {
+        complete = true;
+        break;
+      }
     }
-    return ids.length > 0 ? this.getPostsByIds(ids) : [];
+    return { posts: ids.length > 0 ? await this.getPostsByIds(ids) : [], complete };
   }
 
   /** Look up a single post ($0.005). */
@@ -324,8 +361,9 @@ export class XApi {
 
   /**
    * Fetch every post in a conversation via full-archive search, paginated.
-   * Stops at maxPosts and reports truncation. Billed $0.005 per post returned
-   * (deduplicated within a 24h UTC window).
+   * Never requests more than maxPosts allows, stopping at or below it and
+   * reporting truncation. Billed $0.005 per post returned (deduplicated
+   * within a 24h UTC window).
    */
   async fetchConversation(
     conversationId: string,
@@ -339,16 +377,35 @@ export class XApi {
     let nextToken: string | undefined;
     let truncated = false;
 
-    do {
+    // Without start_time, /tweets/search/all quietly searches only the last 30
+    // days and an older conversation comes back missing its history — no error,
+    // no truncation flag. The root's ID dates the conversation, so bound the
+    // window there. since_id already bounds it, and the two can't both apply.
+    const startTime = sinceId
+      ? undefined
+      : rfc3339(snowflakeMs(conversationId) - START_TIME_MARGIN_MS);
+
+    for (;;) {
+      // Ask for no more than the budget allows: checking the cap only after a
+      // full 100-post page would bill for up to 99 posts past it. The API
+      // won't serve a page smaller than MIN_PAGE_SIZE, so a budget with less
+      // than that left ends the fetch short rather than overshooting.
+      const remaining = maxPosts - posts.length;
+      if (remaining < MIN_PAGE_SIZE) {
+        truncated = true;
+        break;
+      }
+
       const params: Record<string, string> = {
         query: `conversation_id:${conversationId}`,
-        max_results: String(PAGE_SIZE),
+        max_results: String(Math.min(PAGE_SIZE, remaining)),
         "tweet.fields": POST_FIELDS,
         expansions: EXPANSIONS,
         "user.fields": USER_FIELDS,
         "media.fields": MEDIA_FIELDS,
       };
       if (sinceId) params.since_id = sinceId;
+      if (startTime) params.start_time = startTime;
       if (nextToken) params.next_token = nextToken;
 
       const page = await this.get<SearchPage>("/tweets/search/all", params);
@@ -366,12 +423,9 @@ export class XApi {
       }
 
       nextToken = page.meta?.next_token;
-      if (nextToken && posts.length >= maxPosts) {
-        truncated = true;
-        break;
-      }
-      if (nextToken) await sleep(PAGE_DELAY_MS);
-    } while (nextToken);
+      if (!nextToken) break;
+      await sleep(this.pageDelayMs);
+    }
 
     // Referenced posts arrive without their media objects (the API only ships
     // media for main results); re-look them up to resolve images.
