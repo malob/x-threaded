@@ -6,6 +6,7 @@ import {
   countDescendants,
   documentOrder,
   foldOwnerIds,
+  hiddenReplyCounts,
   parentIds,
   scopeIds,
   subtreeSize,
@@ -18,6 +19,8 @@ interface Ctx {
   cursorId: string | null;
   quoted: Record<string, Post>;
   unread: Set<string>;
+  /** Direct replies each post declares but the tree doesn't contain. */
+  hiddenReplies: Map<string, number>;
   isOpen: (id: string) => boolean;
   setFold: (id: string, open: boolean) => void;
   setCursor: (id: string) => void;
@@ -41,30 +44,61 @@ function NewBadge({ count }: { count: number }) {
 }
 
 function PostCard({ node, ctx }: { node: TreeNode; ctx: Ctx }) {
-  const { post, orphaned } = node;
+  const { post } = node;
+  if (node.placeholder) {
+    return (
+      <div
+        id={`post-${post.id}`}
+        className={post.id === ctx.cursorId ? "post placeholder-post cursor" : "post placeholder-post"}
+        title={
+          node.placementInferred
+            ? "Position inferred from reply counts"
+            : "Replied somewhere in this conversation; exact position unknown"
+        }
+        onClick={(e) => {
+          if (!(e.target as HTMLElement).closest("a")) ctx.setCursor(post.id);
+        }}
+      >
+        unavailable post (deleted or private) ·{" "}
+        <a href={`https://x.com/i/status/${post.id}`} target="_blank" rel="noopener noreferrer">
+          view on x.com ↗
+        </a>
+      </div>
+    );
+  }
   const isUnread = ctx.unread.has(post.id);
+  const hidden = ctx.hiddenReplies.get(post.id) ?? 0;
   return (
-    <PostView
-      post={post}
-      quoted={ctx.quoted}
-      displayText={node.displayText}
-      id={`post-${post.id}`}
-      className={post.id === ctx.cursorId ? "post cursor" : "post"}
-      onClick={(e) => {
-        if (!(e.target as HTMLElement).closest("a, button")) ctx.setCursor(post.id);
-      }}
-      leading={
-        isUnread ? (
-          <button
-            className="unread-dot"
-            title="Mark as read"
-            aria-label="Mark as read"
-            onClick={() => ctx.setRead([post.id], true)}
-          />
-        ) : undefined
-      }
-      metaSuffix={orphaned ? <span className="orphan-badge">parent unavailable</span> : undefined}
-    />
+    <>
+      <PostView
+        post={post}
+        quoted={ctx.quoted}
+        displayText={node.displayText}
+        id={`post-${post.id}`}
+        className={post.id === ctx.cursorId ? "post cursor" : "post"}
+        onClick={(e) => {
+          if (!(e.target as HTMLElement).closest("a, button")) ctx.setCursor(post.id);
+        }}
+        leading={
+          isUnread ? (
+            <button
+              className="unread-dot"
+              title="Mark as read"
+              aria-label="Mark as read"
+              onClick={() => ctx.setRead([post.id], true)}
+            />
+          ) : undefined
+        }
+      />
+      {hidden > 0 && (
+        <div
+          className="hidden-replies"
+          title="Deleted, from a private account, or not returned by the API"
+        >
+          {hidden} {hidden === 1 ? "reply" : "replies"} not available
+        </div>
+      )}
+    </>
   );
 }
 
@@ -272,6 +306,11 @@ export function Thread({
 
   const isOpen = (id: string): boolean => folds.get(id) ?? !owners.segmentFolds.has(id);
   const unread = useMemo(() => new Set(conversation.unreadIds), [conversation.unreadIds]);
+  // Reply-count deficits are meaningless when the fetch was capped.
+  const hiddenReplies = useMemo(
+    () => (root && !conversation.truncated ? hiddenReplyCounts(root) : new Map<string, number>()),
+    [root, conversation.truncated],
+  );
 
   if (import.meta.env.DEV || localStorage.getItem("xdbg")) {
     (window as { __xdbg?: unknown }).__xdbg = {
@@ -495,6 +534,7 @@ export function Thread({
     cursorId,
     quoted: conversation.quoted,
     unread,
+    hiddenReplies,
     isOpen,
     setFold,
     setCursor: setCursorId,

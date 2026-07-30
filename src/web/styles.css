@@ -242,13 +242,31 @@ ul.conversations li:hover {
   text-decoration: underline;
 }
 
-.orphan-badge {
+.placeholder-post {
+  max-width: 620px;
+  margin: 4px 0;
+  padding: 8px 12px;
+  border: 1px dashed var(--border);
+  border-radius: 8px;
   color: var(--text-muted);
-  font-size: 11.5px;
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  padding: 0 5px;
-  margin-left: 6px;
+  font-size: 13px;
+}
+
+.placeholder-post a {
+  color: var(--link);
+  text-decoration: none;
+}
+
+.placeholder-post a:hover {
+  text-decoration: underline;
+}
+
+.hidden-replies {
+  margin: 0 0 4px;
+  padding-left: 10px;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-style: italic;
 }
 
 .children {

@@ -3,16 +3,46 @@ import type { Post } from "../shared/types";
 export interface TreeNode {
   post: Post;
   children: TreeNode[];
-  /** Parent post is missing from the data (deleted or not returned). */
-  orphaned: boolean;
+  /**
+   * Synthetic stand-in for a post the API wouldn't return (deleted, or from a
+   * private/suspended account). Its id is the real missing post's ID; replies
+   * to it nest underneath.
+   */
+  placeholder: boolean;
+  /**
+   * For placeholders: the parent was identified via the reply-count deficit
+   * heuristic (see attachPlaceholders) rather than defaulting to the root.
+   */
+  placementInferred?: boolean;
   /** Post text with reply-context @mentions stripped from the front. */
   displayText: string;
 }
 
-/**
- * Build the reply tree from a flat post list. Replies whose parent is absent
- * attach to the root, flagged as orphaned. Siblings sort chronologically.
- */
+/** Creation time encoded in a post ID (snowflake: ms since the X epoch). */
+export function snowflakeMs(postId: string): number {
+  return Number(BigInt(postId) >> 22n) + 1288834974657;
+}
+
+/** Stand-in Post for a missing parent; handle "i" makes x.com/i/status/<id> links work. */
+function placeholderPost(id: string, conversationId: string, createdAt: string): Post {
+  return {
+    id,
+    conversationId,
+    parentId: null,
+    authorId: "",
+    authorHandle: "i",
+    authorName: "",
+    authorAvatarUrl: null,
+    text: "",
+    createdAt,
+    metrics: { likes: 0, replies: 0, reposts: 0, quotes: 0, bookmarks: 0, impressions: 0 },
+    entities: null,
+    quotedPostId: null,
+    media: null,
+    fetchedAt: "",
+  };
+}
+
 const LEADING_MENTION = /^@(\w{1,15})(?:\s+|$)/;
 const ANY_MENTION = /@(\w{1,15})/g;
 
@@ -193,27 +223,110 @@ export function threadSpine(root: TreeNode): TreeNode[] {
 
 export function buildTree(rootId: string, posts: Post[]): TreeNode | null {
   const nodes = new Map<string, TreeNode>(
-    posts.map((post) => [post.id, { post, children: [], orphaned: false, displayText: post.text }]),
+    posts.map((post) => [
+      post.id,
+      { post, children: [], placeholder: false, displayText: post.text },
+    ]),
   );
   const root = nodes.get(rootId);
   if (!root) return null;
 
+  const orphansByParent = new Map<string, TreeNode[]>();
   for (const node of nodes.values()) {
     if (node.post.id === rootId) continue;
     const parent = node.post.parentId ? nodes.get(node.post.parentId) : undefined;
     if (parent) {
       parent.children.push(node);
+    } else if (node.post.parentId) {
+      const group = orphansByParent.get(node.post.parentId) ?? [];
+      group.push(node);
+      orphansByParent.set(node.post.parentId, group);
     } else {
-      node.orphaned = true;
       root.children.push(node);
     }
   }
 
-  const byDate = (a: TreeNode, b: TreeNode) =>
-    a.post.createdAt.localeCompare(b.post.createdAt);
+  attachPlaceholders(root, nodes, orphansByParent);
+
   for (const node of nodes.values()) {
     node.children.sort(byDate);
   }
+  root.children.sort(byDate);
   computeDisplayText(root, new Set());
   return root;
+}
+
+const byDate = (a: TreeNode, b: TreeNode) => a.post.createdAt.localeCompare(b.post.createdAt);
+
+/**
+ * Attach a synthetic placeholder node for each missing parent.
+ *
+ * Placement: the API only exposes child→parent edges, so a missing post's
+ * true parent is unknowable directly. But every post declares its direct
+ * reply count, and hidden replies show up as a deficit against the children
+ * we can see. If exactly one post has such a deficit and predates the
+ * missing post (its ID encodes its creation time), the missing post must be
+ * one of that post's hidden replies, so the placeholder nests there
+ * (placementInferred). With zero or several candidates the placeholder
+ * attaches to the root.
+ *
+ * This is a heuristic layered on honest structure — to unwind it, replace
+ * the body of this function with the root-attachment fallback alone.
+ */
+function attachPlaceholders(
+  root: TreeNode,
+  nodes: Map<string, TreeNode>,
+  orphansByParent: Map<string, TreeNode[]>,
+): void {
+  const deficits = new Map<string, number>();
+  for (const node of nodes.values()) {
+    const deficit = node.post.metrics.replies - node.children.length;
+    if (deficit > 0) deficits.set(node.post.id, deficit);
+  }
+
+  const missingIds = [...orphansByParent.keys()].sort((a, b) => snowflakeMs(a) - snowflakeMs(b));
+  for (const missingId of missingIds) {
+    const createdMs = snowflakeMs(missingId);
+    const candidates = [...deficits.keys()].filter(
+      (id) => Date.parse(nodes.get(id)!.post.createdAt) < createdMs,
+    );
+    const inferred = candidates.length === 1;
+    const host = inferred ? nodes.get(candidates[0]!)! : root;
+    if (inferred) {
+      const remaining = deficits.get(candidates[0]!)! - 1;
+      if (remaining > 0) deficits.set(candidates[0]!, remaining);
+      else deficits.delete(candidates[0]!);
+    }
+    const children = orphansByParent.get(missingId)!;
+    children.sort(byDate);
+    host.children.push({
+      post: placeholderPost(
+        missingId,
+        root.post.conversationId,
+        new Date(createdMs).toISOString().replace(/\.\d{3}Z$/, ".000Z"),
+      ),
+      children,
+      placeholder: true,
+      placementInferred: inferred,
+      displayText: "",
+    });
+  }
+}
+
+/**
+ * Direct replies each post declares beyond what the tree contains — posts
+ * that are deleted, private, or simply not returned by the API. Placeholders
+ * count as present (each stands for one hidden reply).
+ */
+export function hiddenReplyCounts(root: TreeNode): Map<string, number> {
+  const counts = new Map<string, number>();
+  const walk = (node: TreeNode): void => {
+    if (!node.placeholder) {
+      const hidden = node.post.metrics.replies - node.children.length;
+      if (hidden > 0) counts.set(node.post.id, hidden);
+    }
+    node.children.forEach(walk);
+  };
+  walk(root);
+  return counts;
 }
