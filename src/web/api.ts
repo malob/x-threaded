@@ -67,7 +67,13 @@ export async function getAuthStatus(): Promise<AuthStatus> {
   return (await response.json()) as AuthStatus;
 }
 
-export function syncBookmarks(): Promise<{ synced: number; added: number; removed: number }> {
+export function syncBookmarks(): Promise<{
+  synced: number;
+  added: number;
+  removed: number;
+  /** False when the folder scan hit its page cap; removals were skipped. */
+  complete: boolean;
+}> {
   return request("/api/bookmarks/sync", { method: "POST" });
 }
 

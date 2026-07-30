@@ -204,6 +204,9 @@ export function Inbox({ onOpenPost }: { onOpenPost: (postId: string) => void }) 
       const parts = [];
       if (result.added > 0) parts.push(`+${result.added} new`);
       if (result.removed > 0) parts.push(`−${result.removed} un-bookmarked`);
+      // An unfinished scan can't tell "un-bookmarked" from "past the page
+      // cap", so the server skips removals — say so instead of "up to date".
+      if (!result.complete) parts.push("partial scan — removals skipped");
       setSyncNote(parts.length > 0 ? parts.join(" · ") : "up to date");
       loadSaved();
     } catch (e) {

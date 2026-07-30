@@ -1,7 +1,7 @@
 import type { Post } from "../src/shared/types";
-import { snowflakeMs } from "../src/web/tree";
+import { snowflakeMs } from "../src/shared/snowflake";
 
-/** The X snowflake epoch, as encoded in snowflakeMs (src/web/tree.ts). */
+/** The X snowflake epoch, as encoded in snowflakeMs (src/shared/snowflake.ts). */
 const SNOWFLAKE_EPOCH_MS = 1288834974657;
 
 /**

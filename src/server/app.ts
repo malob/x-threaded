@@ -164,7 +164,12 @@ export function buildApp({ store, xapi, maxPosts, oauth = null }: AppDeps): Hono
     const stored = await store.getOAuthTokens("self");
     if (stored?.userId) return { token, userId: stored.userId };
     const me = await xapi.getMe(token);
-    if (stored) await store.putOAuthTokens("self", { ...stored, userId: me.id });
+    // Re-read before writing: a rotation can land during the getMe round-trip,
+    // and persisting the earlier snapshot would revive its dead refresh token,
+    // stranding the grant. The remaining window is microseconds; Stage 3's
+    // lease closes it properly.
+    const latest = await store.getOAuthTokens("self");
+    if (latest) await store.putOAuthTokens("self", { ...latest, userId: me.id });
     return { token, userId: me.id };
   }
 

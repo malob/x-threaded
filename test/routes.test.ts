@@ -321,3 +321,37 @@ describe("GET /api/auth/status — answered from the store", () => {
     expect(xapi.calls).toEqual([]);
   });
 });
+
+describe("userContext token writes", () => {
+  it("does not revive a pre-rotation token when a refresh lands during getMe", async () => {
+    const { app, store, xapi } = makeTestApp({ oauth: OAUTH });
+    // Valid tokens with no cached user ID, so userContext must call getMe.
+    await store.putOAuthTokens("self", {
+      accessToken: "access",
+      refreshToken: "refresh-old",
+      expiresAt: Date.now() + 60 * 60 * 1000,
+      scope: "tweet.read",
+      userId: null,
+    });
+    xapi.onGetMe = async () => {
+      // A rotation lands while getMe is in flight; writing the earlier
+      // snapshot back would revive the dead refresh token.
+      await store.putOAuthTokens("self", {
+        accessToken: "access-rotated",
+        refreshToken: "refresh-rotated",
+        expiresAt: Date.now() + 2 * 60 * 60 * 1000,
+        scope: "tweet.read",
+        userId: null,
+      });
+      return { id: "42", username: "m", name: "M" };
+    };
+    xapi.onGetBookmarkFolders = () => [];
+
+    const response = await app.request("/api/bookmarks/folders");
+    expect(response.status).toBe(200);
+
+    const stored = await store.getOAuthTokens("self");
+    expect(stored?.refreshToken).toBe("refresh-rotated");
+    expect(stored?.userId).toBe("42");
+  });
+});

@@ -8,7 +8,12 @@ import { parseIntStrict } from "../shared/num";
 
 /** Posts fetched per conversation when MAX_POSTS_PER_FETCH is unset. */
 const DEFAULT_MAX_POSTS = 500;
-const MIN_MAX_POSTS = 1;
+/**
+ * /tweets/search/all refuses pages smaller than 10, and the budget-strict
+ * pagination in xapi.ts won't request below that floor — so a cap under 10
+ * would boot fine and then silently fetch nothing.
+ */
+const MIN_MAX_POSTS = 10;
 const MAX_MAX_POSTS = 5000;
 
 /**

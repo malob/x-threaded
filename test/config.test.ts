@@ -8,7 +8,9 @@ describe("resolveMaxPosts", () => {
 
   it("accepts an in-range integer", () => {
     expect(resolveMaxPosts("600")).toBe(600);
-    expect(resolveMaxPosts("1")).toBe(1);
+    // 10 is the floor: /tweets/search/all won't serve smaller pages, so a
+    // lower cap would fetch nothing at all.
+    expect(resolveMaxPosts("10")).toBe(10);
     expect(resolveMaxPosts("5000")).toBe(5000);
   });
 
@@ -21,6 +23,7 @@ describe("resolveMaxPosts", () => {
     ["empty", ""],
     ["whitespace", " "],
     ["zero", "0"],
+    ["below the search page floor", "5"],
     ["negative", "-1"],
     ["exponent notation", "1e3"],
     ["fractional", "1.5"],
