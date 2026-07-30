@@ -126,8 +126,17 @@ function FolderBar({
   );
 }
 
+const TAB_KEY = "inboxTab";
+
 export function Inbox({ onOpenPost }: { onOpenPost: (postId: string) => void }) {
-  const [tab, setTab] = useState<Tab>("saved");
+  // Remembered across reloads and across trips into a conversation.
+  const [tab, setTabState] = useState<Tab>(() =>
+    localStorage.getItem(TAB_KEY) === "yours" ? "yours" : "saved",
+  );
+  const setTab = (next: Tab) => {
+    setTabState(next);
+    localStorage.setItem(TAB_KEY, next);
+  };
   const [saved, setSaved] = useState<SavedListResponse | null>(null);
   const [own, setOwn] = useState<OwnPostsResponse | null>(null);
   const [settings, setSettings] = useState<SettingsResponse | null>(null);
