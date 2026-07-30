@@ -191,25 +191,34 @@ export class XApi {
     return result.data;
   }
 
-  /** The signed-in user's own recent posts (Owned Read, $0.001 each). */
+  /**
+   * One page of the signed-in user's own posts (Owned Read, $0.001 each).
+   * Retweets are excluded; replies are not, because the timeline's
+   * exclude=replies also drops the user's own thread continuations, which
+   * callers need in order to group posts into threads.
+   */
   async getOwnPosts(
     accessToken: string,
     userId: string,
-    opts: { max?: number; excludeReplies?: boolean } = {},
-  ): Promise<Post[]> {
+    opts: { max?: number; paginationToken?: string } = {},
+  ): Promise<{ posts: Post[]; nextToken?: string }> {
     const params: Record<string, string> = {
-      max_results: String(Math.min(Math.max(opts.max ?? 10, 5), 100)),
+      max_results: String(Math.min(Math.max(opts.max ?? 50, 5), 100)),
+      exclude: "retweets",
       "tweet.fields": POST_FIELDS,
       expansions: EXPANSIONS,
       "user.fields": USER_FIELDS,
       "media.fields": MEDIA_FIELDS,
     };
-    if (opts.excludeReplies !== false) params.exclude = "replies,retweets";
+    if (opts.paginationToken) params.pagination_token = opts.paginationToken;
     const page = await this.get<SearchPage>(`/users/${userId}/tweets`, params, accessToken);
     const users = new Map((page.includes?.users ?? []).map((u) => [u.id, u]));
     const media = mediaMap(page.includes);
     const fetchedAt = new Date().toISOString();
-    return (page.data ?? []).map((tweet) => toPost(tweet, users, media, fetchedAt));
+    return {
+      posts: (page.data ?? []).map((tweet) => toPost(tweet, users, media, fetchedAt)),
+      nextToken: page.meta?.next_token,
+    };
   }
 
   /** The user's bookmark folders (user context; requires bookmark.read). */

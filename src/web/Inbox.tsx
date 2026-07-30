@@ -106,6 +106,8 @@ export function Inbox({ onOpenPost }: { onOpenPost: (postId: string) => void }) 
   const [syncing, setSyncing] = useState(false);
   const [syncNote, setSyncNote] = useState<string | null>(null);
   const [loadingOwn, setLoadingOwn] = useState(false);
+  /** How many threads the Your posts tab is currently asking for. */
+  const [ownTarget, setOwnTarget] = useState(10);
   const [error, setError] = useState<string | null>(null);
 
   const loadSaved = () => {
@@ -121,11 +123,14 @@ export function Inbox({ onOpenPost }: { onOpenPost: (postId: string) => void }) 
       .catch(() => setSettings(null));
   }, []);
 
-  const loadOwn = () => {
+  const loadOwn = (threads = ownTarget) => {
     setLoadingOwn(true);
     setError(null);
-    getOwnPosts()
-      .then(setOwn)
+    getOwnPosts(threads)
+      .then((r) => {
+        setOwn(r);
+        setOwnTarget(threads);
+      })
       .catch((e: Error) => setError(e.message))
       .finally(() => setLoadingOwn(false));
   };
@@ -219,27 +224,42 @@ export function Inbox({ onOpenPost }: { onOpenPost: (postId: string) => void }) 
       ) : (
         <>
           <p className="notice">
-            your recent posts ·{" "}
-            <button className="notice-btn" onClick={loadOwn} disabled={loadingOwn}>
+            your recent threads{own ? ` (${own.items.length})` : ""} ·{" "}
+            <button className="notice-btn" onClick={() => loadOwn(10)} disabled={loadingOwn}>
               {loadingOwn ? "loading…" : "refresh"}
             </button>
           </p>
           <ul className="conversations">
-            {own?.posts.map((post) => (
+            {own?.items.map((item) => (
               <li
-                key={post.id}
+                key={item.root.id}
                 onClick={(e) => {
                   if ((e.target as HTMLElement).closest("a, button")) return;
-                  onOpenPost(post.id);
+                  onOpenPost(item.root.id);
                 }}
               >
-                <PostView post={post} quoted={own.quoted} />
+                <PostView post={item.root} quoted={own.quoted} />
                 <div className="post-meta inbox-meta">
-                  {post.metrics.replies} {post.metrics.replies === 1 ? "reply" : "replies"}
+                  {item.ownPostCount > 1 && <>thread of {item.ownPostCount} · </>}
+                  {item.root.metrics.replies}{" "}
+                  {item.root.metrics.replies === 1 ? "reply" : "replies"}
+                  {item.loaded ? " · loaded" : ""}
                 </div>
               </li>
             ))}
           </ul>
+          {own?.items.length === 0 && <p className="notice">no recent posts found</p>}
+          {own?.hasMore && (
+            <p className="notice">
+              <button
+                className="notice-btn"
+                onClick={() => loadOwn(ownTarget + 10)}
+                disabled={loadingOwn}
+              >
+                {loadingOwn ? "loading…" : "load 10 more"}
+              </button>
+            </p>
+          )}
         </>
       )}
     </div>

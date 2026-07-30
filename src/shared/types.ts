@@ -99,9 +99,21 @@ export interface SavedListResponse {
   quoted: Record<string, Post>;
 }
 
+/** One of the user's own threads, represented by its root post. */
+export interface OwnThread {
+  root: Post;
+  /** How many posts in this thread are the user's own (1 = a lone post). */
+  ownPostCount: number;
+  /** Timestamp of their most recent post in it, for ordering. */
+  latestAt: string;
+  loaded: boolean;
+}
+
 export interface OwnPostsResponse {
-  posts: Post[];
+  items: OwnThread[];
   quoted: Record<string, Post>;
+  /** The scan filled its quota, so asking for more may yield more. */
+  hasMore: boolean;
 }
 
 export interface SettingsResponse {

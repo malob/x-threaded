@@ -2,6 +2,8 @@ import { Hono } from "hono";
 import type {
   ConversationListResponse,
   ConversationResponse,
+  OwnPostsResponse,
+  OwnThread,
   Post,
   RefreshResponse,
 } from "../shared/types";
@@ -218,13 +220,81 @@ export function buildApp({ store, xapi, maxPosts, oauth = null }: AppDeps): Hono
     return c.json({ ok: true });
   });
 
-  /** The signed-in user's recent top-level posts (Owned Reads). */
+  /**
+   * The user's recent threads, one entry each (Owned Reads).
+   *
+   * The timeline's exclude=replies doesn't drop self-thread continuations, so
+   * a five-part thread would otherwise appear five times. Group the scanned
+   * posts by conversation and represent each by its root, dropping
+   * conversations rooted by someone else — those are replies into other
+   * people's threads, not the user's own posts.
+   */
   app.get("/api/me/posts", async (c) => {
     const { token, userId } = await userContext();
-    const max = Number(c.req.query("max") ?? 10);
-    const posts = await xapi.getOwnPosts(token, userId, { max });
+    const target = Number(c.req.query("threads") ?? 10);
+    // Posts are billed per post returned, so pull pages until there are
+    // enough distinct threads rather than fetching a big fixed window.
+    const posts: Post[] = [];
+    let paginationToken: string | undefined;
+    // Re-scanning for a larger target is nearly free: posts already read
+    // today don't bill again (24h dedup), so only genuinely new ground costs.
+    const MAX_SCAN = Math.min(Math.max(target * 20, 200), 600);
+    do {
+      const page = await xapi.getOwnPosts(token, userId, { max: 50, paginationToken });
+      posts.push(...page.posts);
+      paginationToken = page.nextToken;
+      const distinct = new Set(posts.map((p) => p.conversationId)).size;
+      if (distinct >= target || page.posts.length === 0) break;
+    } while (paginationToken && posts.length < MAX_SCAN);
     await store.upsertPosts(posts);
-    return c.json({ posts, quoted: await getQuotedFor(store, posts) });
+
+    const byConversation = new Map<string, Post[]>();
+    for (const post of posts) {
+      const group = byConversation.get(post.conversationId) ?? [];
+      group.push(post);
+      byConversation.set(post.conversationId, group);
+    }
+
+    // Roots older than the scan window aren't in the timeline response; pull
+    // any we don't already have in one batch.
+    const missing: string[] = [];
+    for (const [conversationId, group] of byConversation) {
+      const known =
+        group.some((p) => p.id === conversationId) || (await store.hasPost(conversationId));
+      if (!known) missing.push(conversationId);
+    }
+    if (missing.length > 0) {
+      await store.upsertPosts(await xapi.getPostsByIds(missing));
+    }
+
+    const items: OwnThread[] = [];
+    for (const [conversationId, group] of byConversation) {
+      const root =
+        group.find((p) => p.id === conversationId) ?? (await store.getPost(conversationId));
+      if (!root || root.authorId !== userId) continue;
+      const latestAt = group.reduce(
+        (latest, p) => (p.createdAt > latest ? p.createdAt : latest),
+        group[0]!.createdAt,
+      );
+      items.push({
+        root,
+        ownPostCount: group.length,
+        latestAt,
+        loaded: await store.hasConversation(conversationId),
+      });
+    }
+    items.sort((a, b) => b.latestAt.localeCompare(a.latestAt));
+
+    const shown = items.slice(0, target);
+    const response: OwnPostsResponse = {
+      items: shown,
+      quoted: await getQuotedFor(
+        store,
+        shown.map((i) => i.root),
+      ),
+      hasMore: items.length > target || (items.length === target && paginationToken !== undefined),
+    };
+    return c.json(response);
   });
 
   /** Whether user-context features (own posts, bookmarks) are available. */

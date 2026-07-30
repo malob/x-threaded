@@ -35,8 +35,8 @@ export function removeSaved(postId: string): Promise<{ ok: boolean }> {
   return request(`/api/saved/${postId}`, { method: "DELETE" });
 }
 
-export function getOwnPosts(max = 10): Promise<OwnPostsResponse> {
-  return request(`/api/me/posts?max=${max}`);
+export function getOwnPosts(threads = 10): Promise<OwnPostsResponse> {
+  return request(`/api/me/posts?threads=${threads}`);
 }
 
 export function getSettings(): Promise<SettingsResponse> {
