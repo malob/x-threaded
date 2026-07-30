@@ -38,5 +38,7 @@ proxying /api to :8787).
 - [x] Milestone 2 (navigation) — vim-idiomatic keyboard layer: cursor,
       j/k/h/l + arrows, {/} sibling branches, n/N unread traversal
       (auto-marks read), r/R read state, z-family folds, gx/yy, ? help
-- [ ] Deep-link routes (/c/:root/:post) with scroll-to-focus
+- [x] Deep-link routes mirroring x.com (`/<handle>/status/<id>` — swap the
+      domain on any post URL) with scroll-to-focus and a fetch-consent prompt
+      for uncached conversations
 - [ ] Milestone 4 — deploy (Fly.io + volume) behind an auth gate
