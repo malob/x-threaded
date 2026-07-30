@@ -18,11 +18,11 @@ import {
 } from "./oauth";
 import { getQuotedFor, type Storage } from "./storage";
 import { parsePostUrl } from "./urls";
-import { XApiError, type FetchedConversation, type XApi } from "./xapi";
+import { XApiError, type FetchedConversation, type XApiClient } from "./xapi";
 
 export interface AppDeps {
   store: Storage;
-  xapi: XApi;
+  xapi: XApiClient;
   /** Safety cap on posts fetched per conversation load. */
   maxPosts: number;
   /** Null when the deployment has no OAuth user context configured. */

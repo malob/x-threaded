@@ -1,0 +1,4 @@
+[test]
+# Every test file starts with the network tripwire installed — no test can
+# reach the X API by accident, and reads there cost real money.
+preload = ["./test/setup.ts"]

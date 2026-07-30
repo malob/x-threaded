@@ -144,6 +144,22 @@ function mediaMap(includes: Includes | undefined): Map<string, ApiMedia> {
   return new Map((includes?.media ?? []).map((m) => [m.media_key, m]));
 }
 
+/**
+ * The X API surface the routes actually use. XApi's private members make the
+ * class nominal, so depending on the class would force every test double to
+ * be the real network client.
+ */
+export type XApiClient = Pick<
+  XApi,
+  | "getPost"
+  | "getPostsByIds"
+  | "fetchConversation"
+  | "getMe"
+  | "getOwnPosts"
+  | "getBookmarkFolders"
+  | "getBookmarksByFolder"
+>;
+
 export class XApi {
   constructor(private readonly bearerToken: string) {}
 
