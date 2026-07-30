@@ -176,9 +176,11 @@ export function buildApp({ store, xapi, maxPosts, oauth = null }: AppDeps): Hono
   });
 
   /**
-   * Pull the chosen bookmark folder into the saved list. One-way from X:
-   * new bookmarks appear here, and un-bookmarking on X leaves what's already
-   * been pulled (along with its cached conversation and read state) alone.
+   * Mirror the chosen bookmark folder into the saved list, one-way from X:
+   * bookmarking adds, un-bookmarking removes. Only entries this sync owns
+   * (source "bookmark") are reconciled — posts added by hand in the app are
+   * left alone — and removal drops the queue entry only, never the cached
+   * conversation or its read state.
    */
   app.post("/api/bookmarks/sync", async (c) => {
     const folderId = await store.getSetting(BOOKMARK_FOLDER_KEY);
@@ -186,12 +188,20 @@ export function buildApp({ store, xapi, maxPosts, oauth = null }: AppDeps): Hono
     const { token, userId } = await userContext();
     const posts = await xapi.getBookmarksByFolder(token, userId, folderId);
     await store.upsertPosts(posts);
-    const known = new Set((await store.listSavedItems()).map((i) => i.postId));
+
+    const inFolder = new Set(posts.map((p) => p.id));
+    const existing = await store.listSavedItems();
+    const known = new Set(existing.map((i) => i.postId));
+
     const fresh = posts.filter((p) => !known.has(p.id));
     await store.addSavedItems(
       fresh.map((p) => ({ postId: p.id, source: "bookmark", addedAt: new Date().toISOString() })),
     );
-    return c.json({ synced: posts.length, added: fresh.length });
+
+    const gone = existing.filter((i) => i.source === "bookmark" && !inFolder.has(i.postId));
+    for (const item of gone) await store.removeSavedItem(item.postId);
+
+    return c.json({ synced: posts.length, added: fresh.length, removed: gone.length });
   });
 
   /** The saved queue: bookmarked and manually added posts, newest first. */
@@ -217,7 +227,14 @@ export function buildApp({ store, xapi, maxPosts, oauth = null }: AppDeps): Hono
   });
 
   app.delete("/api/saved/:postId", async (c) => {
-    await store.removeSavedItem(c.req.param("postId"));
+    const postId = c.req.param("postId");
+    const item = (await store.listSavedItems()).find((i) => i.postId === postId);
+    if (item?.source === "bookmark") {
+      // Removing it here would be undone by the next sync; the folder on X is
+      // the source of truth for these.
+      return c.json({ error: "un-bookmark it on x.com — sync will remove it here" }, 409);
+    }
+    await store.removeSavedItem(postId);
     return c.json({ ok: true });
   });
 

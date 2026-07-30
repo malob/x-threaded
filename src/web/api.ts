@@ -65,7 +65,7 @@ export async function getAuthStatus(): Promise<AuthStatus> {
   return (await response.json()) as AuthStatus;
 }
 
-export function syncBookmarks(): Promise<{ synced: number; added: number }> {
+export function syncBookmarks(): Promise<{ synced: number; added: number; removed: number }> {
   return request("/api/bookmarks/sync", { method: "POST" });
 }
 

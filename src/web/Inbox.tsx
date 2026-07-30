@@ -178,7 +178,10 @@ export function Inbox({ onOpenPost }: { onOpenPost: (postId: string) => void }) 
     setSyncNote(null);
     try {
       const result = await syncBookmarks();
-      setSyncNote(result.added > 0 ? `+${result.added} new` : "up to date");
+      const parts = [];
+      if (result.added > 0) parts.push(`+${result.added} new`);
+      if (result.removed > 0) parts.push(`−${result.removed} un-bookmarked`);
+      setSyncNote(parts.length > 0 ? parts.join(" · ") : "up to date");
       loadSaved();
     } catch (e) {
       setError((e as Error).message);
@@ -243,9 +246,22 @@ export function Inbox({ onOpenPost }: { onOpenPost: (postId: string) => void }) 
                 <div className="post-meta inbox-meta">
                   {item.source === "bookmark" ? "bookmarked" : "added here"}
                   {item.loaded ? " · conversation loaded" : " · not loaded yet"} ·{" "}
-                  <button className="notice-btn" onClick={() => void drop(item.post.id)}>
-                    remove
-                  </button>
+                  {item.source === "bookmark" ? (
+                    // The folder is the source of truth: removing it here
+                    // would just come back on the next sync.
+                    <a
+                      href={`https://x.com/${item.post.authorHandle}/status/${item.post.id}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      title="Un-bookmark on x.com to remove it from this list"
+                    >
+                      un-bookmark on x.com ↗
+                    </a>
+                  ) : (
+                    <button className="notice-btn" onClick={() => void drop(item.post.id)}>
+                      remove
+                    </button>
+                  )}
                 </div>
               </li>
             ))}

@@ -246,14 +246,23 @@ export class XApi {
     accessToken: string,
     userId: string,
     folderId: string,
-    max = 50,
+    maxPages = 10,
   ): Promise<Post[]> {
-    const page = await this.get<{ data?: { id: string }[] }>(
-      `/users/${userId}/bookmarks/folders/${folderId}`,
-      { max_results: String(Math.min(Math.max(max, 1), 100)) },
-      accessToken,
-    );
-    const ids = (page.data ?? []).map((t) => t.id);
+    // Page through the whole folder: callers reconcile against this list, so
+    // a partial one would look like the user had un-bookmarked things.
+    const ids: string[] = [];
+    let paginationToken: string | undefined;
+    for (let page = 0; page < maxPages; page++) {
+      const params: Record<string, string> = { max_results: "100" };
+      if (paginationToken) params.pagination_token = paginationToken;
+      const result = await this.get<{
+        data?: { id: string }[];
+        meta?: { next_token?: string };
+      }>(`/users/${userId}/bookmarks/folders/${folderId}`, params, accessToken);
+      ids.push(...(result.data ?? []).map((t) => t.id));
+      paginationToken = result.meta?.next_token;
+      if (!paginationToken) break;
+    }
     return ids.length > 0 ? this.getPostsByIds(ids) : [];
   }
 
