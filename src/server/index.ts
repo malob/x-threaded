@@ -3,7 +3,7 @@ import { buildApp } from "./app";
 import { SqliteStore } from "./store-sqlite";
 import { XApi } from "./xapi";
 
-const port = Number(process.env.PORT ?? 8787);
+const port = Number(process.env.PORT ?? 8788);
 const dbPath = process.env.DB_PATH ?? "data/x-threaded.sqlite";
 const maxPosts = Number(process.env.MAX_POSTS_PER_FETCH ?? 500);
 const bearerToken = process.env.X_BEARER_TOKEN;
@@ -13,10 +13,26 @@ if (!bearerToken) {
   process.exit(1);
 }
 
+const clientId = process.env.X_OAUTH_CLIENT_ID;
+const clientSecret = process.env.X_OAUTH_CLIENT_SECRET;
+
+if (!clientId || !clientSecret) {
+  console.warn(
+    "X_OAUTH_CLIENT_ID / X_OAUTH_CLIENT_SECRET are not both set — " +
+      "user-context features (your posts, bookmarks) are disabled. See .env.example.",
+  );
+}
+
+/**
+ * Local dev holds its own OAuth grant, separate from production's. Refresh
+ * tokens are single-use and rotate, so two stores must never share a chain;
+ * authorizing separately at /auth/login gives this instance its own.
+ */
 const app = buildApp({
   store: new SqliteStore(dbPath),
   xapi: new XApi(bearerToken),
   maxPosts,
+  oauth: clientId && clientSecret ? { clientId, clientSecret } : null,
 });
 
 app.use("/*", serveStatic({ root: "./dist" }));

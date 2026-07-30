@@ -21,6 +21,18 @@ incrementally.
 Single TypeScript repo: Bun + Hono server (X API proxy, SQLite cache via
 `bun:sqlite`, serves the built SPA) and a React/Vite frontend.
 
+## Configuration
+
+Every setting is per-deployment; none are committed. `.env.example` is the
+single reference for all of them, with notes on what each unlocks. Only
+`X_BEARER_TOKEN` is required — the rest add features and the app degrades
+cleanly without them.
+
+- **Local**: `cp .env.example .env` and fill it in.
+- **Deployed**: set the same names with `wrangler secret put NAME`. Secrets
+  are used rather than `wrangler.jsonc` vars because vars are committed, so
+  they would follow anyone who forks this repo.
+
 ## Running
 
 Two interchangeable server targets share the same app code
@@ -32,13 +44,11 @@ or Cloudflare Workers + D1.
 ```
 bun install
 bun run build          # build the SPA into dist/
-bun run dev:server     # start the server on :8787 (sources X_BEARER_TOKEN
-                       # from ~/.claude/secrets.env, or use .env — see
-                       # .env.example)
+bun run dev:server     # serves on :8788
 ```
 
 For frontend work with HMR, also run `bun run dev:web` (Vite on :5173,
-proxying /api to :8787).
+proxying /api and /auth to :8788).
 
 ### Cloudflare Workers (local simulation or deployed)
 
@@ -49,8 +59,16 @@ npx wrangler d1 migrations apply x-threaded --local
 ```
 
 To deploy: `wrangler login`, `wrangler deploy` (auto-provisions the D1
-database), `wrangler d1 migrations apply x-threaded --remote`, and set the
-API token with `wrangler secret put X_BEARER_TOKEN`.
+database), `wrangler d1 migrations apply x-threaded --remote`, then set your
+secrets. Note that `wrangler dev --remote` will not work against a Worker
+behind Cloudflare Access without an Access service token.
+
+### User-context features
+
+The Your posts tab and bookmark folder sync need OAuth credentials (see
+`.env.example`). Each deployment authorizes itself once at `/auth/login` and
+holds its own token chain — local and production must never share one, since
+refresh tokens are single-use and rotate.
 
 ## Status
 
