@@ -1,3 +1,4 @@
+import { checkAccess } from "./access";
 import { buildApp } from "./app";
 import { D1Store, type D1Database } from "./store-d1";
 import { XApi } from "./xapi";
@@ -6,6 +7,10 @@ interface Env {
   DB: D1Database;
   X_BEARER_TOKEN: string;
   MAX_POSTS_PER_FETCH?: string;
+  /** Cloudflare Access AUD tag; enables JWT enforcement when set. */
+  POLICY_AUD?: string;
+  /** https://<team>.cloudflareaccess.com */
+  TEAM_DOMAIN?: string;
 }
 
 /**
@@ -14,7 +19,13 @@ interface Env {
  * (run_worker_first).
  */
 export default {
-  fetch(request: Request, env: Env, ctx: unknown): Response | Promise<Response> {
+  async fetch(request: Request, env: Env, ctx: unknown): Promise<Response> {
+    const denial = await checkAccess(request, {
+      policyAud: env.POLICY_AUD,
+      teamDomain: env.TEAM_DOMAIN,
+    });
+    if (denial) return denial;
+
     if (!env.X_BEARER_TOKEN) {
       return Response.json(
         { error: "X_BEARER_TOKEN secret is not set — run: wrangler secret put X_BEARER_TOKEN" },

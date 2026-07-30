@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "hono": "^4.6.0",
+    "jose": "^6.2.5",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"
   },
