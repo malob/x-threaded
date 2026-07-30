@@ -118,10 +118,13 @@ export function buildApp({ store, xapi, maxPosts, oauth = null }: AppDeps): Hono
     const folderId = await store.getSetting(BOOKMARK_FOLDER_KEY);
     if (!folderId) return c.json({ error: "no bookmark folder selected" }, 400);
     const { token, userId } = await userContext(store, xapi, oauth);
-    const { posts, complete } = await xapi.getBookmarksByFolder(token, userId, folderId);
+    const { posts, ids, complete } = await xapi.getBookmarksByFolder(token, userId, folderId);
     await store.upsertPosts(posts);
 
-    const inFolder = new Set(posts.map((p) => p.id));
+    // Identity comes from the enumerated folder IDs, not the hydrated posts:
+    // hydration drops posts that went private or were deleted, and those are
+    // still bookmarks — not removals.
+    const inFolder = new Set(ids);
     const existing = await store.listSavedItems();
     const known = new Set(existing.map((i) => i.postId));
 

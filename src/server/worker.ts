@@ -48,15 +48,25 @@ export default {
       );
     }
 
-    const app = buildApp({
-      store: new D1Store(env.DB),
-      xapi: new XApi(env.X_BEARER_TOKEN),
-      maxPosts,
-      oauth:
-        env.X_OAUTH_CLIENT_ID && env.X_OAUTH_CLIENT_SECRET
-          ? { clientId: env.X_OAUTH_CLIENT_ID, clientSecret: env.X_OAUTH_CLIENT_SECRET }
-          : null,
-    });
-    return app.fetch(request, env, ctx as Parameters<typeof app.fetch>[2]);
+    // Built once per isolate, not per request. Beyond skipping the router
+    // rebuild, this is what makes oauth.ts's per-store refresh single-flight
+    // effective on Workers: it keys on the Storage instance, and per-request
+    // stores would never share an entry, letting concurrent requests present
+    // the same single-use refresh token twice (Stage 0 adversarial review).
+    // Bindings are stable within a deployment; new deploys start new isolates.
+    if (!cachedApp) {
+      cachedApp = buildApp({
+        store: new D1Store(env.DB),
+        xapi: new XApi(env.X_BEARER_TOKEN),
+        maxPosts,
+        oauth:
+          env.X_OAUTH_CLIENT_ID && env.X_OAUTH_CLIENT_SECRET
+            ? { clientId: env.X_OAUTH_CLIENT_ID, clientSecret: env.X_OAUTH_CLIENT_SECRET }
+            : null,
+      });
+    }
+    return cachedApp.fetch(request, env, ctx as Parameters<typeof cachedApp.fetch>[2]);
   },
 };
+
+let cachedApp: ReturnType<typeof buildApp> | null = null;

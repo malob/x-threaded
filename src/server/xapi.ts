@@ -301,7 +301,7 @@ export class XApi {
     userId: string,
     folderId: string,
     maxPages = 10,
-  ): Promise<{ posts: Post[]; complete: boolean }> {
+  ): Promise<{ posts: Post[]; ids: string[]; complete: boolean }> {
     const ids: string[] = [];
     let paginationToken: string | undefined;
     let complete = false;
@@ -319,7 +319,15 @@ export class XApi {
         break;
       }
     }
-    return { posts: ids.length > 0 ? await this.getPostsByIds(ids) : [], complete };
+    // ids and posts are returned separately: hydration can silently drop a
+    // post whose author went private or deleted it, and a bookmark that
+    // failed to hydrate is still a bookmark — reconciling removals against
+    // the hydrated subset would delete it (Stage 0 adversarial review).
+    return {
+      posts: ids.length > 0 ? await this.getPostsByIds(ids) : [],
+      ids,
+      complete,
+    };
   }
 
   /** Look up a single post ($0.005). */

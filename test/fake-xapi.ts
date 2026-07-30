@@ -91,7 +91,7 @@ export class FakeXApi implements XApiClient {
     userId: string,
     folderId: string,
     maxPages = 10,
-  ): Promise<{ posts: Post[]; complete: boolean }> {
+  ): Promise<{ posts: Post[]; ids: string[]; complete: boolean }> {
     return this.record("getBookmarksByFolder", this.onGetBookmarksByFolder, [
       accessToken,
       userId,

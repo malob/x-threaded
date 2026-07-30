@@ -257,3 +257,27 @@ describe("POST /api/bookmarks/sync reconciliation", () => {
     expect(saved).toContain(inFolder.id);
   });
 });
+
+describe("POST /api/bookmarks/sync hydration loss", () => {
+  it("keeps a bookmark whose post failed to hydrate, on a complete scan", async () => {
+    // B's author went private: the folder still lists B's id, but hydration
+    // returns no post for it. That is not an un-bookmarking.
+    const postA = makePost({ text: "hydrated bookmark" });
+    const missingId = snowflakeId("2025-05-05T05:05:05.000Z");
+    const goneId = snowflakeId("2025-06-06T06:06:06.000Z");
+    const { app, store } = await makeBookmarkApp([postA], true, "u1", [postA.id, missingId]);
+    await store.addSavedItems([
+      { postId: missingId, source: "bookmark", addedAt: new Date().toISOString() },
+      // Genuinely un-bookmarked (absent from the enumerated ids): removable.
+      { postId: goneId, source: "bookmark", addedAt: new Date().toISOString() },
+    ]);
+
+    const response = await app.request("/api/bookmarks/sync", { method: "POST" });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ removed: 1, complete: true });
+
+    const remaining = (await store.listSavedItems()).map((i) => i.postId);
+    expect(remaining).toContain(missingId);
+    expect(remaining).not.toContain(goneId);
+  });
+});

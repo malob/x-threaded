@@ -70,6 +70,8 @@ export async function makeBookmarkApp(
   folderPosts: Post[],
   complete: boolean,
   userId = "u1",
+  /** Folder IDs the scan enumerated; defaults to the hydrated posts' ids. */
+  folderIds?: string[],
 ): Promise<TestApp> {
   const harness = await makeAuthedApp({ userId });
   await harness.app.request("/api/settings", {
@@ -77,7 +79,11 @@ export async function makeBookmarkApp(
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ bookmarkFolderId: "folder1", bookmarkFolderName: "Reading" }),
   });
-  harness.xapi.onGetBookmarksByFolder = () => ({ posts: folderPosts, complete });
+  harness.xapi.onGetBookmarksByFolder = () => ({
+    posts: folderPosts,
+    ids: folderIds ?? folderPosts.map((p) => p.id),
+    complete,
+  });
   return harness;
 }
 
