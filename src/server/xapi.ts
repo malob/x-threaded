@@ -10,6 +10,8 @@ const MEDIA_FIELDS = "type,url,preview_image_url,width,height";
 const PAGE_SIZE = 100;
 const PAGE_DELAY_MS = 1100;
 
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
 interface ApiTweet {
   id: string;
   text: string;
@@ -161,7 +163,7 @@ export class XApi {
             ? Math.max(0, Number(resetHeader) * 1000 - Date.now()) + 1000
             : 5000
           : 2000;
-      await Bun.sleep(Math.min(waitMs, 60_000));
+      await sleep(Math.min(waitMs, 60_000));
       response = await fetch(url, {
         headers: { Authorization: `Bearer ${this.bearerToken}` },
       });
@@ -258,7 +260,7 @@ export class XApi {
         truncated = true;
         break;
       }
-      if (nextToken) await Bun.sleep(PAGE_DELAY_MS);
+      if (nextToken) await sleep(PAGE_DELAY_MS);
     } while (nextToken);
 
     // Referenced posts arrive without their media objects (the API only ships
