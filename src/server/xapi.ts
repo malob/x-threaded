@@ -1,5 +1,18 @@
+import * as v from "valibot";
 import { snowflakeMs } from "../shared/snowflake";
-import type { MediaItem, Post, PostEntities, UrlEntity } from "../shared/types";
+import type { MediaItem, Post, PostEntities } from "../shared/types";
+import {
+  BookmarkFolderPageSchema,
+  BookmarkFoldersSchema,
+  MeResponseSchema,
+  SearchPageSchema,
+  TweetLookupSchema,
+  summarizeIssues,
+  type ApiMedia,
+  type ApiTweet,
+  type ApiUser,
+  type Includes,
+} from "./x-wire";
 
 const API_BASE = "https://api.x.com/2";
 const POST_FIELDS =
@@ -30,61 +43,6 @@ function rfc3339(ms: number): string {
   return new Date(ms).toISOString().replace(/\.\d{3}Z$/, "Z");
 }
 
-interface ApiTweet {
-  id: string;
-  text: string;
-  author_id: string;
-  created_at: string;
-  conversation_id: string;
-  referenced_tweets?: { type: string; id: string }[];
-  entities?: { urls?: UrlEntity[] };
-  attachments?: { media_keys?: string[] };
-  /** Full text of long posts; the plain text field is truncated to ~280. */
-  note_tweet?: { text: string; entities?: { urls?: UrlEntity[] } };
-  public_metrics?: {
-    like_count: number;
-    reply_count: number;
-    retweet_count: number;
-    quote_count: number;
-    bookmark_count?: number;
-    impression_count: number;
-  };
-}
-
-interface ApiUser {
-  id: string;
-  name: string;
-  username: string;
-  profile_image_url?: string;
-}
-
-interface ApiMedia {
-  media_key: string;
-  type: string;
-  url?: string;
-  preview_image_url?: string;
-  width?: number;
-  height?: number;
-}
-
-interface Includes {
-  users?: ApiUser[];
-  tweets?: ApiTweet[];
-  media?: ApiMedia[];
-}
-
-interface SearchPage {
-  data?: ApiTweet[];
-  includes?: Includes;
-  meta?: { next_token?: string; result_count: number };
-}
-
-interface TweetLookup {
-  data?: ApiTweet;
-  includes?: Includes;
-  errors?: { title?: string; detail?: string }[];
-}
-
 export class XApiError extends Error {
   constructor(
     message: string,
@@ -92,6 +50,24 @@ export class XApiError extends Error {
   ) {
     super(message);
     this.name = "XApiError";
+  }
+}
+
+/**
+ * X answered, but not with the shape this endpoint is documented to return.
+ *
+ * Distinct from XApiError, which is X telling us something went wrong: this
+ * is the wire itself having moved. The message names the endpoint and the
+ * fields that disagreed — never the body, which is a response we don't
+ * control being echoed into logs and back to a client.
+ */
+export class XApiShapeError extends Error {
+  constructor(
+    readonly path: string,
+    readonly issues: string,
+  ) {
+    super(`X API returned an unexpected shape on ${path}: ${issues}`);
+    this.name = "XApiShapeError";
   }
 }
 
@@ -194,14 +170,18 @@ export class XApi {
   }
 
   /**
+   * @param schema the shape this endpoint promises; the body is held to it
+   * rather than asserted into place, so a wire change surfaces here instead
+   * of as an empty conversation further down.
    * @param token overrides the app-only bearer, for user-context endpoints
    * (own posts, bookmarks) that the app-only token can't reach.
    */
-  private async get<T>(
+  private async get<TSchema extends v.GenericSchema>(
     path: string,
+    schema: TSchema,
     params: Record<string, string>,
     token?: string,
-  ): Promise<T> {
+  ): Promise<v.InferOutput<TSchema>> {
     const url = new URL(`${API_BASE}${path}`);
     for (const [key, value] of Object.entries(params)) {
       url.searchParams.set(key, value);
@@ -223,16 +203,14 @@ export class XApi {
       const body = await response.text();
       throw new XApiError(`X API ${response.status} on ${path}: ${body}`, response.status);
     }
-    return (await response.json()) as T;
+    const parsed = v.safeParse(schema, await response.json());
+    if (!parsed.success) throw new XApiShapeError(path, summarizeIssues(parsed.issues));
+    return parsed.output;
   }
 
   /** The authenticated user (user-context). Confirms the token works. */
   async getMe(accessToken: string): Promise<{ id: string; username: string; name: string }> {
-    const result = await this.get<{ data?: { id: string; username: string; name: string } }>(
-      "/users/me",
-      {},
-      accessToken,
-    );
+    const result = await this.get("/users/me", MeResponseSchema, {}, accessToken);
     if (!result.data) throw new XApiError("could not resolve the authenticated user", 401);
     return result.data;
   }
@@ -260,7 +238,7 @@ export class XApi {
       "media.fields": MEDIA_FIELDS,
     };
     if (opts.paginationToken) params.pagination_token = opts.paginationToken;
-    const page = await this.get<SearchPage>(`/users/${userId}/tweets`, params, accessToken);
+    const page = await this.get(`/users/${userId}/tweets`, SearchPageSchema, params, accessToken);
     const users = new Map((page.includes?.users ?? []).map((u) => [u.id, u]));
     const media = mediaMap(page.includes);
     const fetchedAt = new Date().toISOString();
@@ -275,8 +253,9 @@ export class XApi {
     accessToken: string,
     userId: string,
   ): Promise<{ id: string; name: string }[]> {
-    const result = await this.get<{ data?: { id: string; name: string }[] }>(
+    const result = await this.get(
       `/users/${userId}/bookmarks/folders`,
+      BookmarkFoldersSchema,
       {},
       accessToken,
     );
@@ -308,10 +287,12 @@ export class XApi {
     for (let page = 0; page < maxPages; page++) {
       const params: Record<string, string> = { max_results: "100" };
       if (paginationToken) params.pagination_token = paginationToken;
-      const result = await this.get<{
-        data?: { id: string }[];
-        meta?: { next_token?: string };
-      }>(`/users/${userId}/bookmarks/folders/${folderId}`, params, accessToken);
+      const result = await this.get(
+        `/users/${userId}/bookmarks/folders/${folderId}`,
+        BookmarkFolderPageSchema,
+        params,
+        accessToken,
+      );
       ids.push(...(result.data ?? []).map((t) => t.id));
       paginationToken = result.meta?.next_token;
       if (!paginationToken) {
@@ -332,7 +313,7 @@ export class XApi {
 
   /** Look up a single post ($0.005). */
   async getPost(id: string): Promise<Post> {
-    const result = await this.get<TweetLookup>(`/tweets/${id}`, {
+    const result = await this.get(`/tweets/${id}`, TweetLookupSchema, {
       "tweet.fields": POST_FIELDS,
       expansions: EXPANSIONS,
       "user.fields": USER_FIELDS,
@@ -350,7 +331,7 @@ export class XApi {
   async getPostsByIds(ids: string[]): Promise<Post[]> {
     const results: Post[] = [];
     for (let i = 0; i < ids.length; i += 100) {
-      const page = await this.get<SearchPage>("/tweets", {
+      const page = await this.get("/tweets", SearchPageSchema, {
         ids: ids.slice(i, i + 100).join(","),
         "tweet.fields": POST_FIELDS,
         expansions: EXPANSIONS,
@@ -419,7 +400,7 @@ export class XApi {
       if (startTime) params.start_time = startTime;
       if (nextToken) params.next_token = nextToken;
 
-      const page = await this.get<SearchPage>("/tweets/search/all", params);
+      const page = await this.get("/tweets/search/all", SearchPageSchema, params);
       const users = new Map((page.includes?.users ?? []).map((u) => [u.id, u]));
       const media = mediaMap(page.includes);
       for (const tweet of page.data ?? []) {

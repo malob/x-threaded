@@ -1,7 +1,16 @@
 import { describe, expect, it } from "bun:test";
 import type { Hono } from "hono";
 import { SELF_ID } from "../src/server/oauth";
-import type { AuthStatus, OwnPostsResponse, Post, SavedListResponse } from "../src/shared/types";
+import { XApiError, XApiShapeError } from "../src/server/xapi";
+import type {
+  ApiError,
+  AuthRequiredError,
+  AuthStatus,
+  OwnPostsResponse,
+  Post,
+  SavedListResponse,
+  SettingsResponse,
+} from "../src/shared/types";
 import { makePost } from "./fixtures";
 import {
   SELF_USER_ID,
@@ -398,6 +407,155 @@ describe("GET /api/auth/status — answered from the store", () => {
 
     expect(await authStatus(app)).toEqual({ state: "unconfigured" });
     expect(xapi.calls).toEqual([]);
+  });
+});
+
+/**
+ * What a failure looks like from outside. The client acts on the status —
+ * offering a login, backing off, retrying — so a status that collapses into
+ * "something broke upstream" costs it every one of those choices.
+ */
+describe("the error contract", () => {
+  /** A POST /api/conversations whose getPost throws `error`. */
+  async function failingFetch(error: unknown): Promise<Response> {
+    const { app, xapi } = await makeTestApp();
+    xapi.onGetPost = () => {
+      throw error;
+    };
+    return await fetchConversationRequest(app, "1796000000000000000");
+  }
+
+  it("carries an X 401, 403 and 429 out as themselves", async () => {
+    for (const status of [401, 403, 429]) {
+      const response = await failingFetch(new XApiError("from X", status));
+      expect(response.status).toBe(status);
+      expect(await response.json()).toEqual({ error: "from X" });
+    }
+  });
+
+  it("answers a broken grant with a 401 and the way out of it", async () => {
+    const { app, store } = await makeAuthedApp();
+    await store.markTokenBroken(SELF_ID, "refresh", "invalid_grant");
+
+    const response = await app.request("/api/bookmarks/folders");
+
+    expect(response.status).toBe(401);
+    const body = (await response.json()) as AuthRequiredError;
+    expect(body.loginUrl).toBe("/auth/login");
+    expect(body.error).toContain("reconnect");
+  });
+
+  it("reports a wire that moved as a 502 naming the endpoint", async () => {
+    const response = await failingFetch(
+      new XApiShapeError("/tweets/1796000000000000000", "data: expected Array, got object"),
+    );
+
+    expect(response.status).toBe(502);
+    expect(((await response.json()) as ApiError).error).toContain("/tweets/1796000000000000000");
+  });
+
+  it("says nothing but 'internal error' when the fault is ours", async () => {
+    const response = await failingFetch(new Error("SQLITE_BUSY at /var/data/x.db"));
+
+    expect(response.status).toBe(500);
+    // Not the message: whatever threw, its text is an internal detail, and
+    // internal details have a way of being paths, queries and credentials.
+    expect(await response.json()).toEqual({ error: "internal error" });
+  });
+});
+
+/**
+ * Every JSON body is a stranger's. A mangled or wrong-shaped one is the
+ * client's mistake on all three routes that read one, and has to come back
+ * as a 400 — never as a 500 with a parser's complaint inside it.
+ */
+describe("request bodies", () => {
+  const JSON_HEADERS = { "Content-Type": "application/json" };
+
+  /** POST/PATCH `body` as-is, without JSON.stringify getting in the way. */
+  async function send(app: Hono, path: string, method: string, body: string): Promise<Response> {
+    return await app.request(path, { method, headers: JSON_HEADERS, body });
+  }
+
+  it("400s a malformed body on every route that reads one", async () => {
+    const { app, xapi } = await makeTestApp();
+
+    for (const [path, method] of [
+      ["/api/conversations", "POST"],
+      ["/api/settings", "PATCH"],
+      ["/api/read-state", "POST"],
+    ] as const) {
+      const response = await send(app, path, method, "{not json");
+      expect(response.status).toBe(400);
+      expect(await response.json()).toEqual({ error: "invalid JSON body" });
+    }
+    expect(xapi.calls).toEqual([]);
+  });
+
+  it("400s a body of the wrong shape, naming the field", async () => {
+    const { app, store } = await makeTestApp();
+    const post = makePost();
+    await store.upsertPosts([post]);
+
+    const response = await send(app, "/api/read-state", "POST", '{"postIds":"x","read":true}');
+
+    expect(response.status).toBe(400);
+    expect(((await response.json()) as ApiError).error).toContain("postIds");
+    // A rejected body writes nothing: the post is exactly as unread as it was.
+    expect(await store.getUnreadIds(post.conversationId)).toEqual([post.id]);
+  });
+
+  it("400s read state whose ids are not strings", async () => {
+    const { app } = await makeTestApp();
+
+    const response = await send(app, "/api/read-state", "POST", '{"postIds":[7],"read":true}');
+
+    expect(response.status).toBe(400);
+  });
+
+  it("400s a folder id that isn't a string or null", async () => {
+    const { app } = await makeTestApp();
+
+    const response = await send(app, "/api/settings", "PATCH", '{"bookmarkFolderId":42}');
+
+    expect(response.status).toBe(400);
+    expect(((await response.json()) as ApiError).error).toContain("bookmarkFolderId");
+  });
+
+  it("still accepts the bodies the client actually sends", async () => {
+    const { app, store } = await makeTestApp();
+    const post = makePost();
+    await store.upsertPosts([post]);
+
+    const settings = await send(
+      app,
+      "/api/settings",
+      "PATCH",
+      JSON.stringify({ bookmarkFolderId: "folder1", bookmarkFolderName: "Reading" }),
+    );
+    expect(settings.status).toBe(200);
+    expect(await settings.json()).toEqual({
+      bookmarkFolderId: "folder1",
+      bookmarkFolderName: "Reading",
+    } satisfies SettingsResponse);
+
+    // Clearing the folder sends an explicit null, not an absent field: the
+    // route tells the two apart, so the schema has to accept both.
+    const cleared = await send(app, "/api/settings", "PATCH", '{"bookmarkFolderId":null}');
+    expect(cleared.status).toBe(200);
+    expect(await cleared.json()).toEqual({
+      bookmarkFolderId: "",
+      bookmarkFolderName: "",
+    } satisfies SettingsResponse);
+
+    const readState = await send(
+      app,
+      "/api/read-state",
+      "POST",
+      JSON.stringify({ postIds: [post.id], read: true }),
+    );
+    expect(readState.status).toBe(200);
+    expect(await store.getUnreadIds(post.conversationId)).toEqual([]);
   });
 });
 

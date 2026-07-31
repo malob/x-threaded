@@ -245,14 +245,10 @@ describe("POST /api/conversations — parsing and error mapping", () => {
   });
 
   /**
-   * KNOWN GAP, pinned as-is: `c.req.json()` throws on a malformed body and the
-   * generic onError handler turns that into a 500 with a raw parser message.
-   * It should be a 400. The same unguarded `c.req.json()` appears in
-   * PATCH /api/settings and POST /api/read-state, so the fix belongs to Stage
-   * 4a's request-parsing boundary, not to one route. Update this expectation
-   * to 400 when that lands.
+   * A body the client mangled is the client's fault: it must read as a 400,
+   * not as a server fault with a parser's message attached to it.
    */
-  it("500s a malformed JSON body (should be 400 — Stage 4a)", async () => {
+  it("400s a malformed JSON body", async () => {
     const { app, xapi } = await makeTestApp();
 
     const response = await app.request("/api/conversations", {
@@ -261,7 +257,8 @@ describe("POST /api/conversations — parsing and error mapping", () => {
       body: "{not json",
     });
 
-    expect(response.status).toBe(500);
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({ error: "invalid JSON body" });
     expect(xapi.calls).toEqual([]);
   });
 
@@ -468,20 +465,18 @@ describe("GET /api/me/posts — how far the scan pages", () => {
   });
 
   /**
-   * The money assertion — zero X calls — holds. The status does not:
-   * `userContext` raises `XApiError(..., 401)` precisely so the client can
-   * offer the login link, but `app.onError` collapses every non-404 XApiError
-   * to 502, so "you need to sign in" arrives as "the upstream is broken".
-   * Pinned as-is; Stage 4a's error contract is where 401/403/429 start being
-   * preserved. Flip this to 401 then.
+   * Two assertions, both load-bearing: nothing is spent, and the answer says
+   * "sign in" rather than "the upstream is broken". `userContext` raises
+   * `XApiError(..., 401)` precisely so the client can offer the login link,
+   * and the error contract carries that status out intact.
    */
-  it("spends nothing when user context isn't configured (401 shows as 502)", async () => {
+  it("spends nothing when user context isn't configured, and 401s", async () => {
     const { app, xapi } = await makeTestApp();
 
     const response = await app.request("/api/me/posts");
 
     expect(xapi.calls).toEqual([]);
-    expect(response.status).toBe(502);
+    expect(response.status).toBe(401);
     expect(await response.json()).toEqual({
       error: "user context is not configured — visit /auth/login",
     });

@@ -1,9 +1,9 @@
 import { describe, expect, it } from "bun:test";
-import { XApi } from "../src/server/xapi";
+import { XApi, XApiShapeError } from "../src/server/xapi";
 import { snowflakeMs } from "../src/shared/snowflake";
 import type { Post } from "../src/shared/types";
 import { makePost, snowflakeId } from "./fixtures";
-import { makeBookmarkApp, makeTestApp } from "./harness";
+import { makeBookmarkApp } from "./harness";
 import type { Storage } from "../src/server/storage";
 import { withMockFetch } from "./setup";
 
@@ -148,6 +148,81 @@ describe("fetchConversation search window", () => {
       await new XApi("bearer", { pageDelayMs: 0 }).fetchConversation(ROOT_ID, 500, "998877");
       expect(urls[0]?.searchParams.get("since_id")).toBe("998877");
       expect(urls[0]?.searchParams.has("start_time")).toBe(false);
+    } finally {
+      restore();
+    }
+  });
+});
+
+describe("wire shapes", () => {
+  /** Serve one canned body to every request, whatever it asks for. */
+  function serveBody(body: unknown): () => void {
+    return withMockFetch(() => new Response(JSON.stringify(body)));
+  }
+
+  it("rejects a search page whose data is an object, not an array", async () => {
+    // Only `data` is wrong, so the rejection can't be pinned on anything else.
+    const restore = serveBody({
+      data: apiTweet(ROOT_ID, Date.parse(ROOT_AT)),
+      meta: { result_count: 1 },
+    });
+    try {
+      const api = new XApi("bearer", { pageDelayMs: 0 });
+      // A cast would make this an empty conversation — money spent, nothing
+      // to show, and no sign anything went wrong.
+      await expect(api.fetchConversation(ROOT_ID, 100)).rejects.toThrow(XApiShapeError);
+    } finally {
+      restore();
+    }
+  });
+
+  it("rejects a looked-up post that has no id", async () => {
+    const { id: _dropped, ...idless } = apiTweet(ROOT_ID, Date.parse(ROOT_AT));
+    const restore = serveBody({ data: idless });
+    try {
+      const error = await new XApi("bearer").getPost(ROOT_ID).catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(XApiShapeError);
+      // The endpoint, so the log says where the wire moved; and the field.
+      expect((error as XApiShapeError).message).toContain(`/tweets/${ROOT_ID}`);
+      expect((error as XApiShapeError).message).toContain("data.id");
+    } finally {
+      restore();
+    }
+  });
+
+  it("keeps the response body out of the error it throws", async () => {
+    const restore = serveBody({
+      data: { ...apiTweet(ROOT_ID, Date.parse(ROOT_AT)), id: 12345, text: "kompromat" },
+    });
+    try {
+      const error = await new XApi("bearer").getPost(ROOT_ID).catch((e: unknown) => e);
+      const message = (error as Error).message;
+      expect(message).toContain("data.id");
+      // Valibot's own issue messages quote the offending value; ours must not,
+      // or an X response ends up in the logs and back at the client.
+      expect(message).not.toContain("12345");
+      expect(message).not.toContain("kompromat");
+    } finally {
+      restore();
+    }
+  });
+
+  it("parses a response carrying fields we've never heard of", async () => {
+    const ms = Date.parse(ROOT_AT);
+    const restore = serveBody({
+      data: [{ ...apiTweet(ROOT_ID, ms), lang: "en", edit_history_tweet_ids: [ROOT_ID] }],
+      includes: {
+        users: [{ id: "100", name: "A", username: "a", verified_type: "blue" }],
+        some_new_expansion: [{ whatever: true }],
+      },
+      meta: { result_count: 1, newest_id: ROOT_ID },
+      // X adding a top-level key must never take the app down with it.
+      unexpected_envelope: { note: "hello" },
+    });
+    try {
+      const result = await new XApi("bearer", { pageDelayMs: 0 }).fetchConversation(ROOT_ID, 100);
+      expect(result.posts.map((p) => p.id)).toEqual([ROOT_ID]);
+      expect(result.posts[0]?.authorHandle).toBe("a");
     } finally {
       restore();
     }

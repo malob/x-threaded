@@ -1,4 +1,6 @@
+import * as v from "valibot";
 import type { OAuthTokens, Storage, StoredTokens } from "./storage";
+import { TokenResponseSchema, type TokenResponse } from "./x-wire";
 
 const TOKEN_URL = "https://api.x.com/2/oauth2/token";
 const AUTHORIZE_URL = "https://x.com/i/oauth2/authorize";
@@ -114,7 +116,7 @@ export async function exchangeCode(
       client_id: config.clientId,
     }),
   });
-  const body = (await response.json()) as TokenResponse;
+  const body = tokenResponse(await response.json());
   if (!response.ok || !body.access_token || !body.refresh_token) {
     throw new OAuthError(
       `code exchange failed (${response.status}): ${body.error_description ?? body.error ?? "unknown error"}`,
@@ -123,7 +125,7 @@ export async function exchangeCode(
   const tokens: OAuthTokens = {
     accessToken: body.access_token,
     refreshToken: body.refresh_token,
-    expiresAt: Date.now() + body.expires_in * 1000,
+    expiresAt: expiryOf(body),
     scope: body.scope ?? SCOPES.join(" "),
   };
   await store.putOAuthTokens(SELF_ID, tokens);
@@ -134,13 +136,28 @@ function basicAuth(clientId: string, clientSecret: string): string {
   return `Basic ${btoa(`${clientId}:${clientSecret}`)}`;
 }
 
-interface TokenResponse {
-  access_token: string;
-  refresh_token?: string;
-  expires_in: number;
-  scope?: string;
-  error?: string;
-  error_description?: string;
+/**
+ * The token endpoint's body, or an empty one when it isn't the shape we know.
+ *
+ * A body we can't read is not an error of its own: it is simply an answer
+ * carrying no token pair and no reason, which is what every caller here
+ * already has to handle. Throwing instead would route a malformed response
+ * around the refresh failure classification, and that classification is the
+ * only thing that knows whether the single-use token we sent is still ours.
+ */
+function tokenResponse(body: unknown): TokenResponse {
+  const parsed = v.safeParse(TokenResponseSchema, body);
+  return parsed.success ? parsed.output : {};
+}
+
+/**
+ * When the access token in this answer stops being usable. An answer that
+ * omits `expires_in` counts as already expired: the next request renews it,
+ * which beats both trusting a lifetime nobody stated and writing the NaN
+ * that arithmetic on a missing field yields into the row.
+ */
+function expiryOf(body: TokenResponse): number {
+  return Date.now() + (body.expires_in ?? 0) * 1000;
 }
 
 /**
@@ -196,7 +213,7 @@ async function refresh(
       }),
       signal: AbortSignal.timeout(timeoutMs),
     });
-    body = (await response.json()) as TokenResponse;
+    body = tokenResponse(await response.json());
   } catch (cause) {
     const detail = cause instanceof Error ? cause.message : String(cause);
     throw new RefreshError(`token refresh got no answer: ${detail}`, "unknown", detail);
@@ -229,7 +246,7 @@ async function refresh(
     accessToken: body.access_token,
     // A rotated refresh token should always come back; keep the old one if not.
     refreshToken: body.refresh_token ?? refreshToken,
-    expiresAt: Date.now() + body.expires_in * 1000,
+    expiresAt: expiryOf(body),
     // Empty when X omits it — the response describes the new token pair only,
     // so the caller carries the previously granted scope forward.
     scope: body.scope ?? "",

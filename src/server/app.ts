@@ -1,19 +1,38 @@
 import { Hono } from "hono";
+import * as v from "valibot";
 import { clamp, parseIntStrict } from "../shared/num";
 import type {
+  ApiError,
+  AuthRequiredError,
   AuthStatus,
+  ConversationResponse,
+  FoldersResponse,
+  OkResponse,
   OwnPostsResponse,
   OwnThread,
   Post,
   RefreshResponse,
+  ResolveResponse,
+  SavedListResponse,
+  SettingsResponse,
+  SyncResponse,
 } from "../shared/types";
 import { parsePostUrl } from "../shared/urls";
 import { conversationResponse, ingest } from "./conversations";
-import { authorizeUrl, createPkce, exchangeCode, newState, SELF_ID, type OAuthConfig } from "./oauth";
+import {
+  authorizeUrl,
+  createPkce,
+  exchangeCode,
+  newState,
+  OAuthError,
+  SELF_ID,
+  type OAuthConfig,
+} from "./oauth";
+import { jsonBody } from "./request";
 import { getQuotedFor, type Storage } from "./storage";
 import { groupOwnThreads } from "./threads";
 import { userContext } from "./user-context";
-import { XApiError, type XApiClient } from "./xapi";
+import { XApiError, XApiShapeError, type XApiClient } from "./xapi";
 
 export interface AppDeps {
   store: Storage;
@@ -35,6 +54,39 @@ const DEFAULT_THREADS = 10;
 /** Every extra thread asked for is more timeline to page through, and pages bill. */
 const MAX_THREADS = 50;
 
+/**
+ * X statuses that mean something to the client and so travel unchanged:
+ * "sign in again", "you lack the scope", "not there", "slow down". Every
+ * other X failure is the upstream being upstream, and reads as a 502.
+ */
+const PRESERVED_STATUSES = [401, 403, 404, 429] as const;
+type PreservedStatus = (typeof PRESERVED_STATUSES)[number];
+
+function isPreserved(status: number): status is PreservedStatus {
+  return PRESERVED_STATUSES.includes(status as PreservedStatus);
+}
+
+/** What POST /api/conversations accepts; `url` is validated by parsePostUrl. */
+const ConversationRequest = v.object({
+  url: v.optional(v.string()),
+  force: v.optional(v.boolean()),
+});
+
+/**
+ * Patch semantics, so absent and null are different answers: no
+ * bookmarkFolderId at all leaves the choice alone, an explicit null clears
+ * it. The schema has to admit both for the route to keep telling them apart.
+ */
+const SettingsPatch = v.object({
+  bookmarkFolderId: v.optional(v.nullable(v.string())),
+  bookmarkFolderName: v.optional(v.string()),
+});
+
+const ReadStateRequest = v.object({
+  postIds: v.array(v.string()),
+  read: v.boolean(),
+});
+
 /** The API routes, independent of runtime (Bun server or Cloudflare Worker). */
 export function buildApp({ store, xapi, maxPosts, oauth = null }: AppDeps): Hono {
   const app = new Hono();
@@ -42,10 +94,27 @@ export function buildApp({ store, xapi, maxPosts, oauth = null }: AppDeps): Hono
   app.onError((err, c) => {
     if (err instanceof XApiError) {
       console.error(`X API error (${err.status}): ${err.message}`);
-      return c.json({ error: err.message }, err.status === 404 ? 404 : 502);
+      return c.json(
+        { error: err.message } satisfies ApiError,
+        isPreserved(err.status) ? err.status : 502,
+      );
     }
+    if (err instanceof XApiShapeError) {
+      // The full issue list is for us; the client gets the endpoint only.
+      console.error(`X API shape error on ${err.path}: ${err.issues}`);
+      return c.json({ error: err.message } satisfies ApiError, 502);
+    }
+    if (err instanceof OAuthError) {
+      // A grant that is gone or unusable is an authentication problem, and
+      // the only thing the user can do about it is connect again.
+      console.error(err);
+      return c.json({ error: err.message, loginUrl: LOGIN_URL } satisfies AuthRequiredError, 401);
+    }
+    // Anything unclassified is ours, and its message is an internal detail —
+    // a stack-adjacent string, a driver error, whatever threw. Log it in
+    // full; tell the client only that it happened.
     console.error(err);
-    return c.json({ error: (err as Error).message }, 500);
+    return c.json({ error: "internal error" } satisfies ApiError, 500);
   });
 
   /**
@@ -55,7 +124,7 @@ export function buildApp({ store, xapi, maxPosts, oauth = null }: AppDeps): Hono
    * rather than server state.
    */
   app.get("/auth/login", async (c) => {
-    if (!oauth) return c.json({ error: "OAuth is not configured" }, 400);
+    if (!oauth) return c.json({ error: "OAuth is not configured" } satisfies ApiError, 400);
     const { verifier, challenge } = await createPkce();
     const state = newState();
     const redirectUri = new URL("/auth/callback", c.req.url).toString();
@@ -67,17 +136,19 @@ export function buildApp({ store, xapi, maxPosts, oauth = null }: AppDeps): Hono
   });
 
   app.get("/auth/callback", async (c) => {
-    if (!oauth) return c.json({ error: "OAuth is not configured" }, 400);
+    if (!oauth) return c.json({ error: "OAuth is not configured" } satisfies ApiError, 400);
     const code = c.req.query("code");
     const state = c.req.query("state");
     const denied = c.req.query("error");
-    if (denied) return c.json({ error: `authorization denied: ${denied}` }, 400);
-    if (!code || !state) return c.json({ error: "missing code or state" }, 400);
+    if (denied) {
+      return c.json({ error: `authorization denied: ${denied}` } satisfies ApiError, 400);
+    }
+    if (!code || !state) return c.json({ error: "missing code or state" } satisfies ApiError, 400);
 
     const cookie = /(?:^|;\s*)x_pkce=([^;]+)/.exec(c.req.header("Cookie") ?? "")?.[1];
     const [verifier, expectedState] = (cookie ?? "").split(".");
     if (!verifier || !expectedState || expectedState !== state) {
-      return c.json({ error: "state mismatch — restart the login" }, 400);
+      return c.json({ error: "state mismatch — restart the login" } satisfies ApiError, 400);
     }
 
     const redirectUri = new URL("/auth/callback", c.req.url).toString();
@@ -90,18 +161,22 @@ export function buildApp({ store, xapi, maxPosts, oauth = null }: AppDeps): Hono
   /** Bookmark folders, for choosing which one feeds the saved tab. */
   app.get("/api/bookmarks/folders", async (c) => {
     const { token, userId } = await userContext(store, xapi, oauth);
-    return c.json({ folders: await xapi.getBookmarkFolders(token, userId) });
+    return c.json({
+      folders: await xapi.getBookmarkFolders(token, userId),
+    } satisfies FoldersResponse);
   });
 
   app.get("/api/settings", async (c) => {
     return c.json({
       bookmarkFolderId: await store.getSetting(BOOKMARK_FOLDER_KEY),
       bookmarkFolderName: await store.getSetting(BOOKMARK_FOLDER_NAME_KEY),
-    });
+    } satisfies SettingsResponse);
   });
 
   app.patch("/api/settings", async (c) => {
-    const body = await c.req.json<{ bookmarkFolderId?: string | null; bookmarkFolderName?: string }>();
+    const parsed = await jsonBody(c.req.raw, SettingsPatch);
+    if (!parsed.ok) return c.json({ error: parsed.error } satisfies ApiError, 400);
+    const body = parsed.body;
     if (body.bookmarkFolderId !== undefined) {
       await store.setSetting(BOOKMARK_FOLDER_KEY, body.bookmarkFolderId ?? "");
       await store.setSetting(BOOKMARK_FOLDER_NAME_KEY, body.bookmarkFolderName ?? "");
@@ -109,7 +184,7 @@ export function buildApp({ store, xapi, maxPosts, oauth = null }: AppDeps): Hono
     return c.json({
       bookmarkFolderId: await store.getSetting(BOOKMARK_FOLDER_KEY),
       bookmarkFolderName: await store.getSetting(BOOKMARK_FOLDER_NAME_KEY),
-    });
+    } satisfies SettingsResponse);
   });
 
   /**
@@ -125,7 +200,9 @@ export function buildApp({ store, xapi, maxPosts, oauth = null }: AppDeps): Hono
    */
   app.post("/api/bookmarks/sync", async (c) => {
     const folderId = await store.getSetting(BOOKMARK_FOLDER_KEY);
-    if (!folderId) return c.json({ error: "no bookmark folder selected" }, 400);
+    if (!folderId) {
+      return c.json({ error: "no bookmark folder selected" } satisfies ApiError, 400);
+    }
     const { token, userId } = await userContext(store, xapi, oauth);
     const { posts, ids, complete } = await xapi.getBookmarksByFolder(token, userId, folderId);
     await store.upsertPosts(posts);
@@ -151,7 +228,12 @@ export function buildApp({ store, xapi, maxPosts, oauth = null }: AppDeps): Hono
       : [];
     await store.removeSavedItems(gone.map((i) => i.postId));
 
-    return c.json({ synced: posts.length, added: fresh.length, removed: gone.length, complete });
+    return c.json({
+      synced: posts.length,
+      added: fresh.length,
+      removed: gone.length,
+      complete,
+    } satisfies SyncResponse);
   });
 
   /** The saved queue: bookmarked and manually added posts, newest first. */
@@ -175,7 +257,10 @@ export function buildApp({ store, xapi, maxPosts, oauth = null }: AppDeps): Hono
       rootId: post.conversationId,
       loaded: loaded.has(post.conversationId),
     }));
-    return c.json({ items: entries, quoted: await getQuotedFor(store, posts) });
+    return c.json({
+      items: entries,
+      quoted: await getQuotedFor(store, posts),
+    } satisfies SavedListResponse);
   });
 
   app.delete("/api/saved/:postId", async (c) => {
@@ -184,10 +269,13 @@ export function buildApp({ store, xapi, maxPosts, oauth = null }: AppDeps): Hono
     if (item?.source === "bookmark") {
       // Removing it here would be undone by the next sync; the folder on X is
       // the source of truth for these.
-      return c.json({ error: "un-bookmark it on x.com — sync will remove it here" }, 409);
+      return c.json(
+        { error: "un-bookmark it on x.com — sync will remove it here" } satisfies ApiError,
+        409,
+      );
     }
     await store.removeSavedItem(postId);
-    return c.json({ ok: true });
+    return c.json({ ok: true } satisfies OkResponse);
   });
 
   /**
@@ -206,7 +294,7 @@ export function buildApp({ store, xapi, maxPosts, oauth = null }: AppDeps): Hono
     const raw = c.req.query("threads");
     const requestedThreads = raw === undefined ? DEFAULT_THREADS : parseIntStrict(raw);
     if (requestedThreads === null) {
-      return c.json({ error: "threads must be an integer" }, 400);
+      return c.json({ error: "threads must be an integer" } satisfies ApiError, 400);
     }
     const target = clamp(requestedThreads, 1, MAX_THREADS);
 
@@ -231,7 +319,7 @@ export function buildApp({ store, xapi, maxPosts, oauth = null }: AppDeps): Hono
     }
 
     const shown = items.slice(0, target);
-    const response: OwnPostsResponse = {
+    return c.json({
       items: shown,
       quoted: await getQuotedFor(
         store,
@@ -239,8 +327,7 @@ export function buildApp({ store, xapi, maxPosts, oauth = null }: AppDeps): Hono
       ),
       // More to find if the timeline isn't exhausted, or we trimmed the list.
       hasMore: items.length > target || paginationToken !== undefined,
-    };
-    return c.json(response);
+    } satisfies OwnPostsResponse);
   });
 
   /**
@@ -286,22 +373,34 @@ export function buildApp({ store, xapi, maxPosts, oauth = null }: AppDeps): Hono
       post && (await store.hasConversation(post.conversationId)) ? post.conversationId : null;
     // The reply count lets the client estimate a fetch before committing to
     // it; null when we've never seen the post, so no estimate is shown.
-    return c.json({ rootId, replyCount: post?.metrics.replies ?? null });
+    return c.json({
+      rootId,
+      replyCount: post?.metrics.replies ?? null,
+    } satisfies ResolveResponse);
   });
 
   app.get("/api/conversations/:rootId", async (c) => {
     const rootId = c.req.param("rootId");
     if (!(await store.hasConversation(rootId))) {
-      return c.json({ error: "conversation not cached" }, 404);
+      return c.json({ error: "conversation not cached" } satisfies ApiError, 404);
     }
-    return c.json(await conversationResponse(store, rootId, null, { fromCache: true }));
+    return c.json(
+      (await conversationResponse(store, rootId, null, {
+        fromCache: true,
+      })) satisfies ConversationResponse,
+    );
   });
 
   app.post("/api/conversations", async (c) => {
-    const body = await c.req.json<{ url?: string; force?: boolean }>();
+    const parsed = await jsonBody(c.req.raw, ConversationRequest);
+    if (!parsed.ok) return c.json({ error: parsed.error } satisfies ApiError, 400);
+    const body = parsed.body;
     const postId = body.url ? parsePostUrl(body.url) : null;
     if (!postId) {
-      return c.json({ error: "could not parse a post URL or ID from input" }, 400);
+      return c.json(
+        { error: "could not parse a post URL or ID from input" } satisfies ApiError,
+        400,
+      );
     }
 
     // Cache first: a stored post already carries its conversation ID, so a
@@ -313,7 +412,11 @@ export function buildApp({ store, xapi, maxPosts, oauth = null }: AppDeps): Hono
     const firstFetch = !(await store.hasConversation(rootId));
 
     if (!firstFetch && !body.force) {
-      return c.json(await conversationResponse(store, rootId, focusId, { fromCache: true }));
+      return c.json(
+        (await conversationResponse(store, rootId, focusId, {
+          fromCache: true,
+        })) satisfies ConversationResponse,
+      );
     }
 
     const fetched = await xapi.fetchConversation(rootId, maxPosts);
@@ -354,14 +457,14 @@ export function buildApp({ store, xapi, maxPosts, oauth = null }: AppDeps): Hono
         fromCache: false,
       })),
       cost,
-    });
+    } satisfies ConversationResponse);
   });
 
   app.post("/api/conversations/:rootId/refresh", async (c) => {
     const rootId = c.req.param("rootId");
     const meta = await store.getConversationMeta(rootId);
     if (!meta) {
-      return c.json({ error: "conversation not cached" }, 404);
+      return c.json({ error: "conversation not cached" } satisfies ApiError, 404);
     }
 
     const before = await store.existingPostIds(rootId);
@@ -384,30 +487,27 @@ export function buildApp({ store, xapi, maxPosts, oauth = null }: AppDeps): Hono
     }
 
     const newCount = (await store.existingPostIds(rootId)).size - before.size;
-    const response: RefreshResponse = {
+    return c.json({
       ...(await conversationResponse(store, rootId, null, { truncated, fromCache: false })),
       newCount,
       cost,
-    };
-    return c.json(response);
+    } satisfies RefreshResponse);
   });
 
   app.post("/api/conversations/:rootId/read", async (c) => {
     const rootId = c.req.param("rootId");
     if (!(await store.hasConversation(rootId))) {
-      return c.json({ error: "conversation not cached" }, 404);
+      return c.json({ error: "conversation not cached" } satisfies ApiError, 404);
     }
     await store.markConversationRead(rootId);
-    return c.json({ ok: true });
+    return c.json({ ok: true } satisfies OkResponse);
   });
 
   app.post("/api/read-state", async (c) => {
-    const body = await c.req.json<{ postIds?: string[]; read?: boolean }>();
-    if (!Array.isArray(body.postIds) || typeof body.read !== "boolean") {
-      return c.json({ error: "expected { postIds: string[], read: boolean }" }, 400);
-    }
-    await store.setReadState(body.postIds, body.read);
-    return c.json({ ok: true });
+    const parsed = await jsonBody(c.req.raw, ReadStateRequest);
+    if (!parsed.ok) return c.json({ error: parsed.error } satisfies ApiError, 400);
+    await store.setReadState(parsed.body.postIds, parsed.body.read);
+    return c.json({ ok: true } satisfies OkResponse);
   });
 
   return app;

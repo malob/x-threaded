@@ -81,6 +81,35 @@ export interface ApiError {
   error: string;
 }
 
+/**
+ * An error only a (re)connection fixes, so it carries where to go. Distinct
+ * from a plain ApiError because the client offers a login link, not a retry.
+ */
+export interface AuthRequiredError extends ApiError {
+  loginUrl: string;
+}
+
+/** A write that either happened or raised; there is nothing else to report. */
+export interface OkResponse {
+  ok: boolean;
+}
+
+export interface ResolveResponse {
+  /** The cached conversation this post belongs to, or null if we have none. */
+  rootId: string | null;
+  /** Replies on the post, for estimating a fetch; null when it's unknown to us. */
+  replyCount: number | null;
+}
+
+export interface SyncResponse {
+  /** Posts the folder scan hydrated. */
+  synced: number;
+  added: number;
+  removed: number;
+  /** False when the scan hit its page cap; removals were skipped. */
+  complete: boolean;
+}
+
 export interface SavedEntry {
   post: Post;
   /** "bookmark" (synced from the folder) or "manual" (added in the app). */
