@@ -318,3 +318,52 @@ SELECT 1;`;
     expect(statements.every((statement) => !statement.includes("--"))).toBe(true);
   });
 });
+
+/**
+ * Databases from schema eras older than the retired SCHEMA constant: the
+ * Stage 2b adversarial review showed a single posts-table sentinel would
+ * falsely record migrations these never ran.
+ */
+describe("applyMigrations — historical partial schemas", () => {
+  it("records only what is present and runs the rest (pre-oauth era)", async () => {
+    // The 0001-era shape: posts/conversations/read_state, nothing later.
+    const db = new Database(":memory:");
+    db.run(`
+      CREATE TABLE posts (id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL);
+      CREATE TABLE conversations (root_id TEXT PRIMARY KEY);
+      CREATE TABLE read_state (post_id TEXT PRIMARY KEY);
+    `);
+    db.run(`INSERT INTO posts (id, conversation_id) VALUES ('1', '1')`);
+    const driver = bunDriverFor(db);
+
+    await applyMigrations(driver, MIGRATIONS);
+
+    // All four end up in the ledger — 0001 by detection, the rest by running.
+    expect(await ledger(driver)).toEqual(MIGRATION_NAMES);
+    const present = await tables(driver);
+    for (const table of ["oauth_tokens", "settings", "saved_items"]) {
+      expect(present).toContain(table);
+    }
+    expect(await columns(driver, "oauth_tokens")).toContain("user_id");
+    expect(await driver.first(`SELECT id FROM posts WHERE id = '1'`)).not.toBeNull();
+  });
+
+  it("survives a crash that left the ledger created but empty", async () => {
+    // A legacy database plus an empty ledger: the pre-fix code replayed the
+    // migrations here and died on 0003's duplicate column.
+    const db = new Database(":memory:");
+    db.run(LEGACY_SCHEMA);
+    const driver = bunDriverFor(db);
+    await driver.run(`CREATE TABLE IF NOT EXISTS "d1_migrations"(
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT UNIQUE,
+      applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL)`);
+
+    await applyMigrations(driver, MIGRATIONS);
+
+    expect(await ledger(driver)).toEqual(MIGRATION_NAMES);
+    // Re-run stays a no-op.
+    await applyMigrations(driver, MIGRATIONS);
+    expect(await ledger(driver)).toEqual(MIGRATION_NAMES);
+  });
+});

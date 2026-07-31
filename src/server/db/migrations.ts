@@ -58,35 +58,30 @@ const LEDGER_TABLE = "d1_migrations";
 const RECORD_SQL = `INSERT INTO "d1_migrations" (name) VALUES (?)`;
 
 /**
- * The table whose presence means "this database already has a schema".
+ * Whether a database already contains what a migration creates, decided per
+ * migration by probing for its distinctive schema artifact.
  *
- * `posts` is created by the first migration and by every path that ever
- * produced a schema here, and no migration drops it, so it is the one table a
- * populated database is guaranteed to have.
+ * Pre-ledger databases were built by the retired `SCHEMA` + `addMissingColumns`
+ * path, so their migrations must be *recorded*, not re-run (0003's ALTER TABLE
+ * throws on a column that already exists). An earlier draft inferred all four
+ * from one `posts` sentinel; the Stage 2b adversarial review showed that
+ * over-claims on databases from older schema eras (posts present, oauth_tokens
+ * never created) — recording migrations that never ran and leaving the tables
+ * missing for good. Probing each migration for its own artifact records
+ * exactly what is present and runs exactly what is not, whatever era the
+ * database stopped at — and makes replay after a half-completed baseline
+ * impossible, since an unrecorded-but-present migration is re-detected on the
+ * next boot rather than re-executed.
+ *
+ * Migrations without a probe (0005 onward) always run when unrecorded: only
+ * the pre-ledger era needs detection, and it ended with these four.
  */
-const SCHEMA_SENTINEL_TABLE = "posts";
-
-/**
- * The migrations the retired `SCHEMA` constant was equivalent to.
- *
- * Baselining needs to know *which* migrations a pre-ledger database already
- * satisfies, and for this repo the answer is exact rather than inferred: the
- * retired local path ran the whole of `SCHEMA` — the post-0004 shape — on
- * every startup with `CREATE TABLE IF NOT EXISTS`, then patched the columns
- * `SCHEMA` could not add to an existing table (`addMissingColumns`, which was
- * 0003 re-implemented in TypeScript). So any database with a `posts` table in
- * it necessarily has all four of these and nothing more.
- *
- * Listing them rather than baselining "everything currently in migrations/"
- * matters for later stages: when 0005 ships, a legacy database opened for the
- * first time after that must still *apply* 0005, not silently record it.
- */
-const BASELINE_MIGRATIONS = [
-  "0001_init.sql",
-  "0002_oauth_tokens.sql",
-  "0003_oauth_user_id.sql",
-  "0004_settings_and_saved.sql",
-];
+const BASELINE_PROBES: Record<string, (driver: SqlDriver) => Promise<boolean>> = {
+  "0001_init.sql": (driver) => tableExists(driver, "posts"),
+  "0002_oauth_tokens.sql": (driver) => tableExists(driver, "oauth_tokens"),
+  "0003_oauth_user_id.sql": (driver) => columnExists(driver, "oauth_tokens", "user_id"),
+  "0004_settings_and_saved.sql": (driver) => tableExists(driver, "settings"),
+};
 
 /**
  * Bring `driver`'s database up to date with `migrations`, recording each in a
@@ -95,30 +90,37 @@ const BASELINE_MIGRATIONS = [
  * own ledger row, so a migration is either fully applied and recorded or
  * neither.
  *
- * Baselining: a database that has no ledger but *does* already have a schema
- * predates Stage 2b — it was built by the retired `SCHEMA` + `addMissingColumns`
- * path (Malo's data/x-threaded.sqlite, most importantly). Re-running the
- * migrations on it would throw the first time it hit 0003's
- * `ALTER TABLE oauth_tokens ADD COLUMN user_id`, because the column is already
- * there. So those migrations are recorded as applied without being executed,
- * and only migrations beyond the baseline actually run. A genuinely fresh
- * database has no sentinel table and runs everything.
+ * Baselining: any migration that is unrecorded but whose probe finds its
+ * artifact already present (see BASELINE_PROBES) is recorded without being
+ * executed. Probing runs before anything is written, and the ledger's creation
+ * commits in the same batch as the baseline rows — so an interruption at any
+ * point leaves either nothing (re-probed next boot) or a consistent ledger,
+ * never an empty ledger that would replay 0003 into a duplicate-column error
+ * (Stage 2b adversarial review, finding 2). A genuinely fresh database probes
+ * false everywhere and runs everything.
  */
 export async function applyMigrations(driver: SqlDriver, migrations: Migration[]): Promise<void> {
   const hadLedger = await tableExists(driver, LEDGER_TABLE);
-  if (!hadLedger) {
-    await driver.run(CREATE_LEDGER_SQL);
-    if (await tableExists(driver, SCHEMA_SENTINEL_TABLE)) {
-      await driver.batch(
-        migrations
-          .filter((migration) => BASELINE_MIGRATIONS.includes(migration.name))
-          .map((migration) => ({ sql: RECORD_SQL, params: [migration.name] })),
-      );
-    }
+  const applied = new Set<string>(
+    hadLedger
+      ? (await driver.all<{ name: string }>(`SELECT name FROM "d1_migrations"`)).map(
+          (row) => row.name,
+        )
+      : [],
+  );
+
+  const preApplied: string[] = [];
+  for (const migration of migrations) {
+    if (applied.has(migration.name)) continue;
+    const probe = BASELINE_PROBES[migration.name];
+    if (probe && (await probe(driver))) preApplied.push(migration.name);
   }
 
-  const rows = await driver.all<{ name: string }>(`SELECT name FROM "d1_migrations"`);
-  const applied = new Set(rows.map((row) => row.name));
+  const setup: { sql: string; params: unknown[] }[] = [];
+  if (!hadLedger) setup.push({ sql: CREATE_LEDGER_SQL, params: [] });
+  setup.push(...preApplied.map((name) => ({ sql: RECORD_SQL, params: [name] })));
+  if (setup.length > 0) await driver.batch(setup);
+  for (const name of preApplied) applied.add(name);
 
   for (const migration of migrations) {
     if (applied.has(migration.name)) continue;
@@ -133,6 +135,15 @@ async function tableExists(driver: SqlDriver, name: string): Promise<boolean> {
   const row = await driver.first<{ name: string }>(
     `SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?`,
     [name],
+  );
+  return row !== null;
+}
+
+async function columnExists(driver: SqlDriver, table: string, column: string): Promise<boolean> {
+  if (!(await tableExists(driver, table))) return false;
+  const row = await driver.first<{ name: string }>(
+    `SELECT name FROM pragma_table_info(?) WHERE name = ?`,
+    [table, column],
   );
   return row !== null;
 }
