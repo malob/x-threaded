@@ -200,7 +200,10 @@ export class XApi {
       response = await fetch(url, { headers });
     }
     if (!response.ok) {
-      const body = await response.text();
+      // X's own error JSON is short; an intermediary's error page is not.
+      // This message travels into logs and API responses, so the body is
+      // capped — the useful part of an error description fits well inside it.
+      const body = (await response.text()).slice(0, 300);
       throw new XApiError(`X API ${response.status} on ${path}: ${body}`, response.status);
     }
     const parsed = v.safeParse(schema, await response.json());

@@ -122,14 +122,20 @@ export type BookmarkFolderPage = v.InferOutput<typeof BookmarkFolderPageSchema>;
  * `error`/`error_description` instead of a token pair, and the refresh
  * failure classification reads exactly those. Callers check what they need
  * and treat an unparseable body as no usable answer.
+ *
+ * Each field also falls back to absent on its own: one malformed sibling
+ * must not erase the rest of the body, because `error` is the discriminator
+ * that tells a dead grant from a refusal — losing it to, say, a mistyped
+ * `scope` would misclassify `invalid_grant` as retryable and keep
+ * re-presenting a token X has already killed.
  */
 export const TokenResponseSchema = v.object({
-  access_token: v.optional(v.string()),
-  refresh_token: v.optional(v.string()),
-  expires_in: v.optional(v.number()),
-  scope: v.optional(v.string()),
-  error: v.optional(v.string()),
-  error_description: v.optional(v.string()),
+  access_token: v.fallback(v.optional(v.string()), undefined),
+  refresh_token: v.fallback(v.optional(v.string()), undefined),
+  expires_in: v.fallback(v.optional(v.number()), undefined),
+  scope: v.fallback(v.optional(v.string()), undefined),
+  error: v.fallback(v.optional(v.string()), undefined),
+  error_description: v.fallback(v.optional(v.string()), undefined),
 });
 export type TokenResponse = v.InferOutput<typeof TokenResponseSchema>;
 

@@ -237,15 +237,18 @@ async function refresh(
       detail,
     );
   }
-  if (!body.access_token) {
-    const detail = `HTTP ${response.status} with no access_token`;
+  // A success is only a success when the whole rotated pair arrived. An
+  // answer missing the new refresh token cannot be finalized — persisting
+  // the old one as current would record a token X may have just killed as
+  // the grant's future — so it stays unknown and the lease stands.
+  if (!body.access_token || !body.refresh_token) {
+    const detail = `HTTP ${response.status} without a full token pair`;
     throw new RefreshError(`token refresh returned nothing usable: ${detail}`, "unknown", detail);
   }
 
   return {
     accessToken: body.access_token,
-    // A rotated refresh token should always come back; keep the old one if not.
-    refreshToken: body.refresh_token ?? refreshToken,
+    refreshToken: body.refresh_token,
     expiresAt: expiryOf(body),
     // Empty when X omits it — the response describes the new token pair only,
     // so the caller carries the previously granted scope forward.

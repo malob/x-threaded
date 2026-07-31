@@ -337,6 +337,22 @@ describe("getUserAccessToken — a grant X has rejected", () => {
     });
   });
 
+  it("still reads invalid_grant when a sibling field is malformed", async () => {
+    const store = await storeWithExpiredToken();
+
+    await withEndpoint(
+      // One malformed sibling (scope as a number) must not erase the error
+      // discriminator: the grant is just as dead as in a well-formed body,
+      // and misreading it as `refused` would keep presenting a spent token.
+      async () => Response.json({ error: "invalid_grant", scope: 42 }, { status: 400 }),
+      async () => {
+        await expect(getUserAccessToken(store, CONFIG, FAST)).rejects.toThrow(/invalid_grant/);
+      },
+    );
+
+    expect(await store.getOAuthTokens(SELF_ID)).toMatchObject({ state: "broken" });
+  });
+
   it("leaves the lease standing when the outcome is unknowable", async () => {
     const store = await storeWithExpiredToken();
 
@@ -374,6 +390,26 @@ describe("getUserAccessToken — a grant X has rejected", () => {
     // itself rejected the request (4xx): the lease stands for recovery.
     expect(await store.getOAuthTokens(SELF_ID)).toMatchObject({
       state: "refreshing",
+      recoveryUsed: false,
+    });
+  });
+
+  it("treats a 2xx missing the rotated refresh token as unknowable", async () => {
+    const store = await storeWithExpiredToken();
+
+    await withEndpoint(
+      async () => Response.json({ access_token: "at-1", expires_in: 7200 }),
+      async () => {
+        await expect(getUserAccessToken(store, CONFIG, FAST)).rejects.toThrow(/nothing usable/);
+      },
+    );
+
+    // X rotates on every refresh, so a success that omits the new refresh
+    // token cannot be finalized: persisting the old one as `ready` would
+    // record a token X may have just killed as the grant's future.
+    expect(await store.getOAuthTokens(SELF_ID)).toMatchObject({
+      state: "refreshing",
+      refreshToken: "refresh-0",
       recoveryUsed: false,
     });
   });

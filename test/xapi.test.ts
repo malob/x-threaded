@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { XApi, XApiShapeError } from "../src/server/xapi";
+import { XApi, XApiError, XApiShapeError } from "../src/server/xapi";
 import { snowflakeMs } from "../src/shared/snowflake";
 import type { Post } from "../src/shared/types";
 import { makePost, snowflakeId } from "./fixtures";
@@ -223,6 +223,19 @@ describe("wire shapes", () => {
       const result = await new XApi("bearer", { pageDelayMs: 0 }).fetchConversation(ROOT_ID, 100);
       expect(result.posts.map((p) => p.id)).toEqual([ROOT_ID]);
       expect(result.posts[0]?.authorHandle).toBe("a");
+    } finally {
+      restore();
+    }
+  });
+
+  it("truncates an upstream error body instead of carrying it whole", async () => {
+    // An intermediary's error page can be arbitrarily large HTML, and this
+    // message travels into logs and API responses.
+    const restore = withMockFetch(() => new Response("<html>".repeat(2_000), { status: 400 }));
+    try {
+      const error = await new XApi("bearer").getPost(ROOT_ID).catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(XApiError);
+      expect((error as Error).message.length).toBeLessThan(500);
     } finally {
       restore();
     }
