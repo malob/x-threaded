@@ -8,8 +8,8 @@ const TOKEN_URL = "https://api.x.com/2/oauth2/token";
 const CONFIG: OAuthConfig = { clientId: "client-id", clientSecret: "client-secret" };
 const GRANTED_SCOPE = "tweet.read users.read bookmark.read offline.access";
 
-function newStore(): SqlStore {
-  return new SqlStore(bunDriver(":memory:"));
+async function newStore(): Promise<SqlStore> {
+  return new SqlStore(await bunDriver(":memory:"));
 }
 
 /** A token endpoint that counts hits and hands back a fresh, unexpired pair. */
@@ -33,7 +33,7 @@ function tokenEndpoint(options: { scope?: string; delayMs?: number } = {}) {
 describe("getUserAccessToken", () => {
   it("returns a live access token without touching the network", async () => {
     // No withMockFetch: the tripwire turns any refresh attempt into a failure.
-    const store = newStore();
+    const store = await newStore();
     await store.putOAuthTokens(SELF_ID, {
       accessToken: "live",
       refreshToken: "refresh-0",
@@ -46,7 +46,7 @@ describe("getUserAccessToken", () => {
   });
 
   it("keeps the cached user ID and prior scope across a rotation", async () => {
-    const store = newStore();
+    const store = await newStore();
     await store.putOAuthTokens(SELF_ID, {
       accessToken: "expired",
       refreshToken: "refresh-0",
@@ -74,7 +74,7 @@ describe("getUserAccessToken", () => {
   });
 
   it("takes a scope from the refresh response when X sends one", async () => {
-    const store = newStore();
+    const store = await newStore();
     await store.putOAuthTokens(SELF_ID, {
       accessToken: "expired",
       refreshToken: "refresh-0",
@@ -98,7 +98,7 @@ describe("getUserAccessToken", () => {
   });
 
   it("presents a single-use refresh token to X only once under concurrency", async () => {
-    const store = newStore();
+    const store = await newStore();
     await store.putOAuthTokens(SELF_ID, {
       accessToken: "expired",
       refreshToken: "refresh-0",
@@ -127,7 +127,7 @@ describe("getUserAccessToken", () => {
   });
 
   it("refreshes again after a failed refresh instead of caching the rejection", async () => {
-    const store = newStore();
+    const store = await newStore();
     await store.putOAuthTokens(SELF_ID, {
       accessToken: "expired",
       refreshToken: "refresh-0",
@@ -158,7 +158,7 @@ describe("getUserAccessToken", () => {
   });
 
   it("does not couple refreshes across unrelated stores", async () => {
-    const stores = [newStore(), newStore()];
+    const stores = [await newStore(), await newStore()];
     for (const store of stores) {
       await store.putOAuthTokens(SELF_ID, {
         accessToken: "expired",

@@ -1,4 +1,4 @@
--- Initial schema; keep in sync with SCHEMA in src/server/storage.ts.
+-- Initial schema.
 CREATE TABLE IF NOT EXISTS conversations (
   root_id TEXT PRIMARY KEY,
   root_author_handle TEXT NOT NULL,

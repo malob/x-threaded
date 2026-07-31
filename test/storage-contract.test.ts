@@ -12,6 +12,9 @@ import { SqlStore } from "../src/server/db/store";
 import { FakeD1Database } from "./fake-d1";
 import { describeStorageContract } from "./storage-contract";
 
-describeStorageContract("bun:sqlite", () => new SqlStore(bunDriver(":memory:")));
+describeStorageContract("bun:sqlite", async () => new SqlStore(await bunDriver(":memory:")));
 
-describeStorageContract("D1 fake", () => new SqlStore(d1Driver(new FakeD1Database())));
+describeStorageContract(
+  "D1 fake",
+  async () => new SqlStore(d1Driver(await FakeD1Database.create())),
+);

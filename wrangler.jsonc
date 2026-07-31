@@ -15,6 +15,21 @@
   // reject every request). Set them on your own Worker instead, with
   // `wrangler secret put NAME` — see .env.example for the full list. Secrets
   // survive deploys, unlike dashboard-set vars.
+  // `database_id` is deliberately absent. With only a name here, the
+  // Deploy-to-Cloudflare button in the README auto-provisions a database for
+  // whoever forks this; a pinned id would aim their Worker at ours.
+  //
+  // Migrations still work without it: `wrangler d1 migrations apply x-threaded
+  // --remote` matches this entry by `database_name`, then resolves the UUID
+  // over the API (GET /accounts/:id/d1/database/x-threaded), so all it needs is
+  // `wrangler login` and a database of that name on the account. Confirmed
+  // 2026-07-30 against wrangler 4.115 (d1/utils.ts `getDatabaseByNameOrBinding`,
+  // which only requires an id when the name is missing too).
+  //
+  // There is no --dry-run for that command; `--local` is the rehearsal, and it
+  // shares the `d1_migrations` ledger with the runner in
+  // src/server/db/migrations.ts, so either may go first against
+  // .wrangler/state/v3/d1 (both directions verified the same day).
   "d1_databases": [
     {
       "binding": "DB",

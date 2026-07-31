@@ -96,7 +96,7 @@ describe("fixtures", () => {
 
 describe("FakeD1Database", () => {
   it("allows 100 bound parameters and rejects 101", async () => {
-    const db = new FakeD1Database();
+    const db = await FakeD1Database.create();
     const ids = Array.from({ length: D1_MAX_BOUND_PARAMS + 1 }, (_, i) => String(i));
 
     const atLimit = ids.slice(0, D1_MAX_BOUND_PARAMS);
@@ -111,7 +111,7 @@ describe("FakeD1Database", () => {
   });
 
   it("rolls a failed batch back", async () => {
-    const db = new FakeD1Database();
+    const db = await FakeD1Database.create();
     const insert = db.prepare(`INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)`);
     await expect(
       db.batch([insert.bind("k", "first", "t"), insert.bind("k", "duplicate", "t")]),
@@ -123,7 +123,7 @@ describe("FakeD1Database", () => {
 
 describe("SqlStore over the D1 fake", () => {
   it("round-trips posts", async () => {
-    const store = makeD1TestStore();
+    const store = await makeD1TestStore();
     const root = makePost({ text: "the root" });
     const reply = makePost({ conversationId: root.id, parentId: root.id, text: "a reply" });
     await store.upsertPosts([root, reply]);
@@ -137,7 +137,7 @@ describe("SqlStore over the D1 fake", () => {
 
 describe("makeTestApp", () => {
   it("404s an uncached conversation without touching the X API", async () => {
-    const { app, xapi } = makeTestApp();
+    const { app, xapi } = await makeTestApp();
     const response = await app.request("/api/conversations/12345");
     expect(response.status).toBe(404);
     expect(await response.json()).toEqual({ error: "conversation not cached" });
@@ -145,7 +145,7 @@ describe("makeTestApp", () => {
   });
 
   it("writes read state through the real store", async () => {
-    const { app, store } = makeTestApp();
+    const { app, store } = await makeTestApp();
     const post = makePost();
     await store.upsertPosts([post]);
     expect(await store.getUnreadIds(post.conversationId)).toEqual([post.id]);

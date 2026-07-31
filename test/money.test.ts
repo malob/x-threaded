@@ -42,7 +42,7 @@ const YESTERDAY = "2024-05-31";
 
 describe("ingest — what actually bills", () => {
   it("bills every post of a first read", async () => {
-    const { store, xapi } = makeTestApp();
+    const { store, xapi } = await makeTestApp();
     const root = makePost();
     const posts = [root, replyTo(root), replyTo(root)];
 
@@ -53,7 +53,7 @@ describe("ingest — what actually bills", () => {
   });
 
   it("bills nothing for a second ingest the same day", async () => {
-    const { store, xapi } = makeTestApp();
+    const { store, xapi } = await makeTestApp();
     const root = makePost();
     const posts = [root, replyTo(root)];
     await ingest(store, xapi, fetchResult(posts));
@@ -64,7 +64,7 @@ describe("ingest — what actually bills", () => {
   });
 
   it("bills again for a post last read on an earlier day", async () => {
-    const { store, xapi } = makeTestApp();
+    const { store, xapi } = await makeTestApp();
     const stale = await seedPostReadOn(store, YESTERDAY);
 
     // The same post comes back from X today, carrying today's fetchedAt.
@@ -82,7 +82,7 @@ describe("ingest — what actually bills", () => {
    * A mixed fetch makes the failure unambiguous: swapped, billable drops to 0.
    */
   it("counts only the stale post of a mixed fetch — the ordering pin", async () => {
-    const { store, xapi } = makeTestApp();
+    const { store, xapi } = await makeTestApp();
     const stale = await seedPostReadOn(store, YESTERDAY);
     const readToday = makePost();
     await ingest(store, xapi, fetchResult([readToday]));
@@ -97,7 +97,7 @@ describe("ingest — what actually bills", () => {
   });
 
   it("counts a post once when it arrives in both posts and referenced", async () => {
-    const { store, xapi } = makeTestApp();
+    const { store, xapi } = await makeTestApp();
     const root = makePost();
     const reply = replyTo(root);
 
@@ -107,7 +107,7 @@ describe("ingest — what actually bills", () => {
   });
 
   it("counts an extra once when the fetch already returned it", async () => {
-    const { store, xapi } = makeTestApp();
+    const { store, xapi } = await makeTestApp();
     const root = makePost();
 
     const cost = await ingest(store, xapi, fetchResult([root]), [root, root]);
@@ -117,7 +117,7 @@ describe("ingest — what actually bills", () => {
   });
 
   it("counts an extra the fetch missed", async () => {
-    const { store, xapi } = makeTestApp();
+    const { store, xapi } = await makeTestApp();
     const root = makePost();
     const orphan = replyTo(root);
 
@@ -132,7 +132,7 @@ describe("ingest — what actually bills", () => {
 
 describe("ingest — quoted-post resolution", () => {
   it("makes no X call when the quoted post is already stored", async () => {
-    const { store, xapi } = makeTestApp();
+    const { store, xapi } = await makeTestApp();
     const quoted = makePost();
     await store.upsertPosts([quoted]);
     const root = makePost({ quotedPostId: quoted.id });
@@ -143,7 +143,7 @@ describe("ingest — quoted-post resolution", () => {
   });
 
   it("makes no X call when the quoted post came in the same fetch", async () => {
-    const { store, xapi } = makeTestApp();
+    const { store, xapi } = await makeTestApp();
     const quoted = makePost();
     const root = makePost({ quotedPostId: quoted.id });
 
@@ -153,7 +153,7 @@ describe("ingest — quoted-post resolution", () => {
   });
 
   it("fetches a missing quote exactly once, batching the whole level", async () => {
-    const { store, xapi } = makeTestApp();
+    const { store, xapi } = await makeTestApp();
     const q1 = makePost();
     const q2 = makePost();
     const root = makePost({ quotedPostId: q1.id });
@@ -172,7 +172,7 @@ describe("ingest — quoted-post resolution", () => {
    * decision — each extra level is another $0.005 per distinct quote.
    */
   it("follows a quote of a quote but never asks for the third level", async () => {
-    const { store, xapi } = makeTestApp();
+    const { store, xapi } = await makeTestApp();
     const level3 = makePost();
     const level2 = makePost({ quotedPostId: level3.id });
     const level1 = makePost({ quotedPostId: level2.id });
@@ -195,7 +195,7 @@ describe("POST /api/conversations — force semantics", () => {
    * thread read — that destroys unread state the user can't get back.
    */
   it("does not re-mark a forced refetch read", async () => {
-    const { app, store, xapi } = makeTestApp();
+    const { app, store, xapi } = await makeTestApp();
     const root = makePost();
     const reply = replyTo(root);
     await seedConversation(store, root, [reply]);
@@ -210,7 +210,7 @@ describe("POST /api/conversations — force semantics", () => {
   });
 
   it("keeps a forced refetch free when the posts were already read today", async () => {
-    const { app, store, xapi } = makeTestApp();
+    const { app, store, xapi } = await makeTestApp();
     const root = makePost();
     await seedConversation(store, root);
     xapi.onFetchConversation = () => fetchResult([root]);
@@ -224,7 +224,7 @@ describe("POST /api/conversations — force semantics", () => {
 
 describe("POST /api/conversations — parsing and error mapping", () => {
   it("400s input with no post ID in it, before any X call", async () => {
-    const { app, xapi } = makeTestApp();
+    const { app, xapi } = await makeTestApp();
 
     const response = await fetchConversationRequest(app, "https://example.com/not-a-post");
 
@@ -236,7 +236,7 @@ describe("POST /api/conversations — parsing and error mapping", () => {
   });
 
   it("400s a bare number too short to be a post ID", async () => {
-    const { app, xapi } = makeTestApp();
+    const { app, xapi } = await makeTestApp();
 
     const response = await fetchConversationRequest(app, "1234");
 
@@ -253,7 +253,7 @@ describe("POST /api/conversations — parsing and error mapping", () => {
    * to 400 when that lands.
    */
   it("500s a malformed JSON body (should be 400 — Stage 4a)", async () => {
-    const { app, xapi } = makeTestApp();
+    const { app, xapi } = await makeTestApp();
 
     const response = await app.request("/api/conversations", {
       method: "POST",
@@ -266,7 +266,7 @@ describe("POST /api/conversations — parsing and error mapping", () => {
   });
 
   it("passes a 404 from X through as a 404", async () => {
-    const { app, xapi } = makeTestApp();
+    const { app, xapi } = await makeTestApp();
     xapi.onGetPost = () => {
       throw new XApiError("no such post", 404);
     };
@@ -278,7 +278,7 @@ describe("POST /api/conversations — parsing and error mapping", () => {
   });
 
   it("maps any other X failure to a 502", async () => {
-    const { app, xapi } = makeTestApp();
+    const { app, xapi } = await makeTestApp();
     xapi.onGetPost = () => {
       throw new XApiError("upstream is down", 500);
     };
@@ -298,9 +298,11 @@ describe("POST /api/conversations/:rootId/refresh — the UTC-day fork", () => {
   });
 
   /** A cached conversation whose row was written at `at`. */
-  async function seedAt(at: string): Promise<ReturnType<typeof makeTestApp> & { root: Post }> {
+  async function seedAt(
+    at: string,
+  ): Promise<Awaited<ReturnType<typeof makeTestApp>> & { root: Post }> {
     setSystemTime(new Date(at));
-    const harness = makeTestApp();
+    const harness = await makeTestApp();
     const root = makePost({ createdAt: at });
     await seedConversation(harness.store, root);
     return { ...harness, root };
@@ -312,7 +314,7 @@ describe("POST /api/conversations/:rootId/refresh — the UTC-day fork", () => {
   }
 
   it("404s a root that was never cached", async () => {
-    const { app, xapi } = makeTestApp();
+    const { app, xapi } = await makeTestApp();
 
     const response = await app.request("/api/conversations/1796000000000000000/refresh", {
       method: "POST",
@@ -474,7 +476,7 @@ describe("GET /api/me/posts — how far the scan pages", () => {
    * preserved. Flip this to 401 then.
    */
   it("spends nothing when user context isn't configured (401 shows as 502)", async () => {
-    const { app, xapi } = makeTestApp();
+    const { app, xapi } = await makeTestApp();
 
     const response = await app.request("/api/me/posts");
 
@@ -536,7 +538,7 @@ describe("bookmark sync — what it must never destroy", () => {
   });
 
   it("409s a DELETE of a bookmark-sourced entry and keeps it", async () => {
-    const { app, store } = makeTestApp();
+    const { app, store } = await makeTestApp();
     const post = makePost();
     await seedSaved(store, post, "bookmark", new Date().toISOString());
 
@@ -550,7 +552,7 @@ describe("bookmark sync — what it must never destroy", () => {
   });
 
   it("deletes a manually added entry", async () => {
-    const { app, store } = makeTestApp();
+    const { app, store } = await makeTestApp();
     const post = makePost();
     await seedSaved(store, post, "manual", new Date().toISOString());
 
@@ -561,7 +563,7 @@ describe("bookmark sync — what it must never destroy", () => {
   });
 
   it("hydrates the saved list without any X call", async () => {
-    const { app, store, xapi } = makeTestApp();
+    const { app, store, xapi } = await makeTestApp();
     const post = makePost();
     await seedSaved(store, post, "bookmark", new Date().toISOString());
 

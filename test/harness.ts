@@ -32,8 +32,8 @@ export const SELF_USER_ID = "100";
  * The real routes over a real (in-memory) store and a throwing X API double.
  * Drive it with app.request(); nothing here can reach the network.
  */
-export function makeTestApp(opts: TestAppOptions = {}): TestApp {
-  const store = new SqlStore(bunDriver(":memory:"));
+export async function makeTestApp(opts: TestAppOptions = {}): Promise<TestApp> {
+  const store = new SqlStore(await bunDriver(":memory:"));
   const xapi = new FakeXApi();
   const app = buildApp({
     store,
@@ -52,7 +52,7 @@ export function makeTestApp(opts: TestAppOptions = {}): TestApp {
 export async function makeAuthedApp(
   opts: TestAppOptions & { userId?: string } = {},
 ): Promise<TestApp> {
-  const harness = makeTestApp({ ...opts, oauth: opts.oauth ?? TEST_OAUTH });
+  const harness = await makeTestApp({ ...opts, oauth: opts.oauth ?? TEST_OAUTH });
   await harness.store.putOAuthTokens(SELF_ID, {
     accessToken: "access",
     refreshToken: "refresh",
@@ -89,8 +89,8 @@ export async function makeBookmarkApp(
 }
 
 /** The same SqlStore the Worker runs, over a fresh D1 stand-in. */
-export function makeD1TestStore(): SqlStore {
-  return new SqlStore(d1Driver(new FakeD1Database()));
+export async function makeD1TestStore(): Promise<SqlStore> {
+  return new SqlStore(d1Driver(await FakeD1Database.create()));
 }
 
 /** POST /api/conversations with the usual JSON body. */

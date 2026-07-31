@@ -16,7 +16,7 @@ import {
 
 describe("POST /api/conversations — cache-first resolution", () => {
   it("serves a cached conversation without any X call", async () => {
-    const { app, store, xapi } = makeTestApp();
+    const { app, store, xapi } = await makeTestApp();
     const root = makePost({ text: "the root" });
     await seedConversation(store, root, [replyTo(root)]);
 
@@ -30,7 +30,7 @@ describe("POST /api/conversations — cache-first resolution", () => {
   });
 
   it("focuses a cached mid-thread post without any X call", async () => {
-    const { app, store, xapi } = makeTestApp();
+    const { app, store, xapi } = await makeTestApp();
     const root = makePost();
     const reply = replyTo(root);
     await seedConversation(store, root, [reply]);
@@ -44,7 +44,7 @@ describe("POST /api/conversations — cache-first resolution", () => {
   });
 
   it("fetches without a getPost when the post is stored but its conversation isn't", async () => {
-    const { app, store, xapi } = makeTestApp();
+    const { app, store, xapi } = await makeTestApp();
     const root = makePost();
     const reply = replyTo(root);
     // The reply is known (a bookmark, say); the tree around it has never been pulled.
@@ -60,7 +60,7 @@ describe("POST /api/conversations — cache-first resolution", () => {
   });
 
   it("looks the post up on X only when it is entirely unknown", async () => {
-    const { app, xapi } = makeTestApp();
+    const { app, xapi } = await makeTestApp();
     const root = makePost();
     xapi.onGetPost = () => root;
     xapi.onFetchConversation = () => ({ posts: [root], referenced: [], truncated: false });
@@ -72,7 +72,7 @@ describe("POST /api/conversations — cache-first resolution", () => {
   });
 
   it("re-fetches a cached conversation on force, still without a getPost", async () => {
-    const { app, store, xapi } = makeTestApp();
+    const { app, store, xapi } = await makeTestApp();
     const root = makePost();
     await seedConversation(store, root);
     xapi.onFetchConversation = () => ({ posts: [root], referenced: [], truncated: false });
@@ -88,7 +88,7 @@ describe("POST /api/conversations — cache-first resolution", () => {
 
 describe("POST /api/conversations — the conversation row commits last", () => {
   it("leaves nothing cached when quote hydration fails mid-ingest", async () => {
-    const { app, store, xapi } = makeTestApp();
+    const { app, store, xapi } = await makeTestApp();
     const root = makePost();
     const quoting = replyTo(root, { quotedPostId: "1796000000000000000" });
     xapi.onGetPost = () => root;
@@ -112,7 +112,7 @@ describe("POST /api/conversations — the conversation row commits last", () => 
   });
 
   it("leaves nothing cached when the conversation fetch itself fails", async () => {
-    const { app, store, xapi } = makeTestApp();
+    const { app, store, xapi } = await makeTestApp();
     const root = makePost();
     xapi.onGetPost = () => root;
     xapi.onFetchConversation = () => {
@@ -127,7 +127,7 @@ describe("POST /api/conversations — the conversation row commits last", () => 
   });
 
   it("commits the row, the read marking and the saved entry on success", async () => {
-    const { app, store, xapi } = makeTestApp();
+    const { app, store, xapi } = await makeTestApp();
     const root = makePost();
     const reply = replyTo(root);
     xapi.onGetPost = () => root;
@@ -219,7 +219,7 @@ describe("GET /api/me/posts — threads param", () => {
  */
 describe("GET /api/saved — hydration and the loaded flag", () => {
   it("resolves each entry's root and whether that conversation is cached", async () => {
-    const { app, store } = makeTestApp();
+    const { app, store } = await makeTestApp();
     const cachedRoot = makePost();
     const cachedReply = replyTo(cachedRoot);
     await seedConversation(store, cachedRoot, [cachedReply]);
@@ -243,7 +243,7 @@ describe("GET /api/saved — hydration and the loaded flag", () => {
   });
 
   it("skips a saved id whose post was never stored", async () => {
-    const { app, store } = makeTestApp();
+    const { app, store } = await makeTestApp();
     const stored = makePost();
     await store.upsertPosts([stored]);
     await store.addSavedItems([
@@ -339,7 +339,7 @@ describe("GET /api/auth/status — answered from the store", () => {
   });
 
   it("still reports authorized when the stored token has expired", async () => {
-    const { app, store, xapi } = makeTestApp({ oauth: TEST_OAUTH });
+    const { app, store, xapi } = await makeTestApp({ oauth: TEST_OAUTH });
     await store.putOAuthTokens(SELF_ID, {
       accessToken: "stale",
       refreshToken: "refresh",
@@ -358,7 +358,7 @@ describe("GET /api/auth/status — answered from the store", () => {
   });
 
   it("offers the login URL when nothing is stored", async () => {
-    const { app, xapi } = makeTestApp({ oauth: TEST_OAUTH });
+    const { app, xapi } = await makeTestApp({ oauth: TEST_OAUTH });
 
     const response = await app.request("/api/auth/status");
 
@@ -372,7 +372,7 @@ describe("GET /api/auth/status — answered from the store", () => {
   });
 
   it("reports unconfigured when the deployment has no OAuth client", async () => {
-    const { app, xapi } = makeTestApp();
+    const { app, xapi } = await makeTestApp();
 
     const response = await app.request("/api/auth/status");
 
@@ -384,7 +384,7 @@ describe("GET /api/auth/status — answered from the store", () => {
 
 describe("userContext token writes", () => {
   it("does not revive a pre-rotation token when a refresh lands during getMe", async () => {
-    const { app, store, xapi } = makeTestApp({ oauth: TEST_OAUTH });
+    const { app, store, xapi } = await makeTestApp({ oauth: TEST_OAUTH });
     // Valid tokens with no cached user ID, so userContext must call getMe.
     await store.putOAuthTokens(SELF_ID, {
       accessToken: "access",

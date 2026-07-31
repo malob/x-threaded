@@ -44,7 +44,7 @@ if (!clientId || !clientSecret) {
  * authorizing separately at /auth/login gives this instance its own.
  */
 const app = buildApp({
-  store: new SqlStore(bunDriver(dbPath)),
+  store: new SqlStore(await bunDriver(dbPath)),
   xapi: new XApi(bearerToken),
   maxPosts,
   oauth: clientId && clientSecret ? { clientId, clientSecret } : null,

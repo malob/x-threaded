@@ -74,68 +74,6 @@ export interface OAuthTokens {
   userId?: string | null;
 }
 
-/** Shared SQLite-dialect schema (bun:sqlite and D1 both speak it). */
-export const SCHEMA = `
-CREATE TABLE IF NOT EXISTS conversations (
-  root_id TEXT PRIMARY KEY,
-  root_author_handle TEXT NOT NULL,
-  root_text TEXT NOT NULL,
-  root_created_at TEXT NOT NULL,
-  fetched_at TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS posts (
-  id TEXT PRIMARY KEY,
-  conversation_id TEXT NOT NULL,
-  parent_id TEXT,
-  author_id TEXT NOT NULL,
-  author_handle TEXT NOT NULL,
-  author_name TEXT NOT NULL,
-  author_avatar_url TEXT,
-  text TEXT NOT NULL,
-  created_at TEXT NOT NULL,
-  likes INTEGER NOT NULL DEFAULT 0,
-  replies INTEGER NOT NULL DEFAULT 0,
-  reposts INTEGER NOT NULL DEFAULT 0,
-  quotes INTEGER NOT NULL DEFAULT 0,
-  bookmarks INTEGER NOT NULL DEFAULT 0,
-  impressions INTEGER NOT NULL DEFAULT 0,
-  entities_json TEXT,
-  quoted_post_id TEXT,
-  media_json TEXT,
-  fetched_at TEXT NOT NULL
-);
-
-CREATE INDEX IF NOT EXISTS idx_posts_conversation ON posts(conversation_id);
-
-CREATE TABLE IF NOT EXISTS read_state (
-  post_id TEXT PRIMARY KEY,
-  read_at TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS oauth_tokens (
-  id TEXT PRIMARY KEY,
-  access_token TEXT NOT NULL,
-  refresh_token TEXT NOT NULL,
-  expires_at INTEGER NOT NULL,
-  scope TEXT NOT NULL DEFAULT '',
-  user_id TEXT,
-  updated_at TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS settings (
-  key TEXT PRIMARY KEY,
-  value TEXT NOT NULL,
-  updated_at TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS saved_items (
-  post_id TEXT PRIMARY KEY,
-  source TEXT NOT NULL,
-  added_at TEXT NOT NULL
-);
-`;
-
 export interface PostRow {
   id: string;
   conversation_id: string;

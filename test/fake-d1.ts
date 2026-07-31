@@ -1,6 +1,6 @@
 import { Database, type SQLQueryBindings } from "bun:sqlite";
-import type { D1Database, D1PreparedStatement } from "../src/server/db/d1";
-import { SCHEMA } from "../src/server/storage";
+import { d1Driver, type D1Database, type D1PreparedStatement } from "../src/server/db/d1";
+import { applyMigrations, loadMigrations, type Migration } from "../src/server/db/migrations";
 
 /**
  * D1 rejects a statement carrying more than this many bound parameters
@@ -56,12 +56,21 @@ class FakeD1PreparedStatement implements D1PreparedStatement {
 /**
  * D1 stand-in backed by in-memory SQLite, faithful on the two behaviors that
  * bite: the bound-parameter ceiling and transactional batches.
+ *
+ * Built by `create()` rather than `new`, because its schema comes from
+ * migrations/ — the same files the Bun driver and the workerd leg apply — and
+ * applying them goes through the async driver seam.
  */
 export class FakeD1Database implements D1Database {
   private readonly db = new Database(":memory:");
 
-  constructor() {
-    this.db.run(SCHEMA);
+  private constructor() {}
+
+  /** An empty database migrated up to `migrations` (migrations/ by default). */
+  static async create(migrations: Migration[] = loadMigrations()): Promise<FakeD1Database> {
+    const database = new FakeD1Database();
+    await applyMigrations(d1Driver(database), migrations);
+    return database;
   }
 
   prepare(query: string): D1PreparedStatement {
