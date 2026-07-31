@@ -395,3 +395,45 @@ describe("applyMigrations — interrupted legacy schemas self-heal", () => {
     expect(await ledger(driver)).toEqual(MIGRATION_NAMES);
   });
 });
+
+describe("applyMigrations — restored early-era backups", () => {
+  it("repairs columns that arrived after their table's CREATE, then the store works", async () => {
+    // A backup from before posts gained entities/quoted/media/bookmarks and
+    // before oauth_tokens gained user_id — the shape addMissingColumns fixed.
+    const db = new Database(":memory:");
+    db.run(`
+      CREATE TABLE conversations (
+        root_id TEXT PRIMARY KEY, root_author_handle TEXT NOT NULL,
+        root_text TEXT NOT NULL, root_created_at TEXT NOT NULL, fetched_at TEXT NOT NULL);
+      CREATE TABLE posts (
+        id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL, parent_id TEXT,
+        author_id TEXT NOT NULL, author_handle TEXT NOT NULL, author_name TEXT NOT NULL,
+        author_avatar_url TEXT, text TEXT NOT NULL, created_at TEXT NOT NULL,
+        likes INTEGER NOT NULL DEFAULT 0, replies INTEGER NOT NULL DEFAULT 0,
+        reposts INTEGER NOT NULL DEFAULT 0, quotes INTEGER NOT NULL DEFAULT 0,
+        impressions INTEGER NOT NULL DEFAULT 0, fetched_at TEXT NOT NULL);
+      CREATE TABLE read_state (post_id TEXT PRIMARY KEY, read_at TEXT NOT NULL);
+      CREATE TABLE oauth_tokens (
+        id TEXT PRIMARY KEY, access_token TEXT NOT NULL, refresh_token TEXT NOT NULL,
+        expires_at INTEGER NOT NULL, scope TEXT NOT NULL, updated_at TEXT NOT NULL);
+    `);
+    const driver = bunDriverFor(db);
+
+    await applyMigrations(driver, MIGRATIONS);
+
+    // Not just presence: the live store must read and write (the failure mode
+    // was "no column named bookmarks" on first upsert after certification).
+    const { SqlStore } = await import("../src/server/db/store");
+    const { makePost } = await import("./fixtures");
+    const store = new SqlStore(driver);
+    const post = makePost({ text: "restored backup" });
+    await store.upsertPosts([post]);
+    expect(await store.getPost(post.id)).toEqual(post);
+    await store.setReadState([post.id], true);
+    expect(await store.getUnreadIds(post.conversationId)).toEqual([]);
+    await store.putOAuthTokens("self", {
+      accessToken: "a", refreshToken: "r", expiresAt: 1, scope: "s", userId: "42",
+    });
+    expect((await store.getOAuthTokens("self"))?.userId).toBe("42");
+  });
+});

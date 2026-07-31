@@ -80,6 +80,29 @@ const RECORD_WITHOUT_RUN: Record<string, (driver: SqlDriver) => Promise<boolean>
 };
 
 /**
+ * Columns that arrived after their table's original CREATE, repaired the way
+ * the retired `addMissingColumns` did.
+ *
+ * `IF NOT EXISTS` heals a missing table but not a table created by an early
+ * schema before these columns existed — reachable today by restoring an old
+ * backup of data/x-threaded.sqlite, which would otherwise be certified as
+ * migrated and then fail on first write ("no column named bookmarks"). This
+ * list is closed: it is every column the schema ever gained after its table,
+ * which is exactly what the retired repair covered. Shapes older or stranger
+ * than anything this repo's code ever wrote are out of scope and fail loudly
+ * at first use, not silently.
+ */
+const LEGACY_COLUMN_REPAIRS: Record<string, Record<string, string>> = {
+  posts: {
+    entities_json: "TEXT",
+    quoted_post_id: "TEXT",
+    media_json: "TEXT",
+    bookmarks: "INTEGER NOT NULL DEFAULT 0",
+  },
+  oauth_tokens: { user_id: "TEXT" },
+};
+
+/**
  * Bring `driver`'s database up to date with `migrations`, recording each in a
  * wrangler-compatible `d1_migrations` ledger. Already-recorded migrations are
  * skipped; each remaining one runs as a single atomic batch together with its
@@ -113,6 +136,14 @@ export async function applyMigrations(driver: SqlDriver, migrations: Migration[]
       ...(alreadyPresent ? [] : splitStatements(migration.sql).map((sql) => ({ sql, params: [] }))),
       { sql: RECORD_SQL, params: [migration.name] },
     ]);
+  }
+
+  for (const [table, columns] of Object.entries(LEGACY_COLUMN_REPAIRS)) {
+    for (const [column, definition] of Object.entries(columns)) {
+      if (!(await columnExists(driver, table, column))) {
+        await driver.run(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+      }
+    }
   }
 }
 
