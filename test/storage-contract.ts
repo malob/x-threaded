@@ -449,11 +449,13 @@ export function describeStorageContract(name: string, makeStore: MakeStore): voi
         await store.putOAuthTokens("self", tokens);
         await store.claimTokenLease("self", tokens.refreshToken, "lease-a", 5000);
 
-        await store.putUserProfile("self", {
-          userId: "42",
-          username: "someone",
-          displayName: "Some One",
-        });
+        expect(
+          await store.putUserProfile("self", tokens.refreshToken, {
+            userId: "42",
+            username: "someone",
+            displayName: "Some One",
+          }),
+        ).toBe(true);
 
         expect(await store.getOAuthTokens("self")).toEqual(
           readyRow({

@@ -206,12 +206,17 @@ async function refresh(
     const detail = [body.error ?? "unknown error", body.error_description]
       .filter((part) => part !== undefined)
       .join(" — ");
+    // Only a definite endpoint rejection proves the token is unspent: a 4xx
+    // (other than 429) means the token endpoint evaluated the request and
+    // refused it before issuing anything. A 5xx or 429 can come from a
+    // gateway AFTER the exchange was processed, so "we got an HTTP response"
+    // is not proof of non-consumption — those stay ambiguous and the lease
+    // stands for the recovery rule (Stage 3 adversarial review, finding 2).
+    const refused =
+      response.status >= 400 && response.status < 500 && response.status !== 429;
     throw new RefreshError(
       `token refresh failed (${response.status}): ${detail}`,
-      // X issues the new pair and invalidates the old token together, so an
-      // error response means the token we sent is still unspent — unless the
-      // error is that the grant itself is gone.
-      body.error === "invalid_grant" ? "grant_dead" : "refused",
+      body.error === "invalid_grant" ? "grant_dead" : refused ? "refused" : "unknown",
       detail,
     );
   }
@@ -314,13 +319,28 @@ async function refreshUnderLease(
     throw error;
   }
 
-  const landed = await store.finalizeTokenLease(SELF_ID, leaseId, row.refreshToken, {
-    ...rotated,
-    scope: rotated.scope || row.scope,
-    userId: row.userId,
-    username: row.username,
-    displayName: row.displayName,
-  });
+  // The rotated pair exists only in this memory until the finalize lands, and
+  // the old token is already dead at X — so a transient database error here
+  // must not discard it (the lease would lapse and recovery would re-present
+  // the spent token, bricking the grant we were holding the replacement for).
+  // Retry the conditional write itself, never the exchange: the CAS makes a
+  // repeat attempt safe, and X is never contacted again.
+  let landed = false;
+  for (let attempt = 0; ; attempt++) {
+    try {
+      landed = await store.finalizeTokenLease(SELF_ID, leaseId, row.refreshToken, {
+        ...rotated,
+        scope: rotated.scope || row.scope,
+        userId: row.userId,
+        username: row.username,
+        displayName: row.displayName,
+      });
+      break;
+    } catch (error) {
+      if (attempt >= 2) throw error;
+      await sleep(timings.pollMs);
+    }
+  }
   if (!landed) {
     // Someone re-logged-in or recovered underneath us. Our pair may well be
     // valid, but the row is no longer the one we leased, and writing over it

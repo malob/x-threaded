@@ -352,12 +352,28 @@ export class SqlStore implements Storage {
     );
   }
 
-  async putUserProfile(id: string, profile: UserProfile): Promise<void> {
-    await this.db.run(
+  async putUserProfile(
+    id: string,
+    observedRefreshToken: string,
+    profile: UserProfile,
+  ): Promise<boolean> {
+    // Bound to the grant it identifies: a fresh login can replace the row
+    // while the getMe that produced this profile was in flight, and writing
+    // account A's identity onto account B's grant would silently operate on
+    // the wrong account from then on (Stage 3 adversarial review, finding 3).
+    const { rowsAffected } = await this.db.run(
       `UPDATE oauth_tokens SET user_id = ?, username = ?, display_name = ?, updated_at = ?
-       WHERE id = ?`,
-      [profile.userId, profile.username, profile.displayName, new Date().toISOString(), id],
+       WHERE id = ? AND refresh_token = ?`,
+      [
+        profile.userId,
+        profile.username,
+        profile.displayName,
+        new Date().toISOString(),
+        id,
+        observedRefreshToken,
+      ],
     );
+    return rowsAffected === 1;
   }
 
   async claimTokenLease(

@@ -20,15 +20,19 @@ export async function userContext(
   const stored = await store.getOAuthTokens(SELF_ID);
   if (stored?.userId) return { token, userId: stored.userId };
   const me = await xapi.getMe(token);
-  // A rotation can land during the getMe round-trip, so this writes the three
-  // profile columns and nothing else: no snapshot of the token pair goes back
-  // to the database, and there is no read-modify-write window to lose. The
-  // handle and name ride along so /api/auth/status can name the account
+  // A rotation or a fresh login can land during the getMe round-trip. The
+  // write is a CAS on the refresh token observed alongside the missing
+  // profile: only the three profile columns move, and only onto the grant
+  // this getMe actually described — a login as a different account mid-call
+  // makes it a no-op, and the next request re-resolves against the new grant.
+  // The handle and name ride along so /api/auth/status can name the account
   // without ever paying for a getMe of its own.
-  await store.putUserProfile(SELF_ID, {
-    userId: me.id,
-    username: me.username,
-    displayName: me.name,
-  });
+  if (stored) {
+    await store.putUserProfile(SELF_ID, stored.refreshToken, {
+      userId: me.id,
+      username: me.username,
+      displayName: me.name,
+    });
+  }
   return { token, userId: me.id };
 }

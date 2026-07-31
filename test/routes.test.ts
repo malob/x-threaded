@@ -345,7 +345,7 @@ describe("GET /api/auth/status — answered from the store", () => {
 
   it("names the user once the profile has been cached", async () => {
     const { app, store, xapi } = await makeAuthedApp();
-    await store.putUserProfile(SELF_ID, {
+    await store.putUserProfile(SELF_ID, "refresh", {
       userId: SELF_USER_ID,
       username: "someone",
       displayName: "Some One",
@@ -431,7 +431,9 @@ describe("userContext token writes", () => {
 
     const stored = await store.getOAuthTokens(SELF_ID);
     expect(stored?.refreshToken).toBe("refresh-rotated");
-    expect(stored?.userId).toBe("42");
+    // The profile write is a CAS on the pre-rotation token, so it skips —
+    // the rotated grant is untouched, and the next call re-resolves identity.
+    expect(stored?.userId).toBeNull();
   });
 
   it("caches the whole profile, so the status route can name the account", async () => {

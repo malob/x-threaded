@@ -196,7 +196,9 @@ describe("getUserAccessToken", () => {
     const restore = withMockFetch(async () => {
       hits++;
       if (hits === 1) {
-        return Response.json({ error: "server_error" }, { status: 503 });
+        // A definite endpoint rejection: X evaluated the request and issued
+        // nothing, so the token is provably unspent and the lease releases.
+        return Response.json({ error: "invalid_request" }, { status: 400 });
       }
       return Response.json({
         access_token: "access-2",
@@ -205,7 +207,7 @@ describe("getUserAccessToken", () => {
       });
     });
     try {
-      await expect(getUserAccessToken(store, CONFIG)).rejects.toThrow("token refresh failed (503)");
+      await expect(getUserAccessToken(store, CONFIG)).rejects.toThrow("token refresh failed (400)");
       expect(await getUserAccessToken(store, CONFIG)).toBe("access-2");
     } finally {
       restore();
@@ -317,15 +319,15 @@ describe("getUserAccessToken — a grant X has rejected", () => {
     const store = await storeWithExpiredToken();
 
     await withEndpoint(
-      async () => Response.json({ error: "server_error" }, { status: 503 }),
+      async () => Response.json({ error: "invalid_request" }, { status: 400 }),
       async () => {
         await expect(getUserAccessToken(store, CONFIG, FAST)).rejects.toThrow(
-          "token refresh failed (503)",
+          "token refresh failed (400)",
         );
       },
     );
 
-    // A 5xx means X issued nothing, so the token is still ours to retry with.
+    // A 4xx endpoint rejection means X issued nothing: still ours to retry.
     expect(await store.getOAuthTokens(SELF_ID)).toMatchObject({
       state: "ready",
       leaseId: null,
@@ -354,6 +356,52 @@ describe("getUserAccessToken — a grant X has rejected", () => {
       recoveryUsed: false,
     });
     expect((await store.getOAuthTokens(SELF_ID))?.leaseId).toBeString();
+  });
+
+  it("treats a 5xx as unknowable too — a gateway can answer after X processed", async () => {
+    const store = await storeWithExpiredToken();
+
+    await withEndpoint(
+      async () => Response.json({ error: "server_error" }, { status: 503 }),
+      async () => {
+        await expect(getUserAccessToken(store, CONFIG, FAST)).rejects.toThrow(
+          "token refresh failed (503)",
+        );
+      },
+    );
+
+    // An HTTP response is not proof of non-consumption unless the endpoint
+    // itself rejected the request (4xx): the lease stands for recovery.
+    expect(await store.getOAuthTokens(SELF_ID)).toMatchObject({
+      state: "refreshing",
+      recoveryUsed: false,
+    });
+  });
+
+  it("retries a transiently failing finalize without re-contacting X", async () => {
+    const store = await storeWithExpiredToken();
+    let finalizeFailures = 1;
+    const flaky: typeof store = Object.create(store);
+    flaky.finalizeTokenLease = async (...args) => {
+      if (finalizeFailures-- > 0) throw new Error("D1_ERROR: transient");
+      return store.finalizeTokenLease(...args);
+    };
+
+    const { state, handler } = tokenEndpoint();
+    const restore = withMockFetch(handler);
+    try {
+      // The rotated pair must land despite the failed first write, and X must
+      // be contacted exactly once — a retry that re-refreshed would present a
+      // spent token.
+      expect(await getUserAccessToken(flaky, CONFIG, FAST)).toBe("access-1");
+    } finally {
+      restore();
+    }
+    expect(state.hits).toBe(1);
+    expect(await store.getOAuthTokens(SELF_ID)).toMatchObject({
+      state: "ready",
+      refreshToken: "refresh-1",
+    });
   });
 });
 

@@ -57,7 +57,8 @@ export interface Storage {
    * a rotation may have landed, and writing a whole row back would revive
    * the dead refresh token it was read with.
    */
-  putUserProfile(id: string, profile: UserProfile): Promise<void>;
+  /** CAS on the observed refresh token; false = the grant changed underneath. */
+  putUserProfile(id: string, observedRefreshToken: string, profile: UserProfile): Promise<boolean>;
 
   /**
    * Take the refresh lease: the one statement that decides who calls X.
