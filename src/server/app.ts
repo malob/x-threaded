@@ -480,7 +480,12 @@ export function buildApp({ store, xapi, maxPosts, oauth = null }: AppDeps): ApiA
     // Cache first: a stored post already carries its conversation ID, so a
     // conversation we've fetched before is resolvable — and servable — for
     // free. Only a post we've never seen is worth a billable lookup.
-    const requested = (await store.getPost(postId)) ?? meter.charge(await xapi.getPost(postId));
+    const stored = await store.getPost(postId);
+    const requested = stored ?? meter.charge(await xapi.getPost(postId));
+    // A bought lookup is stored the moment it lands: if the fetch below dies
+    // before its first page, the retry resolves this post from the store
+    // instead of buying the same read again.
+    if (!stored) await store.upsertPosts([requested]);
     const rootId = requested.conversationId;
     const focusId = postId === rootId ? null : postId;
     const firstFetch = !(await store.hasConversation(rootId));
@@ -550,7 +555,13 @@ export function buildApp({ store, xapi, maxPosts, oauth = null }: AppDeps): ApiA
     const sameUtcDay =
       meta.fullReadAt !== null &&
       meta.fullReadAt.slice(0, 10) === new Date().toISOString().slice(0, 10);
-    const sinceId = sameUtcDay ? null : await store.newestPostId(rootId);
+    // "Newer than what we hold" needs a base, and a conversation whose own
+    // root never landed (a run died before its first page) has none: a
+    // since_id bound at some stray reply would fetch newer posts forever
+    // while the root and the history stayed missing. Reading it in full is
+    // what heals the row a dying run left behind.
+    const hasRoot = (await store.getPost(rootId)) !== null;
+    const sinceId = sameUtcDay || !hasRoot ? null : await store.newestPostId(rootId);
 
     await runConversationFetch(store, xapi, meter, rootId, {
       maxPosts,

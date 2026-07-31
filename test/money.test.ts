@@ -603,8 +603,10 @@ describe("what a failed request discloses", () => {
     expect(response.status).toBe(500);
     const body = (await response.json()) as ApiError;
     expect(body.error).toBe("internal error");
-    // The lookup that resolved the URL, plus the two posts the search returned.
-    expect(body.cost).toEqual({ posts: 3, billable: 3, usd: 3 * POST_READ_USD });
+    // The lookup that resolved the URL, plus the two posts the search
+    // returned — one of which is the root the lookup just bought and stored,
+    // so its second reading is credited as X's same-day dedup covers it.
+    expect(body.cost).toEqual({ posts: 3, billable: 2, usd: 2 * POST_READ_USD });
   });
 
   it("attaches no cost to a failure that spent nothing", async () => {
@@ -664,12 +666,13 @@ describe("what a failed request discloses", () => {
     const response = await fetchConversationRequest(app, root.id);
 
     expect(response.status).toBe(502);
-    // The URL lookup, the two posts the page returned, and the forty the
-    // lookup had bought before it fell over.
+    // The URL lookup, the two posts the page returned (the root's second
+    // reading credited — the lookup stored it moments earlier today), and the
+    // forty the quote lookup had bought before it fell over.
     expect(((await response.json()) as ApiError).cost).toEqual({
       posts: 43,
-      billable: 43,
-      usd: 43 * POST_READ_USD,
+      billable: 42,
+      usd: 42 * POST_READ_USD,
     });
   });
 });

@@ -75,9 +75,10 @@ describe("a fetch that dies mid-pagination", () => {
 
     expect(response.status).toBe(500);
     // The reads the dead run had already made are still disclosed: the lookup
-    // that resolved the URL, plus the four posts page one returned.
+    // that resolved the URL, plus the four posts page one returned — the root
+    // among them credited, since the lookup had just stored it today.
     const body = (await response.json()) as ApiError;
-    expect(body.cost).toEqual({ posts: 5, billable: 5, usd: 5 * POST_READ_USD });
+    expect(body.cost).toEqual({ posts: 5, billable: 4, usd: 4 * POST_READ_USD });
 
     // What page one bought is in the store rather than lost with the throw.
     expect((await store.existingPostIds(root.id)).size).toBe(4);
@@ -111,10 +112,10 @@ describe("a fetch that dies mid-pagination", () => {
     const body = (await retry.json()) as ConversationResponse;
     expect(body.fromCache).toBe(true);
     expect(body.truncated).toBe(true);
-    // The retry resolves the pasted URL again — the dead run never stored the
-    // post it bought, and a boundary invented from it would be worse than the
-    // lookup — but it does not buy the conversation a second time.
-    expect(methods(xapi)).toEqual(["getPost", "searchConversationPage", "getPost"]);
+    // The retry resolves the pasted URL from the store: the dead run kept
+    // the post its lookup bought, so nothing is re-bought — not the lookup,
+    // and not the conversation.
+    expect(methods(xapi)).toEqual(["getPost", "searchConversationPage"]);
   });
 
   it("resumes a conversation nothing landed for with an unbounded read", async () => {
@@ -389,6 +390,97 @@ describe("POST /api/conversations/:rootId/refresh — the full-read fork", () =>
     await fetchConversationRequest(harness.app, root.id, { force: true });
     expect((await harness.store.getConversationMeta(root.id))?.status).toBe("complete");
     expect((await cachedConversation(harness, root.id)).truncated).toBe(false);
+  });
+});
+
+describe("what a run that dies before its first page leaves", () => {
+  it("keeps the paid lookup, so the retry doesn't buy it again", async () => {
+    const { app, store, xapi } = await makeTestApp();
+    const root = makePost();
+    xapi.onGetPost = () => root;
+    xapi.onSearchConversationPage = () => {
+      throw new Error("X died before page one");
+    };
+    await fetchConversationRequest(app, root.id);
+
+    // The lookup was charged; discarding its result would make every retry
+    // of this paste buy the same post again.
+    expect(await store.getPost(root.id)).not.toBeNull();
+
+    const retry = await fetchConversationRequest(app, root.id);
+    expect(retry.status).toBe(200);
+    expect(methods(xapi).filter((m) => m === "getPost")).toHaveLength(1);
+  });
+
+  it("refreshes a conversation missing its root as a full read", async () => {
+    const { app, store, xapi } = await makeTestApp();
+    const root = makePost();
+    const reply = replyTo(root);
+    // The reply is already held (a bookmark, say), so the paste needs no
+    // lookup — and the run dies before its first page, leaving a partial row
+    // whose conversation has no root.
+    await store.upsertPosts([reply]);
+    xapi.onSearchConversationPage = () => {
+      throw new Error("X died before page one");
+    };
+    await fetchConversationRequest(app, reply.id);
+
+    // "Newer than what we hold" has no base without the root: a since_id
+    // bound at the stray reply would fetch newer posts forever while the
+    // root and the history stayed missing. The refresh must read in full.
+    servePages(xapi, [searchPage([root, reply])]);
+    const response = await app.request(`/api/conversations/${root.id}/refresh`, {
+      method: "POST",
+    });
+
+    expect(response.status).toBe(200);
+    expect(pageOptions(xapi).at(-1)).toMatchObject({ sinceId: undefined });
+    expect(await store.getPost(root.id)).not.toBeNull();
+    expect(await store.getConversationMeta(root.id)).toMatchObject({ status: "complete" });
+  });
+});
+
+describe("empty pages mid-search", () => {
+  it("follows the token across an empty page instead of wedging", async () => {
+    const harness = await makeTestApp();
+    const root = makePost();
+    harness.xapi.onGetPost = () => root;
+    // Full-archive search can serve an empty slice mid-history. Stopping on
+    // the first one would discard the token, and every later resume would
+    // repeat the same bounded request into the same empty slice — partial
+    // forever. Empty pages bill nothing (X charges per post returned), so
+    // following them is free; only an unbroken run of them stops the fetch.
+    servePages(harness.xapi, [
+      searchPage([root], { nextToken: "empty1" }),
+      searchPage([], { nextToken: "empty2" }),
+      searchPage([replyTo(root)]),
+    ]);
+
+    const response = await fetchConversationRequest(harness.app, root.id);
+
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as ConversationResponse;
+    expect(body.posts).toHaveLength(2);
+    expect(body.truncated).toBe(false);
+  });
+
+  it("still stops a run that serves nothing but tokens", async () => {
+    const harness = await makeTestApp();
+    const root = makePost();
+    harness.xapi.onGetPost = () => root;
+    const emptyForever = Array.from({ length: 10 }, (_, i) =>
+      searchPage([], { nextToken: `empty${i}` }),
+    );
+    servePages(harness.xapi, [searchPage([root], { nextToken: "empty0" }), ...emptyForever]);
+
+    const response = await fetchConversationRequest(harness.app, root.id);
+
+    // Stopped, partial, and well short of the ten pages on offer: the guard
+    // is a bound on consecutive empties, not a lap counter.
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as ConversationResponse;
+    expect(body.truncated).toBe(true);
+    expect(pageOptions(harness.xapi).length).toBeLessThan(8);
   });
 });
 

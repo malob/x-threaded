@@ -47,6 +47,9 @@ export interface ConversationRun {
   root: Post;
 }
 
+/** How many empty pages in a row a run follows before giving up on the token. */
+const MAX_CONSECUTIVE_EMPTY_PAGES = 3;
+
 /**
  * Read a conversation into the store and leave its row honest about how much
  * of it we now have.
@@ -76,6 +79,7 @@ export async function runConversationFetch(
   const unresolvedMedia = new Set<string>();
   let nextToken: string | undefined;
   let exhausted = false;
+  let emptyPages = 0;
 
   for (;;) {
     // Ask for no more than the budget allows: checking the cap only after a
@@ -106,12 +110,19 @@ export async function runConversationFetch(
       exhausted = true;
       break;
     }
-    // A page that returned nothing but offers another one would loop forever:
-    // the budget only advances on posts, so nothing here would ever stop it.
-    // Full-archive search really can serve an empty slice mid-history, so this
-    // is a stop, not an end — the run stays partial and resume picks up where
-    // it left off.
-    if (page.posts.length === 0) break;
+    // Full-archive search can serve an empty slice mid-history, and an empty
+    // page is free — X bills per post returned — so the token is worth
+    // following. But only so far: the budget advances on posts, so a search
+    // serving nothing but tokens would otherwise loop forever. Stopping on
+    // the first empty page instead would discard the token, and every later
+    // resume would repeat the same bounded request into the same empty slice —
+    // partial forever.
+    if (page.posts.length === 0) {
+      emptyPages += 1;
+      if (emptyPages >= MAX_CONSECUTIVE_EMPTY_PAGES) break;
+    } else {
+      emptyPages = 0;
+    }
   }
 
   // Referenced posts arrive without their media objects (the endpoint only
