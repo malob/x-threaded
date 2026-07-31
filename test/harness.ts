@@ -1,5 +1,4 @@
-import type { Hono } from "hono";
-import { buildApp } from "../src/server/app";
+import { buildApp, type ApiApp } from "../src/server/app";
 import { bunDriver } from "../src/server/db/bun";
 import { d1Driver } from "../src/server/db/d1";
 import { SqlStore } from "../src/server/db/store";
@@ -17,7 +16,7 @@ export interface TestAppOptions {
 }
 
 export interface TestApp {
-  app: Hono;
+  app: ApiApp;
   store: SqlStore;
   xapi: FakeXApi;
 }
@@ -95,7 +94,7 @@ export async function makeD1TestStore(): Promise<SqlStore> {
 
 /** POST /api/conversations with the usual JSON body. */
 export async function fetchConversationRequest(
-  app: Hono,
+  app: ApiApp,
   url: string,
   extra: Record<string, unknown> = {},
 ): Promise<Response> {

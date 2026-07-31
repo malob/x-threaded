@@ -1,3 +1,4 @@
+import { formatUsd } from "../shared/pricing";
 import type {
   ApiError,
   AuthStatus,
@@ -29,8 +30,14 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   expectJson(response);
   const body = (await response.json()) as T | ApiError;
   if (!response.ok) {
-    const message = (body as ApiError).error ?? `request failed (${response.status})`;
-    throw new Error(message);
+    const failure = body as ApiError;
+    const message = failure.error ?? `request failed (${response.status})`;
+    // A request can fail after X was read and billed. The server says so when
+    // it happened, and this message is the only place the user would see it.
+    const spent = failure.cost;
+    throw new Error(
+      spent && spent.billable > 0 ? `${message} · spent ${formatUsd(spent.usd, false)}` : message,
+    );
   }
   return body as T;
 }

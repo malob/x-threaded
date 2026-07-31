@@ -751,6 +751,54 @@ export function describeStorageContract(name: string, makeStore: MakeStore): voi
         expect(await store.listSavedItems()).toEqual([]);
       });
 
+      /**
+       * The join that decides whether a fetch adds a queue entry: an entry on
+       * any post in the thread already represents it, and the post row is the
+       * only thing that knows which thread a saved id belongs to.
+       */
+      describe("hasSavedConversation", () => {
+        it("finds a conversation saved by a reply inside it", async () => {
+          const store = await makeStore();
+          const [root, reply] = makeThread(2) as [Post, Post];
+          await store.upsertPosts([root, reply]);
+          await store.addSavedItems([savedItem(reply.id, { source: "bookmark" })]);
+
+          expect(await store.hasSavedConversation(root.id)).toBe(true);
+        });
+
+        it("finds a conversation saved by its own root", async () => {
+          const store = await makeStore();
+          const root = makePost();
+          await store.upsertPosts([root]);
+          await store.addSavedItems([savedItem(root.id)]);
+
+          expect(await store.hasSavedConversation(root.id)).toBe(true);
+        });
+
+        it("is false for a conversation nothing saved represents", async () => {
+          const store = await makeStore();
+          const [root, reply] = makeThread(2) as [Post, Post];
+          const elsewhere = makePost();
+          await store.upsertPosts([root, reply, elsewhere]);
+          await store.addSavedItems([savedItem(elsewhere.id)]);
+
+          expect(await store.hasSavedConversation(root.id)).toBe(false);
+        });
+
+        it("is false for a saved id whose post was never stored", async () => {
+          const store = await makeStore();
+          await store.addSavedItems([savedItem("1796000000000000000")]);
+
+          expect(await store.hasSavedConversation("1796000000000000000")).toBe(false);
+        });
+
+        it("is false for an unknown conversation", async () => {
+          const store = await makeStore();
+
+          expect(await store.hasSavedConversation("1796000000000000000")).toBe(false);
+        });
+      });
+
       it("getSavedItem finds one entry, or null", async () => {
         const store = await makeStore();
         await store.addSavedItems([savedItem("1", { source: "bookmark" })]);

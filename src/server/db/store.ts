@@ -283,6 +283,18 @@ export class SqlStore implements Storage {
     return rows.map(toSavedItem);
   }
 
+  async hasSavedConversation(rootId: string): Promise<boolean> {
+    // Through posts, not saved_items: the entry may be keyed on any reply in
+    // the thread, and only the post row knows which conversation that is.
+    const row = await this.db.first<{ post_id: string }>(
+      `SELECT s.post_id FROM saved_items s
+         JOIN posts p ON p.id = s.post_id
+        WHERE p.conversation_id = ? LIMIT 1`,
+      [rootId],
+    );
+    return row !== null;
+  }
+
   async getSavedItem(postId: string): Promise<SavedItem | null> {
     const row = await this.db.first<SavedItemRow>(
       `SELECT post_id, source, added_at FROM saved_items WHERE post_id = ?`,

@@ -119,6 +119,13 @@ export interface Storage {
 
   /** Posts queued for reading, newest first. */
   listSavedItems(): Promise<SavedItem[]>;
+  /**
+   * Whether any saved entry already stands for this conversation — its own
+   * root, or a reply somewhere inside it. A bookmarked mid-thread reply is
+   * the queue entry for that whole thread, so opening it must not leave a
+   * second one keyed on the root (2026-07-30 review, H5).
+   */
+  hasSavedConversation(rootId: string): Promise<boolean>;
   getSavedItem(postId: string): Promise<SavedItem | null>;
   addSavedItems(items: SavedItem[]): Promise<void>;
   removeSavedItem(postId: string): Promise<void>;

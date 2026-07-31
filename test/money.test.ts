@@ -1,11 +1,12 @@
 /**
  * The money suite: every behavior where a mistake spends real dollars.
  *
- * X bills $0.005 per post read, deduplicated within a UTC day, so the
- * assertions that matter here are X API *call counts* and the `billable`
- * figure ingest reports. A cache guard that silently inverts, or a billing
- * check that moves one line, costs money and shows nothing — these tests are
- * the only thing standing between that and production.
+ * X bills $0.005 per post read and $0.001 per Owned Read, deduplicated within
+ * a UTC day, so the assertions that matter here are X API *call counts* and
+ * the estimate the request's meter reports. A cache guard that silently
+ * inverts, or a billing check that moves one line, costs money and shows
+ * nothing — these tests are the only thing standing between that and
+ * production.
  *
  * Route-shape cases that aren't about spend live in routes.test.ts; the
  * bookmark scan's completeness rules live in xapi.test.ts. This file extends
@@ -13,10 +14,19 @@
  */
 import { afterEach, describe, expect, it, setSystemTime } from "bun:test";
 import { ingest } from "../src/server/conversations";
+import { SpendMeter } from "../src/server/meter";
 import type { Storage } from "../src/server/storage";
-import { XApiError } from "../src/server/xapi";
-import { POST_READ_USD } from "../src/shared/pricing";
-import type { OwnPostsResponse, Post, RefreshResponse } from "../src/shared/types";
+import { XApiError, type FetchedConversation } from "../src/server/xapi";
+import { OWNED_READ_USD, POST_READ_USD } from "../src/shared/pricing";
+import type {
+  ApiError,
+  FetchCost,
+  OwnPostsResponse,
+  Post,
+  RefreshResponse,
+  SyncResponse,
+} from "../src/shared/types";
+import { searchReceipt } from "./fake-xapi";
 import { makePost } from "./fixtures";
 import {
   SELF_USER_ID,
@@ -29,6 +39,7 @@ import {
   methods,
   replyTo,
   seedConversation,
+  type TestApp,
 } from "./harness";
 
 /** A post already in the store, last read on `day` (an ISO date). */
@@ -38,37 +49,54 @@ async function seedPostReadOn(store: Storage, day: string, post = makePost()): P
   return stale;
 }
 
+/**
+ * What a route does with a conversation fetch: charge what the client
+ * reported, ingest, and read the estimate off the meter. Cost is a property
+ * of the request now, not of what ingest happened to store, so exercising the
+ * arithmetic means charging the fetch the way a route charges it.
+ */
+async function ingestFetch(
+  { store, xapi }: Pick<TestApp, "store" | "xapi">,
+  fetched: FetchedConversation,
+  extra: Post[] = [],
+): Promise<FetchCost> {
+  const meter = new SpendMeter();
+  meter.charge({ value: fetched, receipt: searchReceipt(fetched) });
+  await ingest(store, xapi, meter, fetched, extra);
+  return meter.cost();
+}
+
 const YESTERDAY = "2024-05-31";
 
 describe("ingest — what actually bills", () => {
   it("bills every post of a first read", async () => {
-    const { store, xapi } = await makeTestApp();
+    const app = await makeTestApp();
     const root = makePost();
     const posts = [root, replyTo(root), replyTo(root)];
 
-    const cost = await ingest(store, xapi, fetchResult(posts));
+    const cost = await ingestFetch(app, fetchResult(posts));
 
     expect(cost).toEqual({ posts: 3, billable: 3, usd: 3 * POST_READ_USD });
-    expect(xapi.calls).toEqual([]);
+    expect(app.xapi.calls).toEqual([]);
   });
 
   it("bills nothing for a second ingest the same day", async () => {
-    const { store, xapi } = await makeTestApp();
+    const app = await makeTestApp();
     const root = makePost();
     const posts = [root, replyTo(root)];
-    await ingest(store, xapi, fetchResult(posts));
+    await ingestFetch(app, fetchResult(posts));
 
-    const again = await ingest(store, xapi, fetchResult(posts));
+    const again = await ingestFetch(app, fetchResult(posts));
 
     expect(again).toEqual({ posts: 2, billable: 0, usd: 0 });
   });
 
   it("bills again for a post last read on an earlier day", async () => {
-    const { store, xapi } = await makeTestApp();
-    const stale = await seedPostReadOn(store, YESTERDAY);
+    const app = await makeTestApp();
+    const stale = await seedPostReadOn(app.store, YESTERDAY);
 
     // The same post comes back from X today, carrying today's fetchedAt.
-    const cost = await ingest(store, xapi, fetchResult([makePost({ id: stale.id })]));
+    const cost = await ingestFetch(app, fetchResult([makePost({ id: stale.id })]));
 
     expect(cost.billable).toBe(1);
   });
@@ -82,88 +110,120 @@ describe("ingest — what actually bills", () => {
    * A mixed fetch makes the failure unambiguous: swapped, billable drops to 0.
    */
   it("counts only the stale post of a mixed fetch — the ordering pin", async () => {
-    const { store, xapi } = await makeTestApp();
-    const stale = await seedPostReadOn(store, YESTERDAY);
+    const app = await makeTestApp();
+    const stale = await seedPostReadOn(app.store, YESTERDAY);
     const readToday = makePost();
-    await ingest(store, xapi, fetchResult([readToday]));
+    await ingestFetch(app, fetchResult([readToday]));
 
-    const cost = await ingest(
-      store,
-      xapi,
-      fetchResult([makePost({ id: stale.id }), readToday]),
-    );
+    const cost = await ingestFetch(app, fetchResult([makePost({ id: stale.id }), readToday]));
 
     expect(cost).toEqual({ posts: 2, billable: 1, usd: POST_READ_USD });
   });
 
   it("counts a post once when it arrives in both posts and referenced", async () => {
-    const { store, xapi } = await makeTestApp();
+    const app = await makeTestApp();
     const root = makePost();
     const reply = replyTo(root);
 
-    const cost = await ingest(store, xapi, fetchResult([root, reply], { referenced: [root] }));
+    const cost = await ingestFetch(app, fetchResult([root, reply], { referenced: [root] }));
 
     expect(cost).toEqual({ posts: 2, billable: 2, usd: 2 * POST_READ_USD });
   });
 
   it("counts an extra once when the fetch already returned it", async () => {
-    const { store, xapi } = await makeTestApp();
+    const app = await makeTestApp();
     const root = makePost();
 
-    const cost = await ingest(store, xapi, fetchResult([root]), [root, root]);
+    const cost = await ingestFetch(app, fetchResult([root]), [root, root]);
 
     expect(cost.posts).toBe(1);
     expect(cost.billable).toBe(1);
   });
 
-  it("counts an extra the fetch missed", async () => {
-    const { store, xapi } = await makeTestApp();
+  /**
+   * An extra is a post the caller already holds — from the store, or from a
+   * lookup it charged for itself. Ingest stores it, but the fetch didn't
+   * return it, so the fetch is not billed for it.
+   */
+  it("stores an extra the fetch missed without billing for it", async () => {
+    const app = await makeTestApp();
     const root = makePost();
     const orphan = replyTo(root);
 
-    const cost = await ingest(store, xapi, fetchResult([root]), [orphan]);
+    const cost = await ingestFetch(app, fetchResult([root]), [orphan]);
 
-    expect(cost.posts).toBe(2);
-    expect((await store.getPosts(root.id)).map((p) => p.id).sort()).toEqual(
+    expect(cost).toEqual({ posts: 1, billable: 1, usd: POST_READ_USD });
+    expect((await app.store.getPosts(root.id)).map((p) => p.id).sort()).toEqual(
       [root.id, orphan.id].sort(),
     );
+  });
+
+  /**
+   * The credit is bound to what the fetch charged for. A post handed in free
+   * from the store would otherwise be credited as "already read today" and
+   * net out a read the fetch genuinely paid for.
+   */
+  it("does not credit a stored extra against the fetch", async () => {
+    const app = await makeTestApp();
+    const known = makePost();
+    await app.store.upsertPosts([known]);
+    const root = makePost();
+
+    const cost = await ingestFetch(app, fetchResult([root]), [known]);
+
+    expect(cost).toEqual({ posts: 1, billable: 1, usd: POST_READ_USD });
   });
 });
 
 describe("ingest — quoted-post resolution", () => {
   it("makes no X call when the quoted post is already stored", async () => {
-    const { store, xapi } = await makeTestApp();
+    const app = await makeTestApp();
     const quoted = makePost();
-    await store.upsertPosts([quoted]);
+    await app.store.upsertPosts([quoted]);
     const root = makePost({ quotedPostId: quoted.id });
 
-    await ingest(store, xapi, fetchResult([root]));
+    await ingestFetch(app, fetchResult([root]));
 
-    expect(xapi.count("getPostsByIds")).toBe(0);
+    expect(app.xapi.count("getPostsByIds")).toBe(0);
   });
 
   it("makes no X call when the quoted post came in the same fetch", async () => {
-    const { store, xapi } = await makeTestApp();
+    const app = await makeTestApp();
     const quoted = makePost();
     const root = makePost({ quotedPostId: quoted.id });
 
-    await ingest(store, xapi, fetchResult([root], { referenced: [quoted] }));
+    await ingestFetch(app, fetchResult([root], { referenced: [quoted] }));
 
-    expect(xapi.count("getPostsByIds")).toBe(0);
+    expect(app.xapi.count("getPostsByIds")).toBe(0);
   });
 
   it("fetches a missing quote exactly once, batching the whole level", async () => {
-    const { store, xapi } = await makeTestApp();
+    const app = await makeTestApp();
     const q1 = makePost();
     const q2 = makePost();
     const root = makePost({ quotedPostId: q1.id });
     const reply = replyTo(root, { quotedPostId: q2.id });
-    xapi.onGetPostsByIds = (ids) => [q1, q2].filter((p) => ids.includes(p.id));
+    app.xapi.onGetPostsByIds = (ids) => [q1, q2].filter((p) => ids.includes(p.id));
 
-    await ingest(store, xapi, fetchResult([root, reply]));
+    await ingestFetch(app, fetchResult([root, reply]));
 
-    expect(xapi.count("getPostsByIds")).toBe(1);
-    expect(idsRequested(xapi)[0]?.sort()).toEqual([q1.id, q2.id].sort());
+    expect(app.xapi.count("getPostsByIds")).toBe(1);
+    expect(idsRequested(app.xapi)[0]?.sort()).toEqual([q1.id, q2.id].sort());
+  });
+
+  /**
+   * Resolving a quote is a lookup nobody counted before the receipts landed:
+   * the money left the account after the old snapshot was taken (H1).
+   */
+  it("bills the quotes it had to buy, on top of the fetch", async () => {
+    const app = await makeTestApp();
+    const quoted = makePost();
+    const root = makePost({ quotedPostId: quoted.id });
+    app.xapi.onGetPostsByIds = () => [quoted];
+
+    const cost = await ingestFetch(app, fetchResult([root]));
+
+    expect(cost).toEqual({ posts: 2, billable: 2, usd: 2 * POST_READ_USD });
   });
 
   /**
@@ -172,19 +232,19 @@ describe("ingest — quoted-post resolution", () => {
    * decision — each extra level is another $0.005 per distinct quote.
    */
   it("follows a quote of a quote but never asks for the third level", async () => {
-    const { store, xapi } = await makeTestApp();
+    const app = await makeTestApp();
     const level3 = makePost();
     const level2 = makePost({ quotedPostId: level3.id });
     const level1 = makePost({ quotedPostId: level2.id });
     const root = makePost({ quotedPostId: level1.id });
     const byId = new Map([level1, level2, level3].map((p) => [p.id, p]));
-    xapi.onGetPostsByIds = (ids) => ids.map((id) => byId.get(id)!).filter(Boolean);
+    app.xapi.onGetPostsByIds = (ids) => ids.map((id) => byId.get(id)!).filter(Boolean);
 
-    await ingest(store, xapi, fetchResult([root]));
+    await ingestFetch(app, fetchResult([root]));
 
-    expect(idsRequested(xapi)).toEqual([[level1.id], [level2.id]]);
-    expect(await store.hasPost(level2.id)).toBe(true);
-    expect(await store.hasPost(level3.id)).toBe(false);
+    expect(idsRequested(app.xapi)).toEqual([[level1.id], [level2.id]]);
+    expect(await app.store.hasPost(level2.id)).toBe(true);
+    expect(await app.store.hasPost(level3.id)).toBe(false);
   });
 });
 
@@ -479,6 +539,110 @@ describe("GET /api/me/posts — how far the scan pages", () => {
     expect(response.status).toBe(401);
     expect(await response.json()).toEqual({
       error: "user context is not configured — visit /auth/login",
+    });
+  });
+});
+
+/**
+ * A request that throws after money moved still has to say what it spent —
+ * otherwise the one failure mode that costs dollars is the one that reports
+ * nothing (2026-07-30 review, H1).
+ */
+describe("what a failed request discloses", () => {
+  it("reports the spend so far when a later step throws", async () => {
+    const { app, xapi } = await makeTestApp();
+    const root = makePost();
+    const quoting = replyTo(root, { quotedPostId: "1796000000000000000" });
+    xapi.onGetPost = () => root;
+    xapi.onFetchConversation = () => fetchResult([root, quoting]);
+    // The quote lookup inside ingest throws — after the search was paid for.
+    xapi.onGetPostsByIds = () => {
+      throw new Error("X is having a moment");
+    };
+
+    const response = await fetchConversationRequest(app, root.id);
+
+    expect(response.status).toBe(500);
+    const body = (await response.json()) as ApiError;
+    expect(body.error).toBe("internal error");
+    // The lookup that resolved the URL, plus the two posts the search returned.
+    expect(body.cost).toEqual({ posts: 3, billable: 3, usd: 3 * POST_READ_USD });
+  });
+
+  it("attaches no cost to a failure that spent nothing", async () => {
+    const { app, xapi } = await makeTestApp();
+    xapi.onGetPost = () => {
+      throw new XApiError("no such post", 404);
+    };
+
+    const response = await fetchConversationRequest(app, "1796000000000000000");
+
+    expect(await response.json()).toEqual({ error: "no such post" });
+  });
+});
+
+describe("POST /api/bookmarks/sync — what the scan bills", () => {
+  it("bills the folder pages as Owned Reads and hydration as post reads", async () => {
+    const { app } = await makeBookmarkApp([makePost(), makePost()], true);
+
+    const response = await app.request("/api/bookmarks/sync", { method: "POST" });
+
+    expect(((await response.json()) as SyncResponse).cost).toEqual({
+      posts: 4,
+      billable: 4,
+      usd: 2 * POST_READ_USD + 2 * OWNED_READ_USD,
+    });
+  });
+
+  it("credits the hydration of posts already read today", async () => {
+    const { app } = await makeBookmarkApp([makePost()], true);
+    await app.request("/api/bookmarks/sync", { method: "POST" });
+
+    const response = await app.request("/api/bookmarks/sync", { method: "POST" });
+
+    // The folder page is enumerated again either way; the lookup that hydrates
+    // it is the part X's same-day dedup makes free.
+    expect(((await response.json()) as SyncResponse).cost).toEqual({
+      posts: 2,
+      billable: 1,
+      usd: OWNED_READ_USD,
+    });
+  });
+});
+
+describe("GET /api/me/posts — what the scan bills", () => {
+  it("bills a timeline page as Owned Reads", async () => {
+    const { app, xapi } = await makeAuthedApp();
+    xapi.onGetOwnPosts = () => ({
+      posts: Array.from({ length: 3 }, () => makePost({ authorId: SELF_USER_ID })),
+    });
+
+    const response = await app.request("/api/me/posts?threads=3");
+
+    expect(((await response.json()) as OwnPostsResponse).cost).toEqual({
+      posts: 3,
+      billable: 3,
+      usd: 3 * OWNED_READ_USD,
+    });
+  });
+
+  /** Root recovery is a lookup, not an Owned Read: different rate, same bill. */
+  it("adds the post read that recovers a root the page didn't return", async () => {
+    const { app, xapi } = await makeAuthedApp();
+    const root = makePost({ authorId: SELF_USER_ID, createdAt: "2024-05-01T00:00:00.000Z" });
+    const continuation = replyTo(root, {
+      authorId: SELF_USER_ID,
+      createdAt: "2024-06-01T00:00:00.000Z",
+    });
+    xapi.onGetOwnPosts = () => ({ posts: [continuation] });
+    xapi.onGetPostsByIds = () => [root];
+
+    const response = await app.request("/api/me/posts");
+
+    expect(((await response.json()) as OwnPostsResponse).cost).toEqual({
+      posts: 2,
+      billable: 2,
+      usd: POST_READ_USD + OWNED_READ_USD,
     });
   });
 });

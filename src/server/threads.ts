@@ -1,4 +1,5 @@
 import type { OwnThread, Post } from "../shared/types";
+import type { SpendMeter } from "./meter";
 import type { Storage } from "./storage";
 import type { XApiClient } from "./xapi";
 
@@ -27,6 +28,7 @@ export function spineLength(root: Post, ownPosts: Post[]): number {
 export async function groupOwnThreads(
   store: Storage,
   xapi: XApiClient,
+  meter: SpendMeter,
   posts: Post[],
   userId: string,
 ): Promise<OwnThread[]> {
@@ -48,9 +50,10 @@ export async function groupOwnThreads(
 
   // Roots older than the scan window aren't cached either; pull those from X
   // in one batch, then read them back the way every other root arrives here.
+  // A lookup, not an Owned Read: the timeline's rate doesn't apply off it.
   const missing = wanted.filter((id) => !roots.has(id));
   if (missing.length > 0) {
-    await store.upsertPosts(await xapi.getPostsByIds(missing));
+    await store.upsertPosts(meter.charge(await xapi.getPostsByIds(missing)));
     for (const post of await store.getPostsByIds(missing)) roots.set(post.id, post);
   }
 

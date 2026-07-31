@@ -1,11 +1,13 @@
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
 import * as v from "valibot";
 import { clamp, parseIntStrict } from "../shared/num";
+import { ownedReads, postReads } from "../shared/pricing";
 import type {
   ApiError,
   AuthRequiredError,
   AuthStatus,
   ConversationResponse,
+  FetchCost,
   FoldersResponse,
   OkResponse,
   OwnPostsResponse,
@@ -19,6 +21,7 @@ import type {
 } from "../shared/types";
 import { parsePostUrl } from "../shared/urls";
 import { conversationResponse, ingest } from "./conversations";
+import { SpendMeter } from "./meter";
 import {
   authorizeUrl,
   createPkce,
@@ -66,6 +69,25 @@ function isPreserved(status: number): status is PreservedStatus {
   return PRESERVED_STATUSES.includes(status as PreservedStatus);
 }
 
+/**
+ * Per-request state. The meter is optional because it is created on the first
+ * X call and not before: a request that reads nothing has nothing to meter,
+ * and the error handler tells the two apart by its absence.
+ */
+type AppEnv = { Variables: { meter?: SpendMeter } };
+
+/** The app `buildApp` returns, carrying its per-request variables. */
+export type ApiApp = Hono<AppEnv>;
+
+/** This request's spend meter, created on first use. */
+function meterOf(c: Context<AppEnv>): SpendMeter {
+  const existing = c.get("meter");
+  if (existing) return existing;
+  const meter = new SpendMeter();
+  c.set("meter", meter);
+  return meter;
+}
+
 /** What POST /api/conversations accepts; `url` is validated by parsePostUrl. */
 const ConversationRequest = v.object({
   url: v.optional(v.string()),
@@ -88,33 +110,42 @@ const ReadStateRequest = v.object({
 });
 
 /** The API routes, independent of runtime (Bun server or Cloudflare Worker). */
-export function buildApp({ store, xapi, maxPosts, oauth = null }: AppDeps): Hono {
-  const app = new Hono();
+export function buildApp({ store, xapi, maxPosts, oauth = null }: AppDeps): ApiApp {
+  const app = new Hono<AppEnv>();
 
   app.onError((err, c) => {
+    // Money moves before a request finishes, and the reads it already paid
+    // for are not refunded by throwing. Every error body carries the estimate
+    // when there is one to carry (2026-07-30 review, H1).
+    const meter = c.get("meter");
+    const spent: { cost?: FetchCost } = meter?.spent ? { cost: meter.cost() } : {};
+
     if (err instanceof XApiError) {
       console.error(`X API error (${err.status}): ${err.message}`);
       return c.json(
-        { error: err.message } satisfies ApiError,
+        { error: err.message, ...spent } satisfies ApiError,
         isPreserved(err.status) ? err.status : 502,
       );
     }
     if (err instanceof XApiShapeError) {
       // The full issue list is for us; the client gets the endpoint only.
       console.error(`X API shape error on ${err.path}: ${err.issues}`);
-      return c.json({ error: err.message } satisfies ApiError, 502);
+      return c.json({ error: err.message, ...spent } satisfies ApiError, 502);
     }
     if (err instanceof OAuthError) {
       // A grant that is gone or unusable is an authentication problem, and
       // the only thing the user can do about it is connect again.
       console.error(err);
-      return c.json({ error: err.message, loginUrl: LOGIN_URL } satisfies AuthRequiredError, 401);
+      return c.json(
+        { error: err.message, loginUrl: LOGIN_URL, ...spent } satisfies AuthRequiredError,
+        401,
+      );
     }
     // Anything unclassified is ours, and its message is an internal detail —
     // a stack-adjacent string, a driver error, whatever threw. Log it in
     // full; tell the client only that it happened.
     console.error(err);
-    return c.json({ error: "internal error" } satisfies ApiError, 500);
+    return c.json({ error: "internal error", ...spent } satisfies ApiError, 500);
   });
 
   /**
@@ -160,9 +191,10 @@ export function buildApp({ store, xapi, maxPosts, oauth = null }: AppDeps): Hono
 
   /** Bookmark folders, for choosing which one feeds the saved tab. */
   app.get("/api/bookmarks/folders", async (c) => {
-    const { token, userId } = await userContext(store, xapi, oauth);
+    const meter = meterOf(c);
+    const { token, userId } = await userContext(store, xapi, oauth, meter);
     return c.json({
-      folders: await xapi.getBookmarkFolders(token, userId),
+      folders: meter.charge(await xapi.getBookmarkFolders(token, userId)),
     } satisfies FoldersResponse);
   });
 
@@ -203,8 +235,16 @@ export function buildApp({ store, xapi, maxPosts, oauth = null }: AppDeps): Hono
     if (!folderId) {
       return c.json({ error: "no bookmark folder selected" } satisfies ApiError, 400);
     }
-    const { token, userId } = await userContext(store, xapi, oauth);
-    const { posts, ids, complete } = await xapi.getBookmarksByFolder(token, userId, folderId);
+    const meter = meterOf(c);
+    const { token, userId } = await userContext(store, xapi, oauth, meter);
+    const { posts, ids, complete } = meter.charge(
+      await xapi.getBookmarksByFolder(token, userId, folderId),
+    );
+    // Before the upsert, which overwrites fetched_at: hydrating a post read
+    // earlier today is the part X's same-day dedup covers. The folder pages
+    // themselves are not credited — they enumerate rather than return posts,
+    // and whether that dedups is exactly the soft part of the rule.
+    meter.credit(postReads((await store.postIdsReadToday(posts.map((p) => p.id))).size));
     await store.upsertPosts(posts);
 
     // Identity comes from the enumerated folder IDs, not the hydrated posts:
@@ -233,6 +273,7 @@ export function buildApp({ store, xapi, maxPosts, oauth = null }: AppDeps): Hono
       added: fresh.length,
       removed: gone.length,
       complete,
+      cost: meter.cost(),
     } satisfies SyncResponse);
   });
 
@@ -298,7 +339,8 @@ export function buildApp({ store, xapi, maxPosts, oauth = null }: AppDeps): Hono
     }
     const target = clamp(requestedThreads, 1, MAX_THREADS);
 
-    const { token, userId } = await userContext(store, xapi, oauth);
+    const meter = meterOf(c);
+    const { token, userId } = await userContext(store, xapi, oauth, meter);
     // Keep scanning until there are enough threads the user actually
     // started. Counting raw conversations would overshoot, because replies
     // into other people's threads get filtered out afterwards.
@@ -309,11 +351,16 @@ export function buildApp({ store, xapi, maxPosts, oauth = null }: AppDeps): Hono
     let paginationToken: string | undefined;
     let items: OwnThread[] = [];
     for (;;) {
-      const page = await xapi.getOwnPosts(token, userId, { max: 50, paginationToken });
+      const page = meter.charge(
+        await xapi.getOwnPosts(token, userId, { max: 50, paginationToken }),
+      );
       posts.push(...page.posts);
       paginationToken = page.nextToken;
+      // Credit before the upsert overwrites fetched_at — the same ordering
+      // ingest depends on, and what makes the re-scan above actually cheap.
+      meter.credit(ownedReads((await store.postIdsReadToday(page.posts.map((p) => p.id))).size));
       await store.upsertPosts(page.posts);
-      items = await groupOwnThreads(store, xapi, posts, userId);
+      items = await groupOwnThreads(store, xapi, meter, posts, userId);
       if (items.length >= target || !paginationToken || page.posts.length === 0) break;
       if (posts.length >= MAX_SCAN) break;
     }
@@ -327,6 +374,7 @@ export function buildApp({ store, xapi, maxPosts, oauth = null }: AppDeps): Hono
       ),
       // More to find if the timeline isn't exhausted, or we trimmed the list.
       hasMore: items.length > target || paginationToken !== undefined,
+      cost: meter.cost(),
     } satisfies OwnPostsResponse);
   });
 
@@ -403,41 +451,49 @@ export function buildApp({ store, xapi, maxPosts, oauth = null }: AppDeps): Hono
       );
     }
 
+    const meter = meterOf(c);
     // Cache first: a stored post already carries its conversation ID, so a
     // conversation we've fetched before is resolvable — and servable — for
     // free. Only a post we've never seen is worth a billable lookup.
-    const requested = (await store.getPost(postId)) ?? (await xapi.getPost(postId));
+    const requested = (await store.getPost(postId)) ?? meter.charge(await xapi.getPost(postId));
     const rootId = requested.conversationId;
     const focusId = postId === rootId ? null : postId;
     const firstFetch = !(await store.hasConversation(rootId));
 
     if (!firstFetch && !body.force) {
-      return c.json(
-        (await conversationResponse(store, rootId, focusId, {
-          fromCache: true,
-        })) satisfies ConversationResponse,
-      );
+      return c.json({
+        ...(await conversationResponse(store, rootId, focusId, { fromCache: true })),
+        // Served from the cache, but the lookup that found out *which*
+        // conversation to serve may still have been paid for above.
+        ...(meter.spent ? { cost: meter.cost() } : {}),
+      } satisfies ConversationResponse);
     }
 
-    const fetched = await xapi.fetchConversation(rootId, maxPosts);
+    const fetched = meter.charge(await xapi.fetchConversation(rootId, maxPosts));
     const root =
       fetched.posts.find((p) => p.id === rootId) ??
       fetched.referenced.find((p) => p.id === rootId) ??
-      (requested.id === rootId ? requested : await xapi.getPost(rootId));
+      (requested.id === rootId ? requested : meter.charge(await xapi.getPost(rootId)));
 
-    const cost = await ingest(store, xapi, fetched, [requested, root]);
+    await ingest(store, xapi, meter, fetched, [requested, root]);
 
     // A conversation you just pulled up is one you're about to read; unread is
     // reserved for posts that arrive later.
     if (firstFetch) await store.markConversationRead(rootId);
 
     // Every explicit fetch lands in the saved queue as a manual entry —
-    // pasted URLs, but since ed8ea1a also inbox card clicks and deep links,
-    // so your own threads and a second root-keyed entry beside a bookmark
-    // both end up here. Whether that's wanted is Stage 5a's call (H5).
-    await store.addSavedItems([
-      { postId: rootId, source: "manual", addedAt: new Date().toISOString() },
-    ]);
+    // pasted URLs, but since ed8ea1a also inbox card clicks and deep links.
+    // Save unless the queue already represents this reading job: an entry on
+    // any post in the thread (a bookmarked mid-thread reply is the common
+    // one) covers it, and your own threads have the Your posts tab. Either
+    // way a second entry is a chore to dismiss, not a queue entry.
+    const self = (await store.getOAuthTokens(SELF_ID))?.userId ?? null;
+    const ownThread = self !== null && root.authorId === self;
+    if (!ownThread && !(await store.hasSavedConversation(rootId))) {
+      await store.addSavedItems([
+        { postId: rootId, source: "manual", addedAt: new Date().toISOString() },
+      ]);
+    }
 
     // The row is the "cached" marker, so it commits last: anything that throws
     // above leaves nothing to serve rather than an empty conversation the
@@ -456,7 +512,7 @@ export function buildApp({ store, xapi, maxPosts, oauth = null }: AppDeps): Hono
         truncated: fetched.truncated,
         fromCache: false,
       })),
-      cost,
+      cost: meter.cost(),
     } satisfies ConversationResponse);
   });
 
@@ -467,6 +523,7 @@ export function buildApp({ store, xapi, maxPosts, oauth = null }: AppDeps): Hono
       return c.json({ error: "conversation not cached" } satisfies ApiError, 404);
     }
 
+    const meter = meterOf(c);
     const before = await store.existingPostIds(rootId);
     // Post reads deduplicate within a UTC day, so a full re-read on the same
     // day as the last one is free and refreshes metrics; otherwise fetch only
@@ -474,23 +531,24 @@ export function buildApp({ store, xapi, maxPosts, oauth = null }: AppDeps): Hono
     const sameUtcDay = meta.fetchedAt.slice(0, 10) === new Date().toISOString().slice(0, 10);
     let truncated = false;
 
-    let cost: { posts: number; billable: number; usd: number };
     if (sameUtcDay) {
-      const fetched = await xapi.fetchConversation(rootId, maxPosts);
-      cost = await ingest(store, xapi, fetched);
+      const fetched = meter.charge(await xapi.fetchConversation(rootId, maxPosts));
+      await ingest(store, xapi, meter, fetched);
       await store.upsertConversation({ rootId, ...meta, fetchedAt: new Date().toISOString() });
       truncated = fetched.truncated;
     } else {
       const sinceId = await store.newestPostId(rootId);
-      const fetched = await xapi.fetchConversation(rootId, maxPosts, sinceId ?? undefined);
-      cost = await ingest(store, xapi, fetched);
+      const fetched = meter.charge(
+        await xapi.fetchConversation(rootId, maxPosts, sinceId ?? undefined),
+      );
+      await ingest(store, xapi, meter, fetched);
     }
 
     const newCount = (await store.existingPostIds(rootId)).size - before.size;
     return c.json({
       ...(await conversationResponse(store, rootId, null, { truncated, fromCache: false })),
       newCount,
-      cost,
+      cost: meter.cost(),
     } satisfies RefreshResponse);
   });
 

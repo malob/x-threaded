@@ -1,4 +1,5 @@
 import * as v from "valibot";
+import { NO_READS, addReceipts, ownedReads, postReads, type Receipt } from "../shared/pricing";
 import { snowflakeMs } from "../shared/snowflake";
 import type { MediaItem, Post, PostEntities } from "../shared/types";
 import {
@@ -76,6 +77,27 @@ export interface FetchedConversation {
   /** Referenced posts from includes (quoted posts, recovered parents). */
   referenced: Post[];
   truncated: boolean;
+}
+
+/**
+ * A value from X and an estimate of what reading it billed.
+ *
+ * Every method below returns one. This layer is the only one that knows an
+ * endpoint's billing unit — which posts count, at which rate, and whether a
+ * nested call added its own — so it is the layer that says so, rather than a
+ * route inferring spend from whatever ended up in a variable afterwards
+ * (2026-07-30 review, H1). Charging the receipt through a meter is also how
+ * the value gets unwrapped, so a call whose cost goes unreported has to be
+ * written to look wrong.
+ *
+ * The counts are estimates: X deduplicates a post read within a 24h UTC day,
+ * calls that dedup soft, and only /2/usage/tweets knows what it really
+ * charged. Where two of our calls read the same post, the receipts add — the
+ * conservative direction.
+ */
+export interface Billed<T> {
+  readonly value: T;
+  readonly receipt: Receipt;
 }
 
 /** The v2 API HTML-escapes &, <, > in post text; x.com renders them unescaped. */
@@ -211,11 +233,16 @@ export class XApi {
     return parsed.output;
   }
 
-  /** The authenticated user (user-context). Confirms the token works. */
-  async getMe(accessToken: string): Promise<{ id: string; username: string; name: string }> {
+  /**
+   * The authenticated user (user-context). Confirms the token works, and
+   * bills one user read at the post-read rate.
+   */
+  async getMe(
+    accessToken: string,
+  ): Promise<Billed<{ id: string; username: string; name: string }>> {
     const result = await this.get("/users/me", MeResponseSchema, {}, accessToken);
     if (!result.data) throw new XApiError("could not resolve the authenticated user", 401);
-    return result.data;
+    return { value: result.data, receipt: postReads(1) };
   }
 
   /**
@@ -231,7 +258,7 @@ export class XApi {
     accessToken: string,
     userId: string,
     opts: { max?: number; paginationToken?: string } = {},
-  ): Promise<{ posts: Post[]; nextToken?: string }> {
+  ): Promise<Billed<{ posts: Post[]; nextToken?: string }>> {
     const params: Record<string, string> = {
       max_results: String(Math.min(Math.max(opts.max ?? 50, 5), 100)),
       exclude: "replies,retweets",
@@ -245,24 +272,28 @@ export class XApi {
     const users = new Map((page.includes?.users ?? []).map((u) => [u.id, u]));
     const media = mediaMap(page.includes);
     const fetchedAt = new Date().toISOString();
+    const posts = (page.data ?? []).map((tweet) => toPost(tweet, users, media, fetchedAt));
     return {
-      posts: (page.data ?? []).map((tweet) => toPost(tweet, users, media, fetchedAt)),
-      nextToken: page.meta?.next_token,
+      value: { posts, nextToken: page.meta?.next_token },
+      receipt: ownedReads(posts.length),
     };
   }
 
-  /** The user's bookmark folders (user context; requires bookmark.read). */
+  /**
+   * The user's bookmark folders (user context; requires bookmark.read).
+   * Folders aren't posts, so nothing here is a read X bills for.
+   */
   async getBookmarkFolders(
     accessToken: string,
     userId: string,
-  ): Promise<{ id: string; name: string }[]> {
+  ): Promise<Billed<{ id: string; name: string }[]>> {
     const result = await this.get(
       `/users/${userId}/bookmarks/folders`,
       BookmarkFoldersSchema,
       {},
       accessToken,
     );
-    return result.data ?? [];
+    return { value: result.data ?? [], receipt: NO_READS };
   }
 
   /**
@@ -277,13 +308,18 @@ export class XApi {
    * Callers reconcile against this list, and a partial one is indistinguishable
    * from the user having un-bookmarked everything past the cap — so the flag
    * is what lets them refuse to act on a half-read folder.
+   *
+   * Two rates in one receipt: the folder pages are Owned Reads of the stubs
+   * they return, and the hydration below is a lookup at the post-read rate.
+   * X's dedup may well forgive the second reading of an id it just served as
+   * a stub; counting both is the estimate that can't understate the bill.
    */
   async getBookmarksByFolder(
     accessToken: string,
     userId: string,
     folderId: string,
     maxPages = 10,
-  ): Promise<{ posts: Post[]; ids: string[]; complete: boolean }> {
+  ): Promise<Billed<{ posts: Post[]; ids: string[]; complete: boolean }>> {
     const ids: string[] = [];
     let paginationToken: string | undefined;
     let complete = false;
@@ -307,15 +343,16 @@ export class XApi {
     // post whose author went private or deleted it, and a bookmark that
     // failed to hydrate is still a bookmark — reconciling removals against
     // the hydrated subset would delete it (Stage 0 adversarial review).
+    const hydrated =
+      ids.length > 0 ? await this.getPostsByIds(ids) : { value: [], receipt: NO_READS };
     return {
-      posts: ids.length > 0 ? await this.getPostsByIds(ids) : [],
-      ids,
-      complete,
+      value: { posts: hydrated.value, ids, complete },
+      receipt: addReceipts(ownedReads(ids.length), hydrated.receipt),
     };
   }
 
   /** Look up a single post ($0.005). */
-  async getPost(id: string): Promise<Post> {
+  async getPost(id: string): Promise<Billed<Post>> {
     const result = await this.get(`/tweets/${id}`, TweetLookupSchema, {
       "tweet.fields": POST_FIELDS,
       expansions: EXPANSIONS,
@@ -327,11 +364,17 @@ export class XApi {
       throw new XApiError(detail, 404);
     }
     const users = new Map((result.includes?.users ?? []).map((u) => [u.id, u]));
-    return toPost(result.data, users, mediaMap(result.includes), new Date().toISOString());
+    return {
+      value: toPost(result.data, users, mediaMap(result.includes), new Date().toISOString()),
+      receipt: postReads(1),
+    };
   }
 
-  /** Fetch specific posts by ID (up to 100 per request), media fully resolved. */
-  async getPostsByIds(ids: string[]): Promise<Post[]> {
+  /**
+   * Fetch specific posts by ID (up to 100 per request), media fully resolved.
+   * Billed per post returned, so ids X had nothing for cost nothing.
+   */
+  async getPostsByIds(ids: string[]): Promise<Billed<Post[]>> {
     const results: Post[] = [];
     for (let i = 0; i < ids.length; i += 100) {
       const page = await this.get("/tweets", SearchPageSchema, {
@@ -348,26 +391,33 @@ export class XApi {
         results.push(toPost(tweet, users, media, fetchedAt));
       }
     }
-    return results;
+    return { value: results, receipt: postReads(results.length) };
   }
 
   /**
    * Fetch every post in a conversation via full-archive search, paginated.
    * Never requests more than maxPosts allows, stopping at or below it and
-   * reporting truncation. Billed $0.005 per post returned (deduplicated
-   * within a 24h UTC window).
+   * reporting truncation.
+   *
+   * Billed $0.005 per post a page returned, `includes` posts included: we
+   * ingest and render those, so we count them. A post a page returns twice —
+   * as a result and again as another post's referenced parent — is one read;
+   * one page is one response, and X cannot bill the same post twice for
+   * serving it once. The media re-lookup below is a second response, so its
+   * receipt adds (2026-07-30 review, H1).
    */
   async fetchConversation(
     conversationId: string,
     maxPosts: number,
     sinceId?: string,
-  ): Promise<FetchedConversation> {
+  ): Promise<Billed<FetchedConversation>> {
     const fetchedAt = new Date().toISOString();
     const posts: Post[] = [];
     const referencedById = new Map<string, Post>();
     const unresolvedMedia = new Set<string>();
     let nextToken: string | undefined;
     let truncated = false;
+    let receipt = NO_READS;
 
     // Without start_time, /tweets/search/all quietly searches only the last 30
     // days and an older conversation comes back missing its history — no error,
@@ -406,16 +456,20 @@ export class XApi {
       const page = await this.get("/tweets/search/all", SearchPageSchema, params);
       const users = new Map((page.includes?.users ?? []).map((u) => [u.id, u]));
       const media = mediaMap(page.includes);
+      const pageIds = new Set<string>();
       for (const tweet of page.data ?? []) {
         posts.push(toPost(tweet, users, media, fetchedAt));
+        pageIds.add(tweet.id);
       }
       for (const tweet of page.includes?.tweets ?? []) {
         const post = toPost(tweet, users, media, fetchedAt);
         referencedById.set(post.id, post);
+        pageIds.add(post.id);
         if ((tweet.attachments?.media_keys?.length ?? 0) > 0 && post.media === null) {
           unresolvedMedia.add(post.id);
         }
       }
+      receipt = addReceipts(receipt, postReads(pageIds.size));
 
       nextToken = page.meta?.next_token;
       if (!nextToken) break;
@@ -427,11 +481,13 @@ export class XApi {
     const postIds = new Set(posts.map((p) => p.id));
     const toRefetch = [...unresolvedMedia].filter((id) => !postIds.has(id));
     if (toRefetch.length > 0) {
-      for (const post of await this.getPostsByIds(toRefetch)) {
+      const refetched = await this.getPostsByIds(toRefetch);
+      for (const post of refetched.value) {
         referencedById.set(post.id, post);
       }
+      receipt = addReceipts(receipt, refetched.receipt);
     }
 
-    return { posts, referenced: [...referencedById.values()], truncated };
+    return { value: { posts, referenced: [...referencedById.values()], truncated }, receipt };
   }
 }

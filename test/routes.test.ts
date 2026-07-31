@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import type { Hono } from "hono";
+import type { ApiApp } from "../src/server/app";
 import { SELF_ID } from "../src/server/oauth";
 import { XApiError, XApiShapeError } from "../src/server/xapi";
 import type {
@@ -16,6 +16,7 @@ import {
   SELF_USER_ID,
   TEST_OAUTH,
   fetchConversationRequest,
+  fetchResult,
   idsRequested,
   makeAuthedApp,
   makeTestApp,
@@ -152,9 +153,82 @@ describe("POST /api/conversations — the conversation row commits last", () => 
     };
     expect(await store.hasConversation(root.id)).toBe(true);
     expect(body.unreadIds).toEqual([]);
-    expect(body.cost.posts).toBe(2);
+    // The lookup that resolved the pasted URL counts too: three reads for two
+    // posts, because X served the root twice. Under-reporting that was H1.
+    expect(body.cost.posts).toBe(3);
     expect((await store.listSavedItems()).map((i) => i.postId)).toEqual([root.id]);
     expect((await app.request(`/api/conversations/${root.id}`)).status).toBe(200);
+  });
+});
+
+/**
+ * "Save unless already represented": a fetch is a reading intention, but a
+ * second entry for a conversation the queue already holds — or for a thread
+ * the *Your posts* tab lists anyway — is a chore, not a queue entry.
+ */
+describe("POST /api/conversations — what lands in Saved", () => {
+  it("adds a conversation nothing in the queue represents", async () => {
+    const { app, store, xapi } = await makeTestApp();
+    const root = makePost({ authorId: "999" });
+    xapi.onGetPost = () => root;
+    xapi.onFetchConversation = () => fetchResult([root]);
+
+    await fetchConversationRequest(app, root.id);
+
+    expect((await store.listSavedItems()).map((i) => [i.postId, i.source])).toEqual([
+      [root.id, "manual"],
+    ]);
+  });
+
+  it("adds nothing when the root is the signed-in user's own post", async () => {
+    const { app, store, xapi } = await makeAuthedApp();
+    const root = makePost({ authorId: SELF_USER_ID });
+    xapi.onGetPost = () => root;
+    xapi.onFetchConversation = () => fetchResult([root]);
+
+    await fetchConversationRequest(app, root.id);
+
+    expect(await store.listSavedItems()).toEqual([]);
+  });
+
+  it("still adds someone else's thread when the user is signed in", async () => {
+    const { app, store, xapi } = await makeAuthedApp();
+    const root = makePost({ authorId: "999" });
+    xapi.onGetPost = () => root;
+    xapi.onFetchConversation = () => fetchResult([root]);
+
+    await fetchConversationRequest(app, root.id);
+
+    expect((await store.listSavedItems()).map((i) => i.postId)).toEqual([root.id]);
+  });
+
+  it("adds nothing when a saved reply already represents the conversation", async () => {
+    const { app, store, xapi } = await makeTestApp();
+    const root = makePost({ authorId: "999" });
+    const reply = replyTo(root);
+    // The bookmarked mid-thread reply is the entry; opening its conversation
+    // must not leave a second, root-keyed one beside it.
+    await store.upsertPosts([reply]);
+    await store.addSavedItems([
+      { postId: reply.id, source: "bookmark", addedAt: "2024-01-01T00:00:00.000Z" },
+    ]);
+    xapi.onFetchConversation = () => fetchResult([root, reply]);
+
+    await fetchConversationRequest(app, reply.id);
+
+    expect((await store.listSavedItems()).map((i) => i.postId)).toEqual([reply.id]);
+  });
+
+  it("does not add a second entry when the same conversation is fetched again", async () => {
+    const { app, store, xapi } = await makeTestApp();
+    const root = makePost({ authorId: "999" });
+    xapi.onGetPost = () => root;
+    xapi.onFetchConversation = () => fetchResult([root]);
+    await fetchConversationRequest(app, root.id);
+
+    await fetchConversationRequest(app, root.id, { force: true });
+
+    expect((await store.listSavedItems()).map((i) => i.postId)).toEqual([root.id]);
   });
 });
 
@@ -331,7 +405,7 @@ describe("GET /api/me/posts — grouping into threads", () => {
 
 describe("GET /api/auth/status — answered from the store", () => {
   /** The route's body, typed as what every branch of it must satisfy. */
-  async function authStatus(app: Hono): Promise<AuthStatus> {
+  async function authStatus(app: ApiApp): Promise<AuthStatus> {
     const response = await app.request("/api/auth/status");
     expect(response.status).toBe(200);
     return (await response.json()) as AuthStatus;
@@ -473,7 +547,7 @@ describe("request bodies", () => {
   const JSON_HEADERS = { "Content-Type": "application/json" };
 
   /** POST/PATCH `body` as-is, without JSON.stringify getting in the way. */
-  async function send(app: Hono, path: string, method: string, body: string): Promise<Response> {
+  async function send(app: ApiApp, path: string, method: string, body: string): Promise<Response> {
     return await app.request(path, { method, headers: JSON_HEADERS, body });
   }
 

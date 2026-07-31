@@ -4,6 +4,43 @@
  */
 export const POST_READ_USD = 0.005;
 
+/** Reading your own posts — timeline, bookmarks — is an Owned Read. */
+export const OWNED_READ_USD = 0.001;
+
+/**
+ * What one X call billed, in the two units X charges in.
+ *
+ * An estimate, always: X deduplicates a post read within a 24h UTC day and
+ * documents that dedup as soft, so nothing here is a figure X will confirm.
+ * The free /2/usage/tweets endpoint is what reconciles this ledger against
+ * their meter (2026-07-30 review, H1).
+ */
+export interface Receipt {
+  /** Posts read at the lookup/search rate. */
+  readonly reads: number;
+  /** Posts read from the signed-in user's own timeline or bookmarks. */
+  readonly ownedReads: number;
+}
+
+export const NO_READS: Receipt = { reads: 0, ownedReads: 0 };
+
+export function postReads(count: number): Receipt {
+  return { reads: count, ownedReads: 0 };
+}
+
+export function ownedReads(count: number): Receipt {
+  return { reads: 0, ownedReads: count };
+}
+
+export function addReceipts(a: Receipt, b: Receipt): Receipt {
+  return { reads: a.reads + b.reads, ownedReads: a.ownedReads + b.ownedReads };
+}
+
+/** The one place reads become dollars. */
+export function receiptUsd(receipt: Receipt): number {
+  return receipt.reads * POST_READ_USD + receipt.ownedReads * OWNED_READ_USD;
+}
+
 /**
  * Posts a conversation is likely to contain, from its root's reply count.
  *

@@ -1,5 +1,6 @@
-import { POST_READ_USD } from "../shared/pricing";
+import { postReads } from "../shared/pricing";
 import type { ConversationResponse, Post } from "../shared/types";
+import type { SpendMeter } from "./meter";
 import { getQuotedFor, type Storage } from "./storage";
 import type { FetchedConversation, XApiClient } from "./xapi";
 
@@ -22,10 +23,15 @@ export async function conversationResponse(
   };
 }
 
-/** Resolve quoted posts two levels deep; anything deeper renders as a link. */
+/**
+ * Resolve quoted posts two levels deep; anything deeper renders as a link.
+ * Each level that has to be bought is a lookup, and it bills — which is why
+ * the meter is threaded down here rather than reconstructed upstairs.
+ */
 export async function resolveQuotedPosts(
   store: Storage,
   xapi: XApiClient,
+  meter: SpendMeter,
   all: Post[],
   byId: Map<string, Post>,
 ): Promise<void> {
@@ -39,7 +45,7 @@ export async function resolveQuotedPosts(
       if (!byId.has(id) && !(await store.hasPost(id))) missing.push(id);
     }
     if (missing.length > 0) {
-      const fetched = await xapi.getPostsByIds(missing);
+      const fetched = meter.charge(await xapi.getPostsByIds(missing));
       for (const post of fetched) byId.set(post.id, post);
       await store.upsertPosts(fetched);
     }
@@ -54,23 +60,32 @@ export async function resolveQuotedPosts(
 
 /**
  * Upsert a fetch result (posts + referenced) and resolve its quotes.
- * Returns what it actually cost: posts we hadn't already read today, since
- * same-day re-reads don't bill.
+ *
+ * Two things reach the meter here: the credit for posts the fetch paid for
+ * that we had already read today, and whatever the quote resolution buys.
+ * The fetch's own receipt is charged by its caller, at the call — a rule that
+ * keeps the accounting right when the next line throws.
  */
 export async function ingest(
   store: Storage,
   xapi: XApiClient,
+  meter: SpendMeter,
   fetched: FetchedConversation,
   extra: Post[] = [],
-): Promise<{ posts: number; billable: number; usd: number }> {
+): Promise<void> {
   const byId = new Map(fetched.posts.map((p) => [p.id, p]));
   for (const post of extra) if (!byId.has(post.id)) byId.set(post.id, post);
   for (const post of fetched.referenced) if (!byId.has(post.id)) byId.set(post.id, post);
   const all = [...byId.values()];
-  // Check before upserting: writing the posts overwrites fetched_at.
-  const free = await store.postIdsReadToday(all.map((p) => p.id));
+  // Check before upserting: writing the posts overwrites fetched_at, and every
+  // one of them would then read as already-read-today.
+  //
+  // Only the fetch's own posts are credited. An `extra` came either from the
+  // store, which never charged for it, or from a lookup that charged
+  // separately — crediting those would net out a read someone paid for.
+  const fetchedIds = [...fetched.posts, ...fetched.referenced].map((p) => p.id);
+  const free = await store.postIdsReadToday([...new Set(fetchedIds)]);
+  meter.credit(postReads(free.size));
   await store.upsertPosts(all);
-  await resolveQuotedPosts(store, xapi, all, byId);
-  const billable = all.length - free.size;
-  return { posts: all.length, billable, usd: billable * POST_READ_USD };
+  await resolveQuotedPosts(store, xapi, meter, all, byId);
 }

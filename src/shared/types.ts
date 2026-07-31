@@ -62,9 +62,15 @@ export interface ConversationResponse {
   cost?: FetchCost;
 }
 
-/** What an API call actually cost, after same-day deduplication. */
+/**
+ * What a request estimates it spent at X, after same-day deduplication.
+ *
+ * An estimate, not a statement: X deduplicates a post read within a 24h UTC
+ * day and documents that as soft, so `billable` is our reading of their rules,
+ * not their invoice. The free /2/usage/tweets endpoint is what reconciles it.
+ */
 export interface FetchCost {
-  /** Posts returned. */
+  /** Posts read from X, at either rate. */
   posts: number;
   /** Of those, ones we hadn't already read today — the ones that bill. */
   billable: number;
@@ -79,6 +85,12 @@ export interface RefreshResponse extends ConversationResponse {
 
 export interface ApiError {
   error: string;
+  /**
+   * What the request had already spent when it failed. Present only when
+   * money moved: a request can throw well after the reads it paid for, and a
+   * bare "internal error" would be the one failure that hides a bill.
+   */
+  cost?: FetchCost;
 }
 
 /**
@@ -108,6 +120,8 @@ export interface SyncResponse {
   removed: number;
   /** False when the scan hit its page cap; removals were skipped. */
   complete: boolean;
+  /** Enumerating a folder and hydrating it both bill; a big folder is dollars. */
+  cost: FetchCost;
 }
 
 export interface SavedEntry {
@@ -140,6 +154,8 @@ export interface OwnPostsResponse {
   quoted: Record<string, Post>;
   /** The scan filled its quota, so asking for more may yield more. */
   hasMore: boolean;
+  /** Owned Reads for the timeline pages, plus any root the scan had to buy. */
+  cost: FetchCost;
 }
 
 export interface SettingsResponse {

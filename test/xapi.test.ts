@@ -74,10 +74,12 @@ describe("fetchConversation page budget", () => {
     ]);
     try {
       const api = new XApi("bearer", { pageDelayMs: 0 });
-      const result = await api.fetchConversation(ROOT_ID, 150);
+      const { value: result, receipt } = await api.fetchConversation(ROOT_ID, 150);
       expect(maxResults(urls)).toEqual(["100", "50"]);
       expect(result.posts).toHaveLength(150);
       expect(result.truncated).toBe(true);
+      // Every post both pages returned, and nothing beyond the budget.
+      expect(receipt).toEqual({ reads: 150, ownedReads: 0 });
     } finally {
       restore();
     }
@@ -87,7 +89,7 @@ describe("fetchConversation page budget", () => {
     const { urls, restore } = serveSearchPages([{ count: 100, nextToken: "page2" }]);
     try {
       const api = new XApi("bearer", { pageDelayMs: 0 });
-      const result = await api.fetchConversation(ROOT_ID, 105);
+      const { value: result } = await api.fetchConversation(ROOT_ID, 105);
       expect(maxResults(urls)).toEqual(["100"]);
       expect(result.posts).toHaveLength(100);
       expect(result.truncated).toBe(true);
@@ -103,7 +105,7 @@ describe("fetchConversation page budget", () => {
     ]);
     try {
       const api = new XApi("bearer", { pageDelayMs: 0 });
-      const result = await api.fetchConversation(ROOT_ID, 500);
+      const { value: result } = await api.fetchConversation(ROOT_ID, 500);
       expect(maxResults(urls)).toEqual(["100", "100"]);
       expect(result.posts).toHaveLength(140);
       expect(result.truncated).toBe(false);
@@ -148,6 +150,89 @@ describe("fetchConversation search window", () => {
       await new XApi("bearer", { pageDelayMs: 0 }).fetchConversation(ROOT_ID, 500, "998877");
       expect(urls[0]?.searchParams.get("since_id")).toBe("998877");
       expect(urls[0]?.searchParams.has("start_time")).toBe(false);
+    } finally {
+      restore();
+    }
+  });
+});
+
+/**
+ * The receipts the routes bill from. X charges per post a response returned,
+ * so what counts is what came back — including the `includes` posts we ingest
+ * and render, and excluding a post one response served twice.
+ */
+describe("what the client reports billing", () => {
+  const MS = Date.parse(ROOT_AT);
+
+  /** One search response: `data`, plus whatever `includes.tweets` carries. */
+  function serveOnePage(data: unknown[], includedTweets: unknown[]): () => void {
+    return withMockFetch(
+      () =>
+        new Response(
+          JSON.stringify({
+            data,
+            includes: { tweets: includedTweets },
+            meta: { result_count: data.length },
+          }),
+        ),
+    );
+  }
+
+  it("counts a post the same response returned twice as one read", async () => {
+    const parent = apiTweet(ROOT_ID, MS);
+    const reply = apiTweet(snowflakeId(MS + 1000), MS + 1000);
+    // X ships the parent again under includes because the reply references it.
+    const restore = serveOnePage([parent, reply], [parent]);
+    try {
+      const { value, receipt } = await new XApi("bearer", { pageDelayMs: 0 }).fetchConversation(
+        ROOT_ID,
+        100,
+      );
+      expect(value.posts).toHaveLength(2);
+      expect(receipt).toEqual({ reads: 2, ownedReads: 0 });
+    } finally {
+      restore();
+    }
+  });
+
+  /** A quoted post arrives only via includes; we ingest it, so we count it. */
+  it("counts an includes-only post as a read of its own", async () => {
+    const quoted = apiTweet(snowflakeId(MS - 60_000), MS - 60_000);
+    const restore = serveOnePage([apiTweet(ROOT_ID, MS)], [quoted]);
+    try {
+      const { value, receipt } = await new XApi("bearer", { pageDelayMs: 0 }).fetchConversation(
+        ROOT_ID,
+        100,
+      );
+      expect(value.referenced.map((p) => p.id)).toEqual([quoted.id]);
+      expect(receipt).toEqual({ reads: 2, ownedReads: 0 });
+    } finally {
+      restore();
+    }
+  });
+
+  it("bills a lookup for the posts it got back, not the ids it asked for", async () => {
+    const found = apiTweet(ROOT_ID, MS);
+    const restore = withMockFetch(() => new Response(JSON.stringify({ data: [found] })));
+    try {
+      const { value, receipt } = await new XApi("bearer").getPostsByIds([
+        ROOT_ID,
+        "1796000000000000000",
+      ]);
+      expect(value).toHaveLength(1);
+      expect(receipt).toEqual({ reads: 1, ownedReads: 0 });
+    } finally {
+      restore();
+    }
+  });
+
+  it("bills own posts as Owned Reads", async () => {
+    const restore = withMockFetch(
+      () => new Response(JSON.stringify({ data: [apiTweet(ROOT_ID, MS)] })),
+    );
+    try {
+      const { receipt } = await new XApi("bearer").getOwnPosts("user-token", "100");
+      expect(receipt).toEqual({ reads: 0, ownedReads: 1 });
     } finally {
       restore();
     }
@@ -220,7 +305,10 @@ describe("wire shapes", () => {
       unexpected_envelope: { note: "hello" },
     });
     try {
-      const result = await new XApi("bearer", { pageDelayMs: 0 }).fetchConversation(ROOT_ID, 100);
+      const { value: result } = await new XApi("bearer", { pageDelayMs: 0 }).fetchConversation(
+        ROOT_ID,
+        100,
+      );
       expect(result.posts.map((p) => p.id)).toEqual([ROOT_ID]);
       expect(result.posts[0]?.authorHandle).toBe("a");
     } finally {
@@ -282,7 +370,7 @@ describe("getBookmarksByFolder completeness", () => {
     ]);
     try {
       const api = new XApi("bearer", { pageDelayMs: 0 });
-      const result = await api.getBookmarksByFolder("user-token", "u1", "folder1", 2);
+      const { value: result } = await api.getBookmarksByFolder("user-token", "u1", "folder1", 2);
       expect(result.posts.map((p) => p.id)).toEqual([folderId(1), folderId(2)]);
       expect(result.complete).toBe(false);
     } finally {
@@ -297,9 +385,17 @@ describe("getBookmarksByFolder completeness", () => {
     ]);
     try {
       const api = new XApi("bearer", { pageDelayMs: 0 });
-      const result = await api.getBookmarksByFolder("user-token", "u1", "folder1", 10);
+      const { value: result, receipt } = await api.getBookmarksByFolder(
+        "user-token",
+        "u1",
+        "folder1",
+        10,
+      );
       expect(result.posts.map((p) => p.id)).toEqual([folderId(1), folderId(2)]);
       expect(result.complete).toBe(true);
+      // Two folder pages of stubs, then one lookup hydrating both: the nested
+      // call's receipt lands in the scan's, exactly once.
+      expect(receipt).toEqual({ reads: 2, ownedReads: 2 });
     } finally {
       restore();
     }

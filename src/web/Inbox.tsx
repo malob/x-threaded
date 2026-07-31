@@ -215,6 +215,9 @@ export function Inbox({ onOpenPost }: { onOpenPost: (postId: string) => void }) 
       // An unfinished scan can't tell "un-bookmarked" from "past the page
       // cap", so the server skips removals — say so instead of "up to date".
       if (!result.complete) parts.push("partial scan — removals skipped");
+      // Syncing a folder reads every post in it, and a large one is dollars:
+      // the note is the only place that spend is ever visible.
+      if (result.cost.billable > 0) parts.push(`cost ${formatUsd(result.cost.usd, false)}`);
       setSyncNote(parts.length > 0 ? parts.join(" · ") : "up to date");
       loadSaved();
     } catch (e) {
@@ -314,6 +317,9 @@ export function Inbox({ onOpenPost }: { onOpenPost: (postId: string) => void }) 
             <button className="notice-btn" onClick={() => loadOwn(10)} disabled={loadingOwn}>
               {loadingOwn ? "loading…" : "refresh"}
             </button>
+            {/* Scanning the timeline is an Owned Read per post, so asking for
+                more threads is a purchase, not a page turn. */}
+            {own && own.cost.billable > 0 && <> · scan {formatUsd(own.cost.usd, false)}</>}
           </p>
           <ul className="conversations">
             {own?.items.map((item) => (

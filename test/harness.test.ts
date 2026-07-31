@@ -38,11 +38,29 @@ describe("FakeXApi", () => {
     );
   });
 
-  it("returns canned values", async () => {
+  it("returns canned values with the receipt the endpoint bills", async () => {
     const xapi = new FakeXApi();
     const post = makePost();
     xapi.onGetPost = () => post;
-    expect(await xapi.getPost(post.id)).toEqual(post);
+    expect(await xapi.getPost(post.id)).toEqual({
+      value: post,
+      receipt: { reads: 1, ownedReads: 0 },
+    });
+  });
+
+  /** The two rates, and the nesting: folder stubs are Owned Reads, hydration isn't. */
+  it("prices a bookmark folder scan in both units", async () => {
+    const xapi = new FakeXApi();
+    const hydrated = makePost();
+    xapi.onGetBookmarksByFolder = () => ({
+      posts: [hydrated],
+      ids: [hydrated.id, "1796000000000000000"],
+      complete: true,
+    });
+
+    const { receipt } = await xapi.getBookmarksByFolder("token", "u1", "folder1");
+
+    expect(receipt).toEqual({ reads: 1, ownedReads: 2 });
   });
 
   it("records and counts every call, canned or not", async () => {
