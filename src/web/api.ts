@@ -56,10 +56,18 @@ export function getFolders(): Promise<FoldersResponse> {
   return request("/api/bookmarks/folders");
 }
 
+const AUTH_STATES: readonly string[] = ["unconfigured", "unauthorized", "broken", "authorized"];
+
 export async function getAuthStatus(): Promise<AuthStatus> {
-  // Unlike other endpoints, a non-2xx here is still a meaningful answer.
+  // Unlike other endpoints, a non-2xx here is still a meaningful answer — as
+  // long as it is one of the four states. Anything else would be an error
+  // body wearing the union's clothes, so it goes to the caller's catch.
   const response = await fetch("/api/auth/status");
-  return (await response.json()) as AuthStatus;
+  const body = (await response.json()) as { state?: string };
+  if (!AUTH_STATES.includes(body.state ?? "")) {
+    throw new Error(`auth status unavailable (${response.status})`);
+  }
+  return body as AuthStatus;
 }
 
 export function syncBookmarks(): Promise<{

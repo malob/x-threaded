@@ -122,13 +122,23 @@ export interface FoldersResponse {
   folders: { id: string; name: string }[];
 }
 
-export interface AuthStatus {
-  /** This deployment has OAuth client credentials. */
-  configured: boolean;
-  /** Someone has completed the consent flow on it. */
-  authorized: boolean;
-  user?: { id: string; username: string; name: string };
-  scopes?: string[];
-  expiresAt?: number | null;
-  error?: string;
-}
+/**
+ * Where this deployment stands with X — one of four states, not a bag of
+ * booleans that can spell states there is no such thing as.
+ *
+ * `unconfigured` — no OAuth client credentials; user-context features are off.
+ * `unauthorized` — credentials, but nobody has consented yet.
+ * `broken` — the grant is gone and only a fresh login revives it.
+ * `authorized` — usable; `user` is null until something has paid for the
+ *   billable `/2/users/me` that resolves it, so the status route never does.
+ */
+export type AuthStatus =
+  | { state: "unconfigured" }
+  | { state: "unauthorized"; loginUrl: string }
+  | { state: "broken"; reason: string; loginUrl: string }
+  | {
+      state: "authorized";
+      user: { username: string; name: string } | null;
+      scopes: string[];
+      expiresAt: number;
+    };

@@ -36,8 +36,8 @@ function FetchCost({ loaded, replyCount }: { loaded: boolean; replyCount: number
 
 /** Prompt to authorize X, shown wherever user-context features are needed. */
 function ConnectPrompt({ auth }: { auth: AuthStatus | null }) {
-  if (!auth || auth.authorized) return null;
-  if (!auth.configured) {
+  if (!auth || auth.state === "authorized") return null;
+  if (auth.state === "unconfigured") {
     return (
       <p className="notice">
         user-context features are off — this deployment has no OAuth credentials (see
@@ -47,11 +47,18 @@ function ConnectPrompt({ auth }: { auth: AuthStatus | null }) {
   }
   return (
     <p className="notice">
-      <a className="connect-link" href="/auth/login">
+      <a className="connect-link" href={auth.loginUrl}>
         Connect your X account
       </a>{" "}
       to sync bookmarks and see your posts
-      {auth.error && <span className="new-badge"> · {auth.error}</span>}
+      {auth.state === "broken" && (
+        // The grant is gone; reconnecting is the only fix, so say so plainly
+        // and keep the machine-readable reason for a hover.
+        <span className="new-badge" title={auth.reason}>
+          {" "}
+          · X session lost — reconnect
+        </span>
+      )}
     </p>
   );
 }
@@ -193,7 +200,7 @@ export function Inbox({ onOpenPost }: { onOpenPost: (postId: string) => void }) 
 
   // Your posts cost real API reads, so fetch them on first view, not on mount.
   useEffect(() => {
-    if (tab === "yours" && auth?.authorized && !own && !loadingOwn) loadOwn();
+    if (tab === "yours" && auth?.state === "authorized" && !own && !loadingOwn) loadOwn();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tab, auth]);
 
@@ -251,7 +258,7 @@ export function Inbox({ onOpenPost }: { onOpenPost: (postId: string) => void }) 
 
       {tab === "saved" ? (
         <>
-          {auth?.authorized && (
+          {auth?.state === "authorized" && (
             <FolderBar
               settings={settings}
               onChange={changeFolder}
@@ -299,7 +306,7 @@ export function Inbox({ onOpenPost }: { onOpenPost: (postId: string) => void }) 
             </p>
           )}
         </>
-      ) : !auth?.authorized ? null : (
+      ) : auth?.state !== "authorized" ? null : (
         <>
           <p className="notice">
             {auth.user ? `@${auth.user.username} · ` : ""}

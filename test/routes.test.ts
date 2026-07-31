@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
+import type { Hono } from "hono";
 import { SELF_ID } from "../src/server/oauth";
-import type { OwnPostsResponse, Post, SavedListResponse } from "../src/shared/types";
+import type { AuthStatus, OwnPostsResponse, Post, SavedListResponse } from "../src/shared/types";
 import { makePost } from "./fixtures";
 import {
   SELF_USER_ID,
@@ -320,21 +321,40 @@ describe("GET /api/me/posts — grouping into threads", () => {
 });
 
 describe("GET /api/auth/status — answered from the store", () => {
+  /** The route's body, typed as what every branch of it must satisfy. */
+  async function authStatus(app: Hono): Promise<AuthStatus> {
+    const response = await app.request("/api/auth/status");
+    expect(response.status).toBe(200);
+    return (await response.json()) as AuthStatus;
+  }
+
   it("reports the stored grant without a getMe", async () => {
     const { app, xapi } = await makeAuthedApp();
 
-    const response = await app.request("/api/auth/status");
+    const body = await authStatus(app);
 
-    expect(response.status).toBe(200);
-    const body = (await response.json()) as Record<string, unknown>;
     expect(body).toMatchObject({
-      configured: true,
-      authorized: true,
+      state: "authorized",
       scopes: ["tweet.read", "users.read", "bookmark.read"],
+      // Nobody has resolved the profile yet, and this route will not pay for it.
+      user: null,
     });
-    expect(body.expiresAt).toBeNumber();
-    // Deferred to Stage 3's token model; the inbox already guards it.
-    expect(body).not.toContainKey("user");
+    expect(body.state === "authorized" && body.expiresAt).toBeNumber();
+    expect(xapi.calls).toEqual([]);
+  });
+
+  it("names the user once the profile has been cached", async () => {
+    const { app, store, xapi } = await makeAuthedApp();
+    await store.putUserProfile(SELF_ID, {
+      userId: SELF_USER_ID,
+      username: "someone",
+      displayName: "Some One",
+    });
+
+    expect(await authStatus(app)).toMatchObject({
+      state: "authorized",
+      user: { username: "someone", name: "Some One" },
+    });
     expect(xapi.calls).toEqual([]);
   });
 
@@ -350,34 +370,33 @@ describe("GET /api/auth/status — answered from the store", () => {
 
     // No refresh either: the network tripwire would throw, and the status
     // route is not the place to spend a single-use refresh token.
-    const response = await app.request("/api/auth/status");
+    expect(await authStatus(app)).toMatchObject({ state: "authorized" });
+    expect(xapi.calls).toEqual([]);
+  });
 
-    expect(response.status).toBe(200);
-    expect(await response.json()).toMatchObject({ configured: true, authorized: true });
+  it("surfaces a broken grant with the way out of it", async () => {
+    const { app, store, xapi } = await makeAuthedApp();
+    await store.markTokenBroken(SELF_ID, "refresh", "invalid_grant — token was invalid");
+
+    expect(await authStatus(app)).toEqual({
+      state: "broken",
+      reason: "invalid_grant — token was invalid",
+      loginUrl: "/auth/login",
+    });
     expect(xapi.calls).toEqual([]);
   });
 
   it("offers the login URL when nothing is stored", async () => {
     const { app, xapi } = await makeTestApp({ oauth: TEST_OAUTH });
 
-    const response = await app.request("/api/auth/status");
-
-    expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({
-      configured: true,
-      authorized: false,
-      loginUrl: "/auth/login",
-    });
+    expect(await authStatus(app)).toEqual({ state: "unauthorized", loginUrl: "/auth/login" });
     expect(xapi.calls).toEqual([]);
   });
 
   it("reports unconfigured when the deployment has no OAuth client", async () => {
     const { app, xapi } = await makeTestApp();
 
-    const response = await app.request("/api/auth/status");
-
-    expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({ configured: false, authorized: false });
+    expect(await authStatus(app)).toEqual({ state: "unconfigured" });
     expect(xapi.calls).toEqual([]);
   });
 });
@@ -413,5 +432,29 @@ describe("userContext token writes", () => {
     const stored = await store.getOAuthTokens(SELF_ID);
     expect(stored?.refreshToken).toBe("refresh-rotated");
     expect(stored?.userId).toBe("42");
+  });
+
+  it("caches the whole profile, so the status route can name the account", async () => {
+    const { app, store, xapi } = await makeTestApp({ oauth: TEST_OAUTH });
+    await store.putOAuthTokens(SELF_ID, {
+      accessToken: "access",
+      refreshToken: "refresh",
+      expiresAt: Date.now() + 60 * 60 * 1000,
+      scope: "tweet.read",
+      userId: null,
+    });
+    xapi.onGetMe = async () => ({ id: "42", username: "someone", name: "Some One" });
+    xapi.onGetBookmarkFolders = () => [];
+
+    expect((await app.request("/api/bookmarks/folders")).status).toBe(200);
+
+    expect(await store.getOAuthTokens(SELF_ID)).toMatchObject({
+      userId: "42",
+      username: "someone",
+      displayName: "Some One",
+    });
+    // Resolved once and kept: the second call must not pay for another one.
+    expect((await app.request("/api/bookmarks/folders")).status).toBe(200);
+    expect(methods(xapi).filter((m) => m === "getMe")).toEqual(["getMe"]);
   });
 });

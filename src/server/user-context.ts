@@ -20,11 +20,15 @@ export async function userContext(
   const stored = await store.getOAuthTokens(SELF_ID);
   if (stored?.userId) return { token, userId: stored.userId };
   const me = await xapi.getMe(token);
-  // Re-read before writing: a rotation can land during the getMe round-trip,
-  // and persisting the earlier snapshot would revive its dead refresh token,
-  // stranding the grant. The remaining window is microseconds; Stage 3's
-  // lease closes it properly.
-  const latest = await store.getOAuthTokens(SELF_ID);
-  if (latest) await store.putOAuthTokens(SELF_ID, { ...latest, userId: me.id });
+  // A rotation can land during the getMe round-trip, so this writes the three
+  // profile columns and nothing else: no snapshot of the token pair goes back
+  // to the database, and there is no read-modify-write window to lose. The
+  // handle and name ride along so /api/auth/status can name the account
+  // without ever paying for a getMe of its own.
+  await store.putUserProfile(SELF_ID, {
+    userId: me.id,
+    username: me.username,
+    displayName: me.name,
+  });
   return { token, userId: me.id };
 }

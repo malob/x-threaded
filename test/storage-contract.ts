@@ -11,7 +11,7 @@
  * database as long as it arrives empty.
  */
 import { afterEach, describe, expect, it, setSystemTime } from "bun:test";
-import type { SavedItem, Storage } from "../src/server/storage";
+import type { SavedItem, Storage, StoredTokens } from "../src/server/storage";
 import type { Post } from "../src/shared/types";
 import { makePost } from "./fixtures";
 
@@ -375,25 +375,55 @@ export function describeStorageContract(name: string, makeStore: MakeStore): voi
         scope: "tweet.read users.read",
       };
 
+      /** What a freshly written grant reads back as: ready, unleased, whole. */
+      function readyRow(overrides: Partial<StoredTokens> = {}): StoredTokens {
+        return {
+          ...tokens,
+          userId: null,
+          username: null,
+          displayName: null,
+          state: "ready",
+          leaseId: null,
+          leaseUntil: null,
+          recoveryUsed: false,
+          brokenReason: null,
+          ...overrides,
+        };
+      }
+
       it("round-trips a token row with a cached user ID", async () => {
         const store = await makeStore();
         await store.putOAuthTokens("self", { ...tokens, userId: "42" });
 
-        expect(await store.getOAuthTokens("self")).toEqual({ ...tokens, userId: "42" });
+        expect(await store.getOAuthTokens("self")).toEqual(readyRow({ userId: "42" }));
       });
 
       it("round-trips a token row with no user ID yet", async () => {
         const store = await makeStore();
         await store.putOAuthTokens("self", { ...tokens, userId: null });
 
-        expect(await store.getOAuthTokens("self")).toEqual({ ...tokens, userId: null });
+        expect(await store.getOAuthTokens("self")).toEqual(readyRow());
       });
 
       it("stores an absent userId as null", async () => {
         const store = await makeStore();
         await store.putOAuthTokens("self", tokens);
 
-        expect(await store.getOAuthTokens("self")).toEqual({ ...tokens, userId: null });
+        expect(await store.getOAuthTokens("self")).toEqual(readyRow());
+      });
+
+      it("round-trips the cached profile", async () => {
+        const store = await makeStore();
+        await store.putOAuthTokens("self", {
+          ...tokens,
+          userId: "42",
+          username: "someone",
+          displayName: "Some One",
+        });
+
+        expect(await store.getOAuthTokens("self")).toEqual(
+          readyRow({ userId: "42", username: "someone", displayName: "Some One" }),
+        );
       });
 
       it("replaces the row on rotation, and keys by id", async () => {
@@ -412,6 +442,260 @@ export function describeStorageContract(name: string, makeStore: MakeStore): voi
           refreshToken: "refresh-2",
         });
         expect(await store.getOAuthTokens("someone-else")).toBeNull();
+      });
+
+      it("writes the profile without touching the token pair or the lease", async () => {
+        const store = await makeStore();
+        await store.putOAuthTokens("self", tokens);
+        await store.claimTokenLease("self", tokens.refreshToken, "lease-a", 5000);
+
+        await store.putUserProfile("self", {
+          userId: "42",
+          username: "someone",
+          displayName: "Some One",
+        });
+
+        expect(await store.getOAuthTokens("self")).toEqual(
+          readyRow({
+            userId: "42",
+            username: "someone",
+            displayName: "Some One",
+            state: "refreshing",
+            leaseId: "lease-a",
+            leaseUntil: 5000,
+          }),
+        );
+      });
+    });
+
+    /**
+     * The lease protocol's conditional writes. Each one is a single UPDATE
+     * whose WHERE clause is the whole coordination mechanism, so what matters
+     * here is exactly which rows it refuses to touch (2026-07-30 review, C4).
+     */
+    describe("oauth token lease", () => {
+      const tokens = {
+        accessToken: "access-0",
+        refreshToken: "refresh-0",
+        expiresAt: 1_760_000_000_000,
+        scope: "tweet.read users.read",
+        userId: "42",
+        username: "someone",
+        displayName: "Some One",
+      };
+
+      const rotated = {
+        accessToken: "access-1",
+        refreshToken: "refresh-1",
+        expiresAt: 1_770_000_000_000,
+        scope: "tweet.read users.read",
+        userId: "42",
+        username: "someone",
+        displayName: "Some One",
+      };
+
+      async function seeded(): Promise<Storage> {
+        const store = await makeStore();
+        await store.putOAuthTokens("self", tokens);
+        return store;
+      }
+
+      it("claims a ready row that still holds the observed token", async () => {
+        const store = await seeded();
+
+        expect(await store.claimTokenLease("self", "refresh-0", "lease-a", 5000)).toBe(true);
+
+        expect(await store.getOAuthTokens("self")).toMatchObject({
+          state: "refreshing",
+          leaseId: "lease-a",
+          leaseUntil: 5000,
+          refreshToken: "refresh-0",
+          recoveryUsed: false,
+        });
+      });
+
+      it("refuses a claim once the observed token has rotated under it", async () => {
+        const store = await seeded();
+
+        expect(await store.claimTokenLease("self", "refresh-stale", "lease-a", 5000)).toBe(false);
+
+        expect(await store.getOAuthTokens("self")).toMatchObject({ state: "ready", leaseId: null });
+      });
+
+      it("lets exactly one of two claims win", async () => {
+        const store = await seeded();
+
+        expect(await store.claimTokenLease("self", "refresh-0", "lease-a", 5000)).toBe(true);
+        expect(await store.claimTokenLease("self", "refresh-0", "lease-b", 5000)).toBe(false);
+
+        expect(await store.getOAuthTokens("self")).toMatchObject({ leaseId: "lease-a" });
+      });
+
+      it("finalizes with the held lease, clearing it and resetting recovery", async () => {
+        const store = await seeded();
+        await store.claimTokenLease("self", "refresh-0", "lease-a", 5000);
+
+        expect(await store.finalizeTokenLease("self", "lease-a", "refresh-0", rotated)).toBe(true);
+
+        expect(await store.getOAuthTokens("self")).toEqual({
+          ...rotated,
+          state: "ready",
+          leaseId: null,
+          leaseUntil: null,
+          recoveryUsed: false,
+          brokenReason: null,
+        });
+      });
+
+      it("writes nothing when the lease was stolen", async () => {
+        const store = await seeded();
+        await store.claimTokenLease("self", "refresh-0", "lease-a", 5000);
+        await store.claimRecoveryLease("self", "refresh-0", "lease-b", 20_000, 9000);
+
+        expect(await store.finalizeTokenLease("self", "lease-a", "refresh-0", rotated)).toBe(false);
+
+        expect(await store.getOAuthTokens("self")).toMatchObject({
+          accessToken: "access-0",
+          refreshToken: "refresh-0",
+          state: "refreshing",
+          leaseId: "lease-b",
+        });
+      });
+
+      it("writes nothing when the observed token changed under the lease", async () => {
+        const store = await seeded();
+        await store.claimTokenLease("self", "refresh-0", "lease-a", 5000);
+        await store.putOAuthTokens("self", { ...tokens, refreshToken: "refresh-elsewhere" });
+
+        expect(await store.finalizeTokenLease("self", "lease-a", "refresh-0", rotated)).toBe(false);
+
+        expect(await store.getOAuthTokens("self")).toMatchObject({
+          refreshToken: "refresh-elsewhere",
+          state: "ready",
+        });
+      });
+
+      it("releases a lease it holds, leaving the token pair alone", async () => {
+        const store = await seeded();
+        await store.claimTokenLease("self", "refresh-0", "lease-a", 5000);
+
+        expect(await store.releaseTokenLease("self", "lease-a", "refresh-0")).toBe(true);
+
+        expect(await store.getOAuthTokens("self")).toEqual({
+          ...tokens,
+          state: "ready",
+          leaseId: null,
+          leaseUntil: null,
+          recoveryUsed: false,
+          brokenReason: null,
+        });
+      });
+
+      it("refuses to release a lease it does not hold", async () => {
+        const store = await seeded();
+        await store.claimTokenLease("self", "refresh-0", "lease-a", 5000);
+
+        expect(await store.releaseTokenLease("self", "lease-b", "refresh-0")).toBe(false);
+
+        expect(await store.getOAuthTokens("self")).toMatchObject({ leaseId: "lease-a" });
+      });
+
+      it("recovers only an expired lease, and only once", async () => {
+        const store = await seeded();
+        await store.claimTokenLease("self", "refresh-0", "lease-a", 5000);
+
+        // Still inside the lease: the holder may yet finalize.
+        expect(await store.claimRecoveryLease("self", "refresh-0", "lease-b", 20_000, 4999)).toBe(
+          false,
+        );
+        expect(await store.claimRecoveryLease("self", "refresh-0", "lease-b", 20_000, 9000)).toBe(
+          true,
+        );
+        expect(await store.getOAuthTokens("self")).toMatchObject({
+          state: "refreshing",
+          leaseId: "lease-b",
+          leaseUntil: 20_000,
+          recoveryUsed: true,
+        });
+
+        // A second crash gets no second recovery.
+        expect(await store.claimRecoveryLease("self", "refresh-0", "lease-c", 40_000, 30_000)).toBe(
+          false,
+        );
+        expect(await store.getOAuthTokens("self")).toMatchObject({ leaseId: "lease-b" });
+      });
+
+      it("refuses recovery when the observed token moved on", async () => {
+        const store = await seeded();
+        await store.claimTokenLease("self", "refresh-0", "lease-a", 5000);
+
+        expect(
+          await store.claimRecoveryLease("self", "refresh-stale", "lease-b", 20_000, 9000),
+        ).toBe(false);
+      });
+
+      it("finalizing after a recovery clears the recovery flag", async () => {
+        const store = await seeded();
+        await store.claimTokenLease("self", "refresh-0", "lease-a", 5000);
+        await store.claimRecoveryLease("self", "refresh-0", "lease-b", 20_000, 9000);
+
+        expect(await store.finalizeTokenLease("self", "lease-b", "refresh-0", rotated)).toBe(true);
+
+        expect(await store.getOAuthTokens("self")).toMatchObject({
+          state: "ready",
+          recoveryUsed: false,
+          refreshToken: "refresh-1",
+        });
+      });
+
+      it("marks the grant broken, bound to the observed token", async () => {
+        const store = await seeded();
+        await store.claimTokenLease("self", "refresh-0", "lease-a", 5000);
+
+        expect(await store.markTokenBroken("self", "refresh-0", "invalid_grant")).toBe(true);
+
+        expect(await store.getOAuthTokens("self")).toMatchObject({
+          state: "broken",
+          brokenReason: "invalid_grant",
+          leaseId: null,
+          leaseUntil: null,
+        });
+      });
+
+      it("does not break a grant that has already moved on", async () => {
+        const store = await seeded();
+        await store.claimTokenLease("self", "refresh-0", "lease-a", 5000);
+        await store.finalizeTokenLease("self", "lease-a", "refresh-0", rotated);
+
+        expect(await store.markTokenBroken("self", "refresh-0", "invalid_grant")).toBe(false);
+
+        expect(await store.getOAuthTokens("self")).toMatchObject({ state: "ready" });
+      });
+
+      it("a fresh grant clears broken and the recovery flag", async () => {
+        const store = await seeded();
+        await store.claimTokenLease("self", "refresh-0", "lease-a", 5000);
+        await store.claimRecoveryLease("self", "refresh-0", "lease-b", 20_000, 9000);
+        await store.markTokenBroken("self", "refresh-0", "invalid_grant");
+
+        await store.putOAuthTokens("self", rotated);
+
+        expect(await store.getOAuthTokens("self")).toEqual({
+          ...rotated,
+          state: "ready",
+          leaseId: null,
+          leaseUntil: null,
+          recoveryUsed: false,
+          brokenReason: null,
+        });
+      });
+
+      it("leaves an unknown row alone rather than creating one", async () => {
+        const store = await makeStore();
+
+        expect(await store.claimTokenLease("self", "refresh-0", "lease-a", 5000)).toBe(false);
+        expect(await store.markTokenBroken("self", "refresh-0", "invalid_grant")).toBe(false);
+        expect(await store.getOAuthTokens("self")).toBeNull();
       });
     });
 

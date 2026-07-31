@@ -42,8 +42,76 @@ export interface Storage {
   setReadState(postIds: string[], read: boolean): Promise<void>;
   markConversationRead(conversationId: string): Promise<void>;
 
-  getOAuthTokens(id: string): Promise<OAuthTokens | null>;
+  /** The whole stored grant, lease bookkeeping included. */
+  getOAuthTokens(id: string): Promise<StoredTokens | null>;
+  /**
+   * Write a grant outright, resetting the lease state: ready, unleased, with
+   * the recovery allowance restored. This is what a fresh `/auth/login`
+   * does — and the only escape from `broken`. A rotation must go through
+   * `finalizeTokenLease` instead, which checks it still owns the row.
+   */
   putOAuthTokens(id: string, tokens: OAuthTokens): Promise<void>;
+  /**
+   * Cache the signed-in user's identity, touching nothing else. Narrow on
+   * purpose: it runs after a billable `/2/users/me` round-trip, during which
+   * a rotation may have landed, and writing a whole row back would revive
+   * the dead refresh token it was read with.
+   */
+  putUserProfile(id: string, profile: UserProfile): Promise<void>;
+
+  /**
+   * Take the refresh lease: the one statement that decides who calls X.
+   *
+   * True means this caller won and must either finalize, release, or break the
+   * row; false means someone else holds it or the grant already rotated, and
+   * the caller must re-read rather than call X with a token it no longer owns.
+   * Binding to `observed` is what stops a stale reader from leasing a row whose
+   * refresh token has already been spent (dialogue r2, answer 1).
+   */
+  claimTokenLease(
+    id: string,
+    observed: string,
+    leaseId: string,
+    leaseUntil: number,
+  ): Promise<boolean>;
+  /**
+   * Take over a lease whose holder never came back — once per grant.
+   *
+   * `expiredBefore` is the instant the previous lease must already have passed,
+   * which callers set to now minus a grace period so a merely slow holder still
+   * gets to finalize. Sets `recovery_used`, so a second crash cannot mint a
+   * second attempt: the holder may have exchanged the token before dying, and
+   * re-presenting a spent one can revoke the grant (dialogue r3, verdict 1).
+   */
+  claimRecoveryLease(
+    id: string,
+    observed: string,
+    leaseId: string,
+    leaseUntil: number,
+    expiredBefore: number,
+  ): Promise<boolean>;
+  /**
+   * Persist a rotation, if this caller still holds the lease it opened *and*
+   * the row still carries the token it exchanged. False means the lease was
+   * lost: the caller must write nothing further and re-read.
+   */
+  finalizeTokenLease(
+    id: string,
+    leaseId: string,
+    observed: string,
+    next: OAuthTokens,
+  ): Promise<boolean>;
+  /**
+   * Hand the lease back without rotating, for a refresh that X refused in a
+   * way that leaves the token unspent. Leaves the pair exactly as found.
+   */
+  releaseTokenLease(id: string, leaseId: string, observed: string): Promise<boolean>;
+  /**
+   * Record that the grant is dead and only `/auth/login` can fix it. Bound to
+   * the observed token so a late failure can't bury a rotation that has since
+   * succeeded.
+   */
+  markTokenBroken(id: string, observed: string, reason: string): Promise<boolean>;
 
   getSetting(key: string): Promise<string | null>;
   setSetting(key: string, value: string): Promise<void>;
@@ -64,6 +132,16 @@ export interface SavedItem {
   addedAt: string;
 }
 
+/**
+ * Where the stored grant is in the refresh protocol.
+ *
+ * `ready` — usable, nobody is refreshing it.
+ * `refreshing` — one caller holds a lease and may be talking to X right now.
+ * `broken` — the grant is gone; only a fresh `/auth/login` revives it.
+ */
+export type TokenState = "ready" | "refreshing" | "broken";
+
+/** A grant as the OAuth code hands it over: the token pair and what we know. */
 export interface OAuthTokens {
   accessToken: string;
   refreshToken: string;
@@ -72,6 +150,32 @@ export interface OAuthTokens {
   scope: string;
   /** The authenticated user's ID, resolved lazily and cached. */
   userId?: string | null;
+  /** Their handle, cached alongside — `/2/users/me` is a billable read. */
+  username?: string | null;
+  displayName?: string | null;
+}
+
+/** The identity `/2/users/me` resolves, cached so it is asked for once. */
+export interface UserProfile {
+  userId: string;
+  username: string;
+  displayName: string;
+}
+
+/** A grant as stored: the pair, the profile, and the lease bookkeeping. */
+export interface StoredTokens extends OAuthTokens {
+  userId: string | null;
+  username: string | null;
+  displayName: string | null;
+  state: TokenState;
+  /** Non-null only while `state` is `refreshing`. */
+  leaseId: string | null;
+  /** Unix ms the lease lapses at. */
+  leaseUntil: number | null;
+  /** This grant has already spent its one crash-recovery attempt. */
+  recoveryUsed: boolean;
+  /** Set with `broken`; what to tell the user. */
+  brokenReason: string | null;
 }
 
 export interface PostRow {

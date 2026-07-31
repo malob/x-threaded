@@ -1,4 +1,4 @@
-import type { OAuthTokens, Storage } from "./storage";
+import type { OAuthTokens, Storage, StoredTokens } from "./storage";
 
 const TOKEN_URL = "https://api.x.com/2/oauth2/token";
 const AUTHORIZE_URL = "https://x.com/i/oauth2/authorize";
@@ -10,6 +10,33 @@ const AUTHORIZE_URL = "https://x.com/i/oauth2/authorize";
 export const SCOPES = ["tweet.read", "users.read", "bookmark.read", "offline.access"];
 /** Refresh this long before actual expiry so in-flight requests don't race it. */
 const REFRESH_MARGIN_MS = 5 * 60 * 1000;
+
+/**
+ * The clocks the lease protocol runs on. Tunable so tests can wait a lease out
+ * in milliseconds rather than half a minute; production uses the defaults.
+ */
+export interface TokenTimings {
+  /**
+   * Hard cap on the refresh call, deliberately shorter than the lease: a
+   * request still in flight when its lease lapses is exactly the ambiguity the
+   * recovery rule has to reason about, so we make sure it cannot happen for a
+   * merely slow response (dialogue r2, answer 1).
+   */
+  fetchTimeoutMs: number;
+  /** How long a claimed refresh stays the claimant's to finish. */
+  leaseMs: number;
+  /** Extra slack past a lapsed lease before anyone considers recovering it. */
+  graceMs: number;
+  /** How often a caller waiting on someone else's refresh re-reads the row. */
+  pollMs: number;
+}
+
+export const DEFAULT_TIMINGS: TokenTimings = {
+  fetchTimeoutMs: 20_000,
+  leaseMs: 30_000,
+  graceMs: 5_000,
+  pollMs: 50,
+};
 /**
  * Row id for the single-user deployment: every stored grant, and every route
  * that reads one, keys off this one constant rather than a loose "self".
@@ -117,29 +144,82 @@ interface TokenResponse {
 }
 
 /**
+ * What a failed refresh tells us about the token we presented — the only
+ * question that matters, because the token was single-use and we need to know
+ * whether X spent it.
+ *
+ * `grant_dead` — X rejected the grant itself; no retry can revive it.
+ * `refused` — X answered without issuing a pair, so the token is still ours.
+ * `unknown` — no usable answer came back. X may have rotated it and lost the
+ *   reply on the way; nothing may presume either way.
+ */
+type RefreshFailure = "grant_dead" | "refused" | "unknown";
+
+class RefreshError extends OAuthError {
+  constructor(
+    message: string,
+    readonly failure: RefreshFailure,
+    /** The short form, for `broken_reason` and the reconnect prompt. */
+    readonly detail: string,
+  ) {
+    super(message);
+  }
+}
+
+/**
  * Exchange a refresh token for a new access token. X rotates refresh tokens:
  * the response carries a new one and the old is immediately dead, so the
  * caller must persist the result before using it.
+ *
+ * The hard timeout has no accompanying retry on purpose. Retrying a refresh is
+ * re-presenting a token that may already have been spent, which is the one
+ * thing the whole protocol exists to prevent.
  */
-async function refresh(config: OAuthConfig, refreshToken: string): Promise<OAuthTokens> {
-  const response = await fetch(TOKEN_URL, {
-    method: "POST",
-    headers: {
-      Authorization: basicAuth(config.clientId, config.clientSecret),
-      "Content-Type": "application/x-www-form-urlencoded",
-    },
-    body: new URLSearchParams({
-      grant_type: "refresh_token",
-      refresh_token: refreshToken,
-      client_id: config.clientId,
-    }),
-  });
-  const body = (await response.json()) as TokenResponse;
-  if (!response.ok || !body.access_token) {
-    throw new OAuthError(
-      `token refresh failed (${response.status}): ${body.error_description ?? body.error ?? "unknown error"}`,
+async function refresh(
+  config: OAuthConfig,
+  refreshToken: string,
+  timeoutMs: number,
+): Promise<OAuthTokens> {
+  let response: Response;
+  let body: TokenResponse;
+  try {
+    response = await fetch(TOKEN_URL, {
+      method: "POST",
+      headers: {
+        Authorization: basicAuth(config.clientId, config.clientSecret),
+        "Content-Type": "application/x-www-form-urlencoded",
+      },
+      body: new URLSearchParams({
+        grant_type: "refresh_token",
+        refresh_token: refreshToken,
+        client_id: config.clientId,
+      }),
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    body = (await response.json()) as TokenResponse;
+  } catch (cause) {
+    const detail = cause instanceof Error ? cause.message : String(cause);
+    throw new RefreshError(`token refresh got no answer: ${detail}`, "unknown", detail);
+  }
+
+  if (!response.ok) {
+    const detail = [body.error ?? "unknown error", body.error_description]
+      .filter((part) => part !== undefined)
+      .join(" — ");
+    throw new RefreshError(
+      `token refresh failed (${response.status}): ${detail}`,
+      // X issues the new pair and invalidates the old token together, so an
+      // error response means the token we sent is still unspent — unless the
+      // error is that the grant itself is gone.
+      body.error === "invalid_grant" ? "grant_dead" : "refused",
+      detail,
     );
   }
+  if (!body.access_token) {
+    const detail = `HTTP ${response.status} with no access_token`;
+    throw new RefreshError(`token refresh returned nothing usable: ${detail}`, "unknown", detail);
+  }
+
   return {
     accessToken: body.access_token,
     // A rotated refresh token should always come back; keep the old one if not.
@@ -152,45 +232,186 @@ async function refresh(config: OAuthConfig, refreshToken: string): Promise<OAuth
 }
 
 /**
- * Refreshes currently in flight, keyed by the store they write to. Two
- * concurrent callers past the expiry margin would otherwise present the same
- * single-use refresh token to X: the loser gets `invalid_grant`, and X's reuse
- * detection can revoke the whole token family. Joining the in-flight promise
- * makes that impossible *within one isolate only* — coordinating across
- * isolates needs the durable lease protocol (Stage 3).
+ * Refreshes currently in flight, keyed by the store they write to.
+ *
+ * The cheap first layer: callers sharing an isolate join one promise instead
+ * of each taking a turn through the database. It is only ever an optimization
+ * — the lease below is what actually decides who talks to X, and it is the
+ * one that holds when the callers are in different isolates.
  */
 const refreshesInFlight = new WeakMap<Storage, Promise<string>>();
 
+/** State transitions, for reading the protocol back out of the logs. */
+function logTransition(from: string, to: string, detail: string): void {
+  // Never a token, a lease id, or any part of one: this line exists to explain
+  // a grant's history, and a log is not a place to leak credentials.
+  console.log(`oauth: ${from} → ${to} — ${detail}`);
+}
+
+/** The error a caller sees once the grant is beyond saving. */
+function brokenError(reason: string): OAuthError {
+  return new OAuthError(`X session lost (${reason}) — reconnect at /auth/login`);
+}
+
+/** Whether this access token is far enough from expiry to just use. */
+function isLive(tokens: OAuthTokens): boolean {
+  return Date.now() < tokens.expiresAt - REFRESH_MARGIN_MS;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 /**
- * Refresh, merge, persist, and hand back the new access token. The refresh
- * response covers the token pair alone: X never echoes the user ID, and omits
- * `scope` when it hasn't changed. Both are carried forward from the stored
- * row, because `putOAuthTokens` replaces the whole row — dropping them would
- * erase the cached user ID (costing a billable `getMe()` to re-resolve) and
- * the granted scopes that gate features.
+ * Refresh under a held lease, then persist conditionally.
+ *
+ * Returns the new access token, or null when the lease turned out to be lost —
+ * in which case this caller has written nothing and must re-read, exactly as
+ * if it had never won.
+ *
+ * The refresh response covers the token pair alone: X never echoes the user ID
+ * and omits `scope` when it hasn't changed, so both are carried forward from
+ * the row we leased. Dropping them would erase the cached profile (costing a
+ * billable `getMe()` to re-resolve) and the granted scopes that gate features.
  */
-async function refreshAndStore(
+async function refreshUnderLease(
   store: Storage,
   config: OAuthConfig,
-  tokens: OAuthTokens,
-): Promise<string> {
-  const refreshed = await refresh(config, tokens.refreshToken);
-  await store.putOAuthTokens(SELF_ID, {
-    ...refreshed,
-    scope: refreshed.scope || tokens.scope,
-    userId: tokens.userId ?? null,
+  row: StoredTokens,
+  leaseId: string,
+  timings: TokenTimings,
+  isRecovery: boolean,
+): Promise<string | null> {
+  let rotated: OAuthTokens;
+  try {
+    rotated = await refresh(config, row.refreshToken, timings.fetchTimeoutMs);
+  } catch (error) {
+    const failure = error instanceof RefreshError ? error.failure : "unknown";
+    const detail = error instanceof RefreshError ? error.detail : String(error);
+
+    // A recovery attempt is allowed exactly one outcome that isn't fatal:
+    // a rotation. Anything else — including a merely inconclusive one — ends
+    // as broken, because the alternative is presenting a possibly-spent token
+    // a third time (dialogue r3, verdict 1).
+    if (failure === "grant_dead" || isRecovery) {
+      const reason = isRecovery && failure !== "grant_dead" ? `recovery failed: ${detail}` : detail;
+      await store.markTokenBroken(SELF_ID, row.refreshToken, reason);
+      logTransition("refreshing", "broken", reason);
+      throw brokenError(reason);
+    }
+    if (failure === "refused") {
+      // X answered and issued nothing, so the token we sent is still unspent:
+      // hand the lease back rather than making the next caller wait it out.
+      if (await store.releaseTokenLease(SELF_ID, leaseId, row.refreshToken)) {
+        logTransition("refreshing", "ready", `lease released, token unspent: ${detail}`);
+      }
+      throw error;
+    }
+    // No usable answer. X may have rotated the token and lost the reply on the
+    // way back, so the lease stays held until it lapses — the recovery rule,
+    // not this caller, decides what happens next.
+    logTransition("refreshing", "refreshing", `lease left standing, outcome unknown: ${detail}`);
+    throw error;
+  }
+
+  const landed = await store.finalizeTokenLease(SELF_ID, leaseId, row.refreshToken, {
+    ...rotated,
+    scope: rotated.scope || row.scope,
+    userId: row.userId,
+    username: row.username,
+    displayName: row.displayName,
   });
-  return refreshed.accessToken;
+  if (!landed) {
+    // Someone re-logged-in or recovered underneath us. Our pair may well be
+    // valid, but the row is no longer the one we leased, and writing over it
+    // would strand whatever grant is there now.
+    logTransition("refreshing", "?", "lease lost before finalize; wrote nothing");
+    return null;
+  }
+  logTransition("refreshing", "ready", isRecovery ? "rotated by recovery" : "rotated");
+  return rotated.accessToken;
+}
+
+/**
+ * Drive the stored grant to a usable access token, coordinating with every
+ * other caller through the row itself.
+ *
+ * Each pass reads the row and does the one thing that row permits: use it,
+ * claim it, wait on it, recover it, or give up on it. Every write is
+ * conditional on what was read, so a pass that loses a race simply reads
+ * again — no caller ever acts on a row it no longer owns.
+ */
+async function renew(store: Storage, config: OAuthConfig, timings: TokenTimings): Promise<string> {
+  // Long enough to wait out a lapsed lease and run the recovery it permits.
+  const deadline = Date.now() + timings.leaseMs + timings.graceMs + timings.fetchTimeoutMs;
+
+  while (Date.now() <= deadline) {
+    const row = await store.getOAuthTokens(SELF_ID);
+    if (!row) throw new OAuthError("the stored grant disappeared — visit /auth/login");
+    if (row.state === "broken") throw brokenError(row.brokenReason ?? "unknown");
+    // A live token means someone else's refresh landed (or a fresh login did).
+    if (isLive(row)) return row.accessToken;
+
+    if (row.state === "ready") {
+      const leaseId = randomToken();
+      const claimed = await store.claimTokenLease(
+        SELF_ID,
+        row.refreshToken,
+        leaseId,
+        Date.now() + timings.leaseMs,
+      );
+      if (!claimed) continue; // Someone else got there first; read again.
+      logTransition("ready", "refreshing", "lease claimed");
+      const token = await refreshUnderLease(store, config, row, leaseId, timings, false);
+      if (token !== null) return token;
+      continue; // Lease lost mid-flight: carry on as one of the losers.
+    }
+
+    // Someone else holds the lease. Wait: they may be mid-call to X, and a
+    // holder that finishes late is still the rightful owner of the rotation.
+    const abandonedAt = (row.leaseUntil ?? 0) + timings.graceMs;
+    if (Date.now() < abandonedAt) {
+      await sleep(timings.pollMs);
+      continue;
+    }
+
+    // The lease has lapsed and the grace period with it.
+    if (row.recoveryUsed) {
+      // A grant that has already burned its one recovery and been abandoned
+      // again is not something we may keep guessing at.
+      const reason = "refresh abandoned again after its one recovery attempt";
+      await store.markTokenBroken(SELF_ID, row.refreshToken, reason);
+      logTransition("refreshing", "broken", reason);
+      continue; // Read it back and report it the same way any caller would.
+    }
+    const leaseId = randomToken();
+    const recovered = await store.claimRecoveryLease(
+      SELF_ID,
+      row.refreshToken,
+      leaseId,
+      Date.now() + timings.leaseMs,
+      Date.now() - timings.graceMs,
+    );
+    if (!recovered) continue;
+    logTransition("refreshing", "refreshing", "abandoned lease recovered (one attempt only)");
+    const token = await refreshUnderLease(store, config, row, leaseId, timings, true);
+    if (token !== null) return token;
+  }
+
+  throw new OAuthError("timed out waiting for the token refresh to settle — try again");
 }
 
 /**
  * A valid user-context access token, refreshing when it's close to expiry.
  * Returns null when the deployment has no user tokens configured — callers
- * fall back to app-only auth or report the feature as unavailable.
+ * fall back to app-only auth or report the feature as unavailable. Throws when
+ * the grant is broken: only `/auth/login` fixes that, and pretending otherwise
+ * would send the caller off to make a doomed API call.
  */
 export async function getUserAccessToken(
   store: Storage,
   config: OAuthConfig | null,
+  timings: Partial<TokenTimings> = {},
 ): Promise<string | null> {
   if (!config) return null;
 
@@ -198,15 +419,13 @@ export async function getUserAccessToken(
   // simply never been authorized.
   const tokens = await store.getOAuthTokens(SELF_ID);
   if (!tokens) return null;
-
-  if (Date.now() < tokens.expiresAt - REFRESH_MARGIN_MS) {
-    return tokens.accessToken;
-  }
+  if (tokens.state === "broken") throw brokenError(tokens.brokenReason ?? "unknown");
+  if (isLive(tokens)) return tokens.accessToken;
 
   const pending = refreshesInFlight.get(store);
   if (pending) return await pending;
 
-  const attempt = refreshAndStore(store, config, tokens);
+  const attempt = renew(store, config, { ...DEFAULT_TIMINGS, ...timings });
   refreshesInFlight.set(store, attempt);
   try {
     return await attempt;

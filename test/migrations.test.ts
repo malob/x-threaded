@@ -133,6 +133,7 @@ describe("loadMigrations", () => {
       "0002_oauth_tokens.sql",
       "0003_oauth_user_id.sql",
       "0004_settings_and_saved.sql",
+      "0005_token_lease.sql",
     ]);
     expect(MIGRATIONS.every((migration) => migration.sql.length > 0)).toBe(true);
   });
@@ -314,7 +315,7 @@ SELECT 1;`;
 
   it("finds every statement in the real migrations", () => {
     const statements = MIGRATIONS.flatMap((migration) => splitStatements(migration.sql));
-    expect(statements).toHaveLength(8);
+    expect(statements).toHaveLength(15);
     expect(statements.every((statement) => !statement.includes("--"))).toBe(true);
   });
 });

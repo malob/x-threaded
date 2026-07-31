@@ -12,9 +12,9 @@ export interface SqlDriver {
   first<T>(sql: string, params?: unknown[]): Promise<T | null>;
   all<T>(sql: string, params?: unknown[]): Promise<T[]>;
   /**
-   * A write. `rowsAffected` is load-bearing, not decoration: Stage 3's OAuth
-   * lease claims the token with a conditional UPDATE and reads the count to
-   * learn whether it won the race.
+   * A write. `rowsAffected` is load-bearing, not decoration: the OAuth token
+   * lease claims the grant with a conditional UPDATE and reads the count to
+   * learn whether it won the race (`SqlStore.claimTokenLease`).
    */
   run(sql: string, params?: unknown[]): Promise<{ rowsAffected: number }>;
   /** All or nothing: a transaction on bun:sqlite, `db.batch` on D1. */

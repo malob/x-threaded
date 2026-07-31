@@ -7,6 +7,9 @@ import {
   type PostRow,
   type SavedItem,
   type Storage,
+  type StoredTokens,
+  type TokenState,
+  type UserProfile,
 } from "../storage";
 import { chunked, placeholders, type SqlDriver } from "./driver";
 
@@ -26,6 +29,44 @@ interface OAuthTokenRow {
   expires_at: number;
   scope: string;
   user_id: string | null;
+  username: string | null;
+  display_name: string | null;
+  state: string;
+  lease_id: string | null;
+  lease_until: number | null;
+  recovery_used: number;
+  broken_reason: string | null;
+}
+
+const OAUTH_COLUMNS = `access_token, refresh_token, expires_at, scope, user_id, username,
+   display_name, state, lease_id, lease_until, recovery_used, broken_reason`;
+
+/**
+ * The columns a rotation replaces. Written once and shared by finalize, since
+ * the two callers that persist a token pair must agree on every one of them —
+ * an omission here is how the pre-lease code kept erasing the cached user ID
+ * (2026-07-30 review, C4).
+ */
+const ROTATION_SET = `access_token = ?, refresh_token = ?, expires_at = ?, scope = ?,
+       user_id = ?, username = ?, display_name = ?,
+       state = 'ready', lease_id = NULL, lease_until = NULL,
+       recovery_used = 0, broken_reason = NULL, updated_at = ?`;
+
+function rotationParams(tokens: OAuthTokens): unknown[] {
+  return [
+    tokens.accessToken,
+    tokens.refreshToken,
+    tokens.expiresAt,
+    tokens.scope,
+    tokens.userId ?? null,
+    tokens.username ?? null,
+    tokens.displayName ?? null,
+    new Date().toISOString(),
+  ];
+}
+
+function toTokenState(value: string): TokenState {
+  return value === "refreshing" || value === "broken" ? value : "ready";
 }
 
 const UPSERT_POST = `INSERT OR REPLACE INTO posts
@@ -277,10 +318,9 @@ export class SqlStore implements Storage {
     );
   }
 
-  async getOAuthTokens(id: string): Promise<OAuthTokens | null> {
+  async getOAuthTokens(id: string): Promise<StoredTokens | null> {
     const row = await this.db.first<OAuthTokenRow>(
-      `SELECT access_token, refresh_token, expires_at, scope, user_id
-       FROM oauth_tokens WHERE id = ?`,
+      `SELECT ${OAUTH_COLUMNS} FROM oauth_tokens WHERE id = ?`,
       [id],
     );
     if (!row) return null;
@@ -290,23 +330,100 @@ export class SqlStore implements Storage {
       expiresAt: row.expires_at,
       scope: row.scope,
       userId: row.user_id,
+      username: row.username,
+      displayName: row.display_name,
+      state: toTokenState(row.state),
+      leaseId: row.lease_id,
+      leaseUntil: row.lease_until,
+      recoveryUsed: row.recovery_used !== 0,
+      brokenReason: row.broken_reason,
     };
   }
 
   async putOAuthTokens(id: string, tokens: OAuthTokens): Promise<void> {
+    // Every lease column is named rather than left to REPLACE's defaults, so
+    // the reset is a statement of intent instead of a side effect.
     await this.db.run(
       `INSERT OR REPLACE INTO oauth_tokens
-         (id, access_token, refresh_token, expires_at, scope, user_id, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      [
-        id,
-        tokens.accessToken,
-        tokens.refreshToken,
-        tokens.expiresAt,
-        tokens.scope,
-        tokens.userId ?? null,
-        new Date().toISOString(),
-      ],
+         (id, access_token, refresh_token, expires_at, scope, user_id, username,
+          display_name, state, lease_id, lease_until, recovery_used, broken_reason, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'ready', NULL, NULL, 0, NULL, ?)`,
+      [id, ...rotationParams(tokens)],
     );
+  }
+
+  async putUserProfile(id: string, profile: UserProfile): Promise<void> {
+    await this.db.run(
+      `UPDATE oauth_tokens SET user_id = ?, username = ?, display_name = ?, updated_at = ?
+       WHERE id = ?`,
+      [profile.userId, profile.username, profile.displayName, new Date().toISOString(), id],
+    );
+  }
+
+  async claimTokenLease(
+    id: string,
+    observed: string,
+    leaseId: string,
+    leaseUntil: number,
+  ): Promise<boolean> {
+    const { rowsAffected } = await this.db.run(
+      `UPDATE oauth_tokens
+          SET state = 'refreshing', lease_id = ?, lease_until = ?, updated_at = ?
+        WHERE id = ? AND state = 'ready' AND refresh_token = ?`,
+      [leaseId, leaseUntil, new Date().toISOString(), id, observed],
+    );
+    return rowsAffected === 1;
+  }
+
+  async claimRecoveryLease(
+    id: string,
+    observed: string,
+    leaseId: string,
+    leaseUntil: number,
+    expiredBefore: number,
+  ): Promise<boolean> {
+    const { rowsAffected } = await this.db.run(
+      `UPDATE oauth_tokens
+          SET lease_id = ?, lease_until = ?, recovery_used = 1, updated_at = ?
+        WHERE id = ? AND state = 'refreshing' AND lease_until < ?
+          AND recovery_used = 0 AND refresh_token = ?`,
+      [leaseId, leaseUntil, new Date().toISOString(), id, expiredBefore, observed],
+    );
+    return rowsAffected === 1;
+  }
+
+  async finalizeTokenLease(
+    id: string,
+    leaseId: string,
+    observed: string,
+    next: OAuthTokens,
+  ): Promise<boolean> {
+    const { rowsAffected } = await this.db.run(
+      `UPDATE oauth_tokens SET ${ROTATION_SET}
+        WHERE id = ? AND lease_id = ? AND refresh_token = ?`,
+      [...rotationParams(next), id, leaseId, observed],
+    );
+    return rowsAffected === 1;
+  }
+
+  async releaseTokenLease(id: string, leaseId: string, observed: string): Promise<boolean> {
+    const { rowsAffected } = await this.db.run(
+      `UPDATE oauth_tokens
+          SET state = 'ready', lease_id = NULL, lease_until = NULL, updated_at = ?
+        WHERE id = ? AND lease_id = ? AND refresh_token = ?`,
+      [new Date().toISOString(), id, leaseId, observed],
+    );
+    return rowsAffected === 1;
+  }
+
+  async markTokenBroken(id: string, observed: string, reason: string): Promise<boolean> {
+    const { rowsAffected } = await this.db.run(
+      `UPDATE oauth_tokens
+          SET state = 'broken', broken_reason = ?, lease_id = NULL, lease_until = NULL,
+              updated_at = ?
+        WHERE id = ? AND refresh_token = ?`,
+      [reason, new Date().toISOString(), id, observed],
+    );
+    return rowsAffected === 1;
   }
 }

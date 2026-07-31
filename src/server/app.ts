@@ -1,6 +1,12 @@
 import { Hono } from "hono";
 import { clamp, parseIntStrict } from "../shared/num";
-import type { OwnPostsResponse, OwnThread, Post, RefreshResponse } from "../shared/types";
+import type {
+  AuthStatus,
+  OwnPostsResponse,
+  OwnThread,
+  Post,
+  RefreshResponse,
+} from "../shared/types";
 import { parsePostUrl } from "../shared/urls";
 import { conversationResponse, ingest } from "./conversations";
 import { authorizeUrl, createPkce, exchangeCode, newState, SELF_ID, type OAuthConfig } from "./oauth";
@@ -17,6 +23,9 @@ export interface AppDeps {
   /** Null when the deployment has no OAuth user context configured. */
   oauth?: OAuthConfig | null;
 }
+
+/** Where every "you need to (re)connect" answer points. */
+const LOGIN_URL = "/auth/login";
 
 const BOOKMARK_FOLDER_KEY = "bookmark_folder_id";
 const BOOKMARK_FOLDER_NAME_KEY = "bookmark_folder_name";
@@ -236,29 +245,37 @@ export function buildApp({ store, xapi, maxPosts, oauth = null }: AppDeps): Hono
 
   /**
    * Whether user-context features (own posts, bookmarks) are available.
-   * `configured` means this deployment has OAuth client credentials;
-   * `authorized` means someone has completed /auth/login on it.
    *
    * Answered entirely from the stored row: the inbox mounts this on every
    * visit, and the old version paid a billable /2/users/me and could burn a
    * single-use refresh token to answer it (2026-07-30 review, H1). An expired
    * token still reads as authorized — renewing it is the next real request's
-   * job, and a grant that has actually gone bad is that request's error to
-   * report. The `user` field is therefore absent until Stage 3's token model
-   * persists the profile; the inbox already treats it as optional.
+   * job. A grant the token manager has given up on reads as `broken`, which
+   * is the one state the user has to act on, so it carries the login link and
+   * the reason with it.
    */
   app.get("/api/auth/status", async (c) => {
-    if (!oauth) return c.json({ configured: false, authorized: false });
+    if (!oauth) return c.json({ state: "unconfigured" } satisfies AuthStatus);
     const stored = await store.getOAuthTokens(SELF_ID);
     if (!stored) {
-      return c.json({ configured: true, authorized: false, loginUrl: "/auth/login" });
+      return c.json({ state: "unauthorized", loginUrl: LOGIN_URL } satisfies AuthStatus);
+    }
+    if (stored.state === "broken") {
+      return c.json({
+        state: "broken",
+        reason: stored.brokenReason ?? "unknown",
+        loginUrl: LOGIN_URL,
+      } satisfies AuthStatus);
     }
     return c.json({
-      configured: true,
-      authorized: true,
+      state: "authorized",
+      // Null until a getMe has been paid for elsewhere; never resolved here.
+      user: stored.username
+        ? { username: stored.username, name: stored.displayName ?? stored.username }
+        : null,
       scopes: stored.scope ? stored.scope.split(" ") : [],
       expiresAt: stored.expiresAt,
-    });
+    } satisfies AuthStatus);
   });
 
   // Resolve a post ID to its cached conversation, without touching the X API.
