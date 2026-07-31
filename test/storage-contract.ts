@@ -11,7 +11,12 @@
  * database as long as it arrives empty.
  */
 import { afterEach, describe, expect, it, setSystemTime } from "bun:test";
-import type { SavedItem, Storage, StoredTokens } from "../src/server/storage";
+import type {
+  ConversationMeta,
+  SavedItem,
+  Storage,
+  StoredTokens,
+} from "../src/server/storage";
 import type { Post } from "../src/shared/types";
 import { makePost } from "./fixtures";
 
@@ -40,24 +45,27 @@ export function describeStorageContract(name: string, makeStore: MakeStore): voi
     });
 
     describe("conversations", () => {
-      const meta = {
+      const meta: ConversationMeta = {
         rootId: "1796000000000000001",
         rootAuthorHandle: "someone",
         rootText: "the root text",
         rootCreatedAt: "2024-05-01T00:00:00.000Z",
         fetchedAt: "2024-06-01T00:00:00.000Z",
+        status: "complete",
+        fullReadAt: "2024-06-01T00:00:00.000Z",
       };
+
+      /** The row `meta` describes, as getConversationMeta hands it back. */
+      function stored(overrides: Partial<ConversationMeta> = {}): Omit<ConversationMeta, "rootId"> {
+        const { rootId: _rootId, ...rest } = { ...meta, ...overrides };
+        return rest;
+      }
 
       it("round-trips a conversation row", async () => {
         const store = await makeStore();
         await store.upsertConversation(meta);
 
-        expect(await store.getConversationMeta(meta.rootId)).toEqual({
-          rootAuthorHandle: meta.rootAuthorHandle,
-          rootText: meta.rootText,
-          rootCreatedAt: meta.rootCreatedAt,
-          fetchedAt: meta.fetchedAt,
-        });
+        expect(await store.getConversationMeta(meta.rootId)).toEqual(stored());
         expect(await store.hasConversation(meta.rootId)).toBe(true);
       });
 
@@ -68,10 +76,11 @@ export function describeStorageContract(name: string, makeStore: MakeStore): voi
       });
 
       /**
-       * The upsert is a touch, not a rewrite: re-fetching must not overwrite
-       * the root's text or author with whatever the caller happened to pass.
+       * The lifecycle fields are what a later run rewrites; the root's
+       * identity is not. Re-fetching must not overwrite the root's text or
+       * author with whatever the caller happened to pass.
        */
-      it("updates only fetched_at on conflict", async () => {
+      it("updates the lifecycle fields on conflict, never the root", async () => {
         const store = await makeStore();
         await store.upsertConversation(meta);
 
@@ -81,13 +90,75 @@ export function describeStorageContract(name: string, makeStore: MakeStore): voi
           rootText: "clobbered",
           rootCreatedAt: "1999-01-01T00:00:00.000Z",
           fetchedAt: "2024-06-02T00:00:00.000Z",
+          status: "partial",
+          fullReadAt: "2024-06-02T00:00:00.000Z",
         });
 
-        expect(await store.getConversationMeta(meta.rootId)).toEqual({
-          rootAuthorHandle: meta.rootAuthorHandle,
-          rootText: meta.rootText,
-          rootCreatedAt: meta.rootCreatedAt,
-          fetchedAt: "2024-06-02T00:00:00.000Z",
+        expect(await store.getConversationMeta(meta.rootId)).toEqual(
+          stored({
+            fetchedAt: "2024-06-02T00:00:00.000Z",
+            status: "partial",
+            fullReadAt: "2024-06-02T00:00:00.000Z",
+          }),
+        );
+      });
+
+      /**
+       * A run that isn't a full read says so by writing null, and that must
+       * not erase when the last full read was — the refresh fork spends money
+       * on that answer.
+       */
+      it("a null fullReadAt leaves the recorded full read standing", async () => {
+        const store = await makeStore();
+        await store.upsertConversation(meta);
+
+        await store.upsertConversation({
+          ...meta,
+          fetchedAt: "2024-06-05T00:00:00.000Z",
+          fullReadAt: null,
+        });
+
+        expect(await store.getConversationMeta(meta.rootId)).toEqual(
+          stored({ fetchedAt: "2024-06-05T00:00:00.000Z" }),
+        );
+      });
+
+      describe("openConversation", () => {
+        it("creates a partial row with no full read and a blank root", async () => {
+          const store = await makeStore();
+
+          await store.openConversation(meta.rootId, "2024-06-01T00:00:00.000Z");
+
+          expect(await store.getConversationMeta(meta.rootId)).toEqual({
+            rootAuthorHandle: "",
+            rootText: "",
+            rootCreatedAt: "",
+            fetchedAt: "2024-06-01T00:00:00.000Z",
+            status: "partial",
+            fullReadAt: null,
+          });
+          expect(await store.hasConversation(meta.rootId)).toBe(true);
+        });
+
+        /** The blanks are a placeholder, not an answer: the run fills them. */
+        it("lets the finishing write fill in the root it left blank", async () => {
+          const store = await makeStore();
+          await store.openConversation(meta.rootId, "2024-05-30T00:00:00.000Z");
+
+          await store.upsertConversation(meta);
+
+          expect(await store.getConversationMeta(meta.rootId)).toEqual(stored());
+        });
+
+        it("marks an existing conversation partial, keeping everything else", async () => {
+          const store = await makeStore();
+          await store.upsertConversation(meta);
+
+          await store.openConversation(meta.rootId, "2024-07-01T00:00:00.000Z");
+
+          expect(await store.getConversationMeta(meta.rootId)).toEqual(
+            stored({ status: "partial" }),
+          );
         });
       });
 
@@ -214,6 +285,48 @@ export function describeStorageContract(name: string, makeStore: MakeStore): voi
       it("newestPostId is null for an unknown conversation", async () => {
         const store = await makeStore();
         expect(await store.newestPostId("1796000000000000000")).toBeNull();
+      });
+
+      /**
+       * The resume boundary, and the same numeric-order problem in the other
+       * direction: "12" is older than "99", which is older than "100".
+       */
+      it("oldestReplyId orders by length, then lexically", async () => {
+        const store = await makeStore();
+        const conversationId = "1796000000000000000";
+        const at = "2024-06-01T00:00:00.000Z";
+        for (const id of ["99", "100", "12"]) {
+          await store.upsertPosts([makePost({ id, createdAt: at, conversationId })]);
+        }
+
+        expect(await store.oldestReplyId(conversationId)).toBe("12");
+      });
+
+      /**
+       * The root is the oldest post in any conversation, so it can never be
+       * the boundary: an `until_id` search bounded there returns nothing, and
+       * a run would read that as having reached the end of the history.
+       */
+      it("oldestReplyId skips the root, and is null when only the root is held", async () => {
+        const store = await makeStore();
+        const root = makePost({ createdAt: "2024-06-01T00:00:00.000Z" });
+        await store.upsertPosts([root]);
+
+        expect(await store.oldestReplyId(root.id)).toBeNull();
+
+        const reply = makePost({
+          conversationId: root.id,
+          parentId: root.id,
+          createdAt: "2024-06-01T00:01:00.000Z",
+        });
+        await store.upsertPosts([reply]);
+
+        expect(await store.oldestReplyId(root.id)).toBe(reply.id);
+      });
+
+      it("oldestReplyId is null for an unknown conversation", async () => {
+        const store = await makeStore();
+        expect(await store.oldestReplyId("1796000000000000000")).toBeNull();
       });
 
       it("getPostsByIds skips ids it doesn't have", async () => {

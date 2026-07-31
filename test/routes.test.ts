@@ -16,7 +16,7 @@ import {
   SELF_USER_ID,
   TEST_OAUTH,
   fetchConversationRequest,
-  fetchResult,
+  searchPage,
   idsRequested,
   makeAuthedApp,
   makeTestApp,
@@ -60,56 +60,59 @@ describe("POST /api/conversations — cache-first resolution", () => {
     const reply = replyTo(root);
     // The reply is known (a bookmark, say); the tree around it has never been pulled.
     await store.upsertPosts([reply]);
-    xapi.onFetchConversation = () => ({ posts: [root, reply], referenced: [], truncated: false });
+    xapi.onSearchConversationPage = () => searchPage([root, reply]);
 
     const response = await fetchConversationRequest(app, reply.id);
 
     expect(response.status).toBe(200);
     const body = (await response.json()) as { fromCache: boolean; focusId: string | null };
     expect(body).toMatchObject({ fromCache: false, focusId: reply.id });
-    expect(methods(xapi)).toEqual(["fetchConversation"]);
+    expect(methods(xapi)).toEqual(["searchConversationPage"]);
   });
 
   it("looks the post up on X only when it is entirely unknown", async () => {
     const { app, xapi } = await makeTestApp();
     const root = makePost();
     xapi.onGetPost = () => root;
-    xapi.onFetchConversation = () => ({ posts: [root], referenced: [], truncated: false });
+    xapi.onSearchConversationPage = () => searchPage([root]);
 
     const response = await fetchConversationRequest(app, root.id);
 
     expect(response.status).toBe(200);
-    expect(methods(xapi)).toEqual(["getPost", "fetchConversation"]);
+    expect(methods(xapi)).toEqual(["getPost", "searchConversationPage"]);
   });
 
   it("re-fetches a cached conversation on force, still without a getPost", async () => {
     const { app, store, xapi } = await makeTestApp();
     const root = makePost();
     await seedConversation(store, root);
-    xapi.onFetchConversation = () => ({ posts: [root], referenced: [], truncated: false });
+    xapi.onSearchConversationPage = () => searchPage([root]);
 
     const response = await fetchConversationRequest(app, root.id, { force: true });
 
     expect(response.status).toBe(200);
     const body = (await response.json()) as { fromCache: boolean };
     expect(body.fromCache).toBe(false);
-    expect(methods(xapi)).toEqual(["fetchConversation"]);
+    expect(methods(xapi)).toEqual(["searchConversationPage"]);
   });
 });
 
-describe("POST /api/conversations — the conversation row commits last", () => {
-  it("leaves nothing cached when quote hydration fails mid-ingest", async () => {
+/**
+ * The row no longer commits last; it is opened as `partial` before the first
+ * page and closed by whatever the run turned out to be. So the question these
+ * ask is no longer "is anything cached" but "does what's cached tell the
+ * truth about itself" — a conversation the fetch never finished has to read as
+ * incomplete, and one whose *quotes* failed is still a whole conversation.
+ */
+describe("POST /api/conversations — what a failed fetch leaves behind", () => {
+  it("keeps a whole conversation whole when quote hydration fails", async () => {
     const { app, store, xapi } = await makeTestApp();
     const root = makePost();
     const quoting = replyTo(root, { quotedPostId: "1796000000000000000" });
     xapi.onGetPost = () => root;
-    xapi.onFetchConversation = () => ({
-      posts: [root, quoting],
-      referenced: [],
-      truncated: false,
-    });
-    // Quote hydration is a real X call inside ingest, and the general shape of
-    // C1: the money is already spent when the write path throws.
+    xapi.onSearchConversationPage = () => searchPage([root, quoting]);
+    // Quote hydration is a real X call, and the general shape of C1: the money
+    // is already spent when the write path throws.
     xapi.onGetPostsByIds = () => {
       throw new Error("X is having a moment");
     };
@@ -117,24 +120,34 @@ describe("POST /api/conversations — the conversation row commits last", () => 
     const response = await fetchConversationRequest(app, root.id);
 
     expect(response.status).toBe(500);
-    // Nothing may read as cached, or the retry serves an empty conversation.
-    expect(await store.hasConversation(root.id)).toBe(false);
-    expect((await app.request(`/api/conversations/${root.id}`)).status).toBe(404);
+    // The search ran out of pages, so the conversation really is complete —
+    // what's missing is a post from someone else's thread, which renders as a
+    // link and resolves on the next refresh.
+    expect(await store.getConversationMeta(root.id)).toMatchObject({ status: "complete" });
+    const cached = await app.request(`/api/conversations/${root.id}`);
+    expect(cached.status).toBe(200);
+    expect((await cached.json()) as { truncated: boolean; posts: Post[] }).toMatchObject({
+      truncated: false,
+    });
   });
 
-  it("leaves nothing cached when the conversation fetch itself fails", async () => {
+  it("leaves a partial, resumable conversation when the fetch itself fails", async () => {
     const { app, store, xapi } = await makeTestApp();
     const root = makePost();
     xapi.onGetPost = () => root;
-    xapi.onFetchConversation = () => {
+    xapi.onSearchConversationPage = () => {
       throw new Error("X is having a moment");
     };
 
     const response = await fetchConversationRequest(app, root.id);
 
     expect(response.status).toBe(500);
-    expect(await store.hasConversation(root.id)).toBe(false);
-    expect((await app.request(`/api/conversations/${root.id}`)).status).toBe(404);
+    // Cached, but saying so: the retry serves this and offers to resume,
+    // rather than paying for the whole conversation a second time.
+    expect(await store.hasConversation(root.id)).toBe(true);
+    const cached = await app.request(`/api/conversations/${root.id}`);
+    expect(cached.status).toBe(200);
+    expect((await cached.json()) as { truncated: boolean }).toMatchObject({ truncated: true });
   });
 
   it("commits the row, the read marking and the saved entry on success", async () => {
@@ -142,7 +155,7 @@ describe("POST /api/conversations — the conversation row commits last", () => 
     const root = makePost();
     const reply = replyTo(root);
     xapi.onGetPost = () => root;
-    xapi.onFetchConversation = () => ({ posts: [root, reply], referenced: [], truncated: false });
+    xapi.onSearchConversationPage = () => searchPage([root, reply]);
 
     const response = await fetchConversationRequest(app, root.id);
 
@@ -171,7 +184,7 @@ describe("POST /api/conversations — what lands in Saved", () => {
     const { app, store, xapi } = await makeTestApp();
     const root = makePost({ authorId: "999" });
     xapi.onGetPost = () => root;
-    xapi.onFetchConversation = () => fetchResult([root]);
+    xapi.onSearchConversationPage = () => searchPage([root]);
 
     await fetchConversationRequest(app, root.id);
 
@@ -184,7 +197,7 @@ describe("POST /api/conversations — what lands in Saved", () => {
     const { app, store, xapi } = await makeAuthedApp();
     const root = makePost({ authorId: SELF_USER_ID });
     xapi.onGetPost = () => root;
-    xapi.onFetchConversation = () => fetchResult([root]);
+    xapi.onSearchConversationPage = () => searchPage([root]);
 
     await fetchConversationRequest(app, root.id);
 
@@ -195,7 +208,7 @@ describe("POST /api/conversations — what lands in Saved", () => {
     const { app, store, xapi } = await makeAuthedApp();
     const root = makePost({ authorId: "999" });
     xapi.onGetPost = () => root;
-    xapi.onFetchConversation = () => fetchResult([root]);
+    xapi.onSearchConversationPage = () => searchPage([root]);
 
     await fetchConversationRequest(app, root.id);
 
@@ -212,7 +225,7 @@ describe("POST /api/conversations — what lands in Saved", () => {
     await store.addSavedItems([
       { postId: reply.id, source: "bookmark", addedAt: "2024-01-01T00:00:00.000Z" },
     ]);
-    xapi.onFetchConversation = () => fetchResult([root, reply]);
+    xapi.onSearchConversationPage = () => searchPage([root, reply]);
 
     await fetchConversationRequest(app, reply.id);
 
@@ -223,7 +236,7 @@ describe("POST /api/conversations — what lands in Saved", () => {
     const { app, store, xapi } = await makeTestApp();
     const root = makePost({ authorId: "999" });
     xapi.onGetPost = () => root;
-    xapi.onFetchConversation = () => fetchResult([root]);
+    xapi.onSearchConversationPage = () => searchPage([root]);
     await fetchConversationRequest(app, root.id);
 
     await fetchConversationRequest(app, root.id, { force: true });
@@ -235,7 +248,7 @@ describe("POST /api/conversations — what lands in Saved", () => {
     const { app, store, xapi } = await makeTestApp();
     const root = makePost({ authorId: "999" });
     xapi.onGetPost = () => root;
-    xapi.onFetchConversation = () => fetchResult([root]);
+    xapi.onSearchConversationPage = () => searchPage([root]);
     await fetchConversationRequest(app, root.id);
     await store.removeSavedItem(root.id);
     const callsBefore = [...xapi.calls];
@@ -258,7 +271,7 @@ describe("POST /api/conversations — what lands in Saved", () => {
     await store.addSavedItems([
       { postId: reply.id, source: "bookmark", addedAt: "2024-01-01T00:00:00.000Z" },
     ]);
-    xapi.onFetchConversation = () => fetchResult([root, reply]);
+    xapi.onSearchConversationPage = () => searchPage([root, reply]);
     await fetchConversationRequest(app, reply.id);
 
     await fetchConversationRequest(app, reply.id);
@@ -280,7 +293,7 @@ describe("POST /api/conversations — what lands in Saved", () => {
     });
     const root = makePost({ authorId: "999" });
     xapi.onGetPost = () => root;
-    xapi.onFetchConversation = () => fetchResult([root]);
+    xapi.onSearchConversationPage = () => searchPage([root]);
 
     await fetchConversationRequest(app, root.id);
 

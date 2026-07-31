@@ -20,7 +20,8 @@ import type {
   SyncResponse,
 } from "../shared/types";
 import { parsePostUrl } from "../shared/urls";
-import { conversationResponse, ingest } from "./conversations";
+import { runConversationFetch } from "./conversation-fetch";
+import { conversationResponse } from "./conversations";
 import { SpendMeter } from "./meter";
 import {
   authorizeUrl,
@@ -497,13 +498,17 @@ export function buildApp({ store, xapi, maxPosts, oauth = null }: AppDeps): ApiA
       } satisfies ConversationResponse);
     }
 
-    const fetched = meter.charge(await xapi.fetchConversation(rootId, maxPosts));
-    const root =
-      fetched.posts.find((p) => p.id === rootId) ??
-      fetched.referenced.find((p) => p.id === rootId) ??
-      (requested.id === rootId ? requested : meter.charge(await xapi.getPost(rootId)));
-
-    await ingest(store, xapi, meter, fetched, [requested, root]);
+    // The row is opened as `partial` before the first page and closed by
+    // whatever the run turned out to be, rather than committed once at the
+    // end. So a fetch that dies halfway leaves a conversation holding the
+    // pages it paid for and saying it is missing history — which the cached
+    // path above serves, labeled, with resume as the way to finish it. What
+    // must never exist is the third option: a cache quietly claiming to be
+    // whole (2026-07-30 review, H2/H3).
+    const { root } = await runConversationFetch(store, xapi, meter, rootId, {
+      maxPosts,
+      known: [requested],
+    });
 
     // A conversation you just pulled up is one you're about to read; unread is
     // reserved for posts that arrive later.
@@ -513,27 +518,17 @@ export function buildApp({ store, xapi, maxPosts, oauth = null }: AppDeps): ApiA
     // pasted URLs, but since ed8ea1a also inbox card clicks and deep links.
     await saveUnlessRepresented(rootId, root.authorId);
 
-    // The row is the "cached" marker, so it commits last: anything that throws
-    // above leaves nothing to serve rather than an empty conversation the
-    // retry mistakes for a hit. Stage 5b's explicit lifecycle state replaces
-    // this ordering, which incremental page persistence will conflict with.
-    await store.upsertConversation({
-      rootId,
-      rootAuthorHandle: root.authorHandle,
-      rootText: root.text,
-      rootCreatedAt: root.createdAt,
-      fetchedAt: new Date().toISOString(),
-    });
-
     return c.json({
-      ...(await conversationResponse(store, rootId, focusId, {
-        truncated: fetched.truncated,
-        fromCache: false,
-      })),
+      ...(await conversationResponse(store, rootId, focusId, { fromCache: false })),
       cost: meter.cost(),
     } satisfies ConversationResponse);
   });
 
+  /**
+   * Refresh *newer*: what has been said in this conversation since we last
+   * looked. Resuming the history a stopped fetch skipped is a different
+   * operation, and a different route.
+   */
   app.post("/api/conversations/:rootId/refresh", async (c) => {
     const rootId = c.req.param("rootId");
     const meta = await store.getConversationMeta(rootId);
@@ -544,27 +539,64 @@ export function buildApp({ store, xapi, maxPosts, oauth = null }: AppDeps): ApiA
     const meter = meterOf(c);
     const before = await store.existingPostIds(rootId);
     // Post reads deduplicate within a UTC day, so a full re-read on the same
-    // day as the last one is free and refreshes metrics; otherwise fetch only
-    // new posts via since_id.
-    const sameUtcDay = meta.fetchedAt.slice(0, 10) === new Date().toISOString().slice(0, 10);
-    let truncated = false;
+    // day as the last *full read* is free and refreshes metrics; otherwise
+    // fetch only new posts via since_id.
+    //
+    // The fork reads full_read_at rather than fetched_at because they answer
+    // different questions. X's dedup is keyed on the posts we actually read,
+    // and a since_id refresh reads a handful of new ones — so letting it move
+    // the timestamp this branch tests would make the next refresh buy a whole
+    // conversation believing it was free (2026-07-30 review, H2).
+    const sameUtcDay =
+      meta.fullReadAt !== null &&
+      meta.fullReadAt.slice(0, 10) === new Date().toISOString().slice(0, 10);
+    const sinceId = sameUtcDay ? null : await store.newestPostId(rootId);
 
-    if (sameUtcDay) {
-      const fetched = meter.charge(await xapi.fetchConversation(rootId, maxPosts));
-      await ingest(store, xapi, meter, fetched);
-      await store.upsertConversation({ rootId, ...meta, fetchedAt: new Date().toISOString() });
-      truncated = fetched.truncated;
-    } else {
-      const sinceId = await store.newestPostId(rootId);
-      const fetched = meter.charge(
-        await xapi.fetchConversation(rootId, maxPosts, sinceId ?? undefined),
-      );
-      await ingest(store, xapi, meter, fetched);
-    }
+    await runConversationFetch(store, xapi, meter, rootId, {
+      maxPosts,
+      sinceId: sinceId ?? undefined,
+    });
 
     const newCount = (await store.existingPostIds(rootId)).size - before.size;
     return c.json({
-      ...(await conversationResponse(store, rootId, null, { truncated, fromCache: false })),
+      ...(await conversationResponse(store, rootId, null, { fromCache: false })),
+      newCount,
+      cost: meter.cost(),
+    } satisfies RefreshResponse);
+  });
+
+  /**
+   * Resume *older*: buy the history a run stopped short of.
+   *
+   * The search pages newest first, so what a capped or interrupted fetch is
+   * missing is everything older than the oldest reply it stored — which is the
+   * boundary this reads from the data itself rather than from a cursor that
+   * could drift from it. Only a partial conversation has anything to resume;
+   * asking about a complete one means the caller is looking at a stale view,
+   * and answering 200 would hide that behind an empty result.
+   */
+  app.post("/api/conversations/:rootId/resume", async (c) => {
+    const rootId = c.req.param("rootId");
+    const meta = await store.getConversationMeta(rootId);
+    if (!meta) {
+      return c.json({ error: "conversation not cached" } satisfies ApiError, 404);
+    }
+    if (meta.status === "complete") {
+      return c.json({ error: "conversation is already complete" } satisfies ApiError, 409);
+    }
+
+    const meter = meterOf(c);
+    const before = await store.existingPostIds(rootId);
+    const untilId = await store.oldestReplyId(rootId);
+
+    await runConversationFetch(store, xapi, meter, rootId, {
+      maxPosts,
+      untilId: untilId ?? undefined,
+    });
+
+    const newCount = (await store.existingPostIds(rootId)).size - before.size;
+    return c.json({
+      ...(await conversationResponse(store, rootId, null, { fromCache: false })),
       newCount,
       cost: meter.cost(),
     } satisfies RefreshResponse);

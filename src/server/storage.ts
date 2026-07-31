@@ -1,11 +1,35 @@
 import type { MediaItem, Post, PostEntities } from "../shared/types";
 
+/**
+ * How much of a conversation we hold.
+ *
+ * `partial` — a fetch is in flight, or the last one stopped early: the budget
+ *   capped it, or it died between pages. Servable and labeled as such, and
+ *   `POST /api/conversations/:rootId/resume` is how the rest is bought.
+ * `complete` — a run with no lower bound exhausted the search. A root with no
+ *   replies at all is a perfectly good complete conversation.
+ *
+ * Two states rather than three: with pages persisted as they land, a failed
+ * run and a budget-capped one leave the same thing behind — a partial
+ * conversation that can be resumed — and nothing here acts on the difference
+ * between them.
+ */
+export type ConversationStatus = "partial" | "complete";
+
 export interface ConversationMeta {
   rootId: string;
   rootAuthorHandle: string;
   rootText: string;
   rootCreatedAt: string;
+  /** When a run last landed for this conversation, whatever it asked X for. */
   fetchedAt: string;
+  status: ConversationStatus;
+  /**
+   * When the last *complete full* read finished, or null if there has never
+   * been one. What the refresh fork reads: a same-day full re-read is free
+   * under X's 24h dedup, and only an actual full read may say so.
+   */
+  fullReadAt: string | null;
 }
 
 /**
@@ -15,6 +39,29 @@ export interface ConversationMeta {
  */
 export interface Storage {
   getConversationMeta(rootId: string): Promise<Omit<ConversationMeta, "rootId"> | null>;
+  /**
+   * Declare a fetch in flight: create the row as `partial`, or mark an
+   * existing one partial again.
+   *
+   * This is what makes a conversation resumable. A run that never comes back
+   * leaves a row saying so, rather than nothing at all (and a retry paying for
+   * the whole conversation again) or a row that claims to be whole. The root's
+   * own text and handle are left blank when the row is created here: a search
+   * returns newest first, so a long conversation's root arrives on the last
+   * page or not at all, and `upsertConversation` fills them in when the run
+   * finishes.
+   */
+  openConversation(rootId: string, at: string): Promise<void>;
+  /**
+   * Write the row a finished run leaves: its root, when it landed, whether the
+   * search ran out, and — only for a full read — that a full read happened.
+   *
+   * A null `fullReadAt` leaves the recorded one standing rather than clearing
+   * it, so a since_id refresh or a resume can say "I am not a full read"
+   * without erasing the last one. The root's identity is written once, when it
+   * is first known: a re-fetch must not overwrite it with whatever a caller
+   * happened to pass.
+   */
   upsertConversation(meta: ConversationMeta): Promise<void>;
   hasConversation(rootId: string): Promise<boolean>;
   /**
@@ -36,6 +83,25 @@ export interface Storage {
   getPost(id: string): Promise<Post | null>;
   hasPost(id: string): Promise<boolean>;
   newestPostId(conversationId: string): Promise<string | null>;
+  /**
+   * The oldest cached *reply*, which is where resuming a partial conversation
+   * picks up: the search pages newest first, so what a stopped run is missing
+   * is everything older than this.
+   *
+   * The root is excluded deliberately. It is by definition the oldest post in
+   * its conversation, so bounding an `until_id` search there asks for posts
+   * older than the conversation, gets nothing, and reads that empty answer as
+   * "there is nothing left" — marking a conversation we barely read complete.
+   * Null means no reply is cached, and the resume is an unbounded read.
+   *
+   * The boundary assumes what we hold runs unbroken from here to the newest
+   * post, which is what a run that pages newest-first leaves. A reply stored
+   * from outside one — a bookmark synced on its own, the pasted post — can sit
+   * older than that, and resuming from it would step over the gap between the
+   * two. A full re-read is what closes such a gap; a cursor column would not,
+   * since it can drift from the posts it claims to describe.
+   */
+  oldestReplyId(conversationId: string): Promise<string | null>;
   existingPostIds(conversationId: string): Promise<Set<string>>;
 
   getUnreadIds(conversationId: string): Promise<string[]>;
@@ -214,6 +280,8 @@ export interface ConversationRow {
   root_text: string;
   root_created_at: string;
   fetched_at: string;
+  status: string;
+  full_read_at: string | null;
 }
 
 export function rowToPost(row: PostRow): Post {

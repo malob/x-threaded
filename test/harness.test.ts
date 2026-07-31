@@ -72,7 +72,7 @@ describe("FakeXApi", () => {
 
     expect(xapi.count("getPostsByIds")).toBe(2);
     expect(xapi.count("getPost")).toBe(1);
-    expect(xapi.count("fetchConversation")).toBe(0);
+    expect(xapi.count("searchConversationPage")).toBe(0);
     expect(xapi.calls).toEqual([
       { method: "getPostsByIds", args: [["1", "2"]] },
       { method: "getPostsByIds", args: [["3"]] },

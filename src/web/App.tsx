@@ -6,6 +6,7 @@ import {
   markConversationRead,
   refreshConversation,
   resolvePost,
+  resumeConversation,
   setReadState,
 } from "./api";
 import { Inbox } from "./Inbox";
@@ -22,6 +23,7 @@ export function App() {
   const [pendingCost, setPendingCost] = useState<number | null>(null);
   const [loading, setLoading] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
+  const [resuming, setResuming] = useState(false);
   const [newCount, setNewCount] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -38,6 +40,23 @@ export function App() {
       setError((e as Error).message);
     } finally {
       setRefreshing(false);
+    }
+  };
+
+  /**
+   * Buy the history a stopped fetch never reached. Deliberately manual: the
+   * conversation reads fine without it, and going back for the older replies
+   * costs money, so it happens when someone asks for it.
+   */
+  const resumeOlder = async (rootId: string) => {
+    setResuming(true);
+    try {
+      const older = await resumeConversation(rootId);
+      setCurrent((prev) => ({ ...older, focusId: prev?.focusId ?? null }));
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setResuming(false);
     }
   };
 
@@ -220,8 +239,10 @@ export function App() {
         <Thread
           conversation={current}
           refreshing={refreshing}
+          resuming={resuming}
           newCount={newCount}
           onRefresh={() => void autoRefresh(current.rootId)}
+          onResume={() => void resumeOlder(current.rootId)}
           onSetRead={setRead}
           onMarkAllRead={markAllRead}
         />

@@ -4,7 +4,7 @@ import { d1Driver } from "../src/server/db/d1";
 import { SqlStore } from "../src/server/db/store";
 import { SELF_ID, type OAuthConfig } from "../src/server/oauth";
 import type { Storage } from "../src/server/storage";
-import type { FetchedConversation } from "../src/server/xapi";
+import type { ConversationPage } from "../src/server/xapi";
 import type { Post } from "../src/shared/types";
 import { FakeD1Database } from "./fake-d1";
 import { FakeXApi } from "./fake-xapi";
@@ -111,13 +111,16 @@ export async function seedConversation(
   root: Post,
   replies: Post[] = [],
 ): Promise<void> {
+  const now = new Date().toISOString();
   await store.upsertPosts([root, ...replies]);
   await store.upsertConversation({
     rootId: root.id,
     rootAuthorHandle: root.authorHandle,
     rootText: root.text,
     rootCreatedAt: root.createdAt,
-    fetchedAt: new Date().toISOString(),
+    fetchedAt: now,
+    status: "complete",
+    fullReadAt: now,
   });
 }
 
@@ -137,10 +140,26 @@ export function replyTo(root: Post, overrides: Partial<Post> = {}): Post {
   return makePost({ conversationId: root.id, parentId: root.id, ...overrides });
 }
 
-/** A FetchedConversation, with the fields a test doesn't care about defaulted. */
-export function fetchResult(
-  posts: Post[],
-  extra: Partial<FetchedConversation> = {},
-): FetchedConversation {
-  return { posts, referenced: [], truncated: false, ...extra };
+/**
+ * One search page, with the fields a test doesn't care about defaulted. No
+ * `nextToken` means the search is exhausted, which is what makes a fetch
+ * driven by this land as a complete conversation.
+ */
+export function searchPage(posts: Post[], extra: Partial<ConversationPage> = {}): ConversationPage {
+  return { posts, referenced: [], unresolvedMediaIds: [], ...extra };
+}
+
+/**
+ * Serve a canned sequence of search pages. A request past the end throws
+ * rather than returning an empty page: "it asked for one page too many" is
+ * exactly what these tests catch, and against the real API that page costs
+ * money.
+ */
+export function servePages(xapi: FakeXApi, pages: ConversationPage[]): void {
+  let served = 0;
+  xapi.onSearchConversationPage = () => {
+    const page = pages[served++];
+    if (!page) throw new Error(`unexpected search page request #${served}`);
+    return page;
+  };
 }

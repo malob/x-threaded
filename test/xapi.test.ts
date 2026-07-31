@@ -1,7 +1,11 @@
 import { describe, expect, it } from "bun:test";
+import { runConversationFetch } from "../src/server/conversation-fetch";
+import { bunDriver } from "../src/server/db/bun";
+import { SqlStore } from "../src/server/db/store";
+import { SpendMeter } from "../src/server/meter";
 import { spentOnFailure, XApi, XApiError, XApiShapeError } from "../src/server/xapi";
 import { snowflakeMs } from "../src/shared/snowflake";
-import type { Post } from "../src/shared/types";
+import type { FetchCost, Post } from "../src/shared/types";
 import { makePost, snowflakeId } from "./fixtures";
 import { makeBookmarkApp } from "./harness";
 import type { Storage } from "../src/server/storage";
@@ -66,20 +70,50 @@ function serveSearchPages(specs: PageSpec[]): { urls: URL[]; restore: () => void
 const maxResults = (urls: URL[]): (string | null)[] =>
   urls.map((u) => u.searchParams.get("max_results"));
 
-describe("fetchConversation page budget", () => {
+/** What one run of the fetch service left behind, and what it cost. */
+interface RunResult {
+  posts: number;
+  truncated: boolean;
+  cost: FetchCost;
+}
+
+/**
+ * Drive the real fetch service over the real client, with only the network
+ * faked. The budget and the search window are the service's decisions and the
+ * URL is where they land, so this is the only seam that can check both at
+ * once. The root is seeded so resolving it costs nothing and every read the
+ * meter reports came from a page.
+ */
+async function runFetch(
+  maxPosts: number,
+  opts: { sinceId?: string; untilId?: string } = {},
+): Promise<RunResult> {
+  const store = new SqlStore(await bunDriver(":memory:"));
+  await store.upsertPosts([makePost({ id: ROOT_ID })]);
+  const meter = new SpendMeter();
+  const api = new XApi("bearer", { pageDelayMs: 0 });
+  const run = await runConversationFetch(store, api, meter, ROOT_ID, { maxPosts, ...opts });
+  return {
+    // Minus the seeded root, which no page returned.
+    posts: (await store.existingPostIds(ROOT_ID)).size - 1,
+    truncated: run.status === "partial",
+    cost: meter.cost(),
+  };
+}
+
+describe("the conversation fetch page budget", () => {
   it("requests only what's left in the budget", async () => {
     const { urls, restore } = serveSearchPages([
       { count: 100, nextToken: "page2" },
       { count: 50, nextToken: "page3" },
     ]);
     try {
-      const api = new XApi("bearer", { pageDelayMs: 0 });
-      const { value: result, receipt } = await api.fetchConversation(ROOT_ID, 150);
+      const result = await runFetch(150);
       expect(maxResults(urls)).toEqual(["100", "50"]);
-      expect(result.posts).toHaveLength(150);
+      expect(result.posts).toBe(150);
       expect(result.truncated).toBe(true);
       // Every post both pages returned, and nothing beyond the budget.
-      expect(receipt).toEqual({ reads: 150, ownedReads: 0 });
+      expect(result.cost).toMatchObject({ posts: 150, billable: 150 });
     } finally {
       restore();
     }
@@ -88,10 +122,9 @@ describe("fetchConversation page budget", () => {
   it("stops under budget when fewer than the API's 10-result floor remains", async () => {
     const { urls, restore } = serveSearchPages([{ count: 100, nextToken: "page2" }]);
     try {
-      const api = new XApi("bearer", { pageDelayMs: 0 });
-      const { value: result } = await api.fetchConversation(ROOT_ID, 105);
+      const result = await runFetch(105);
       expect(maxResults(urls)).toEqual(["100"]);
-      expect(result.posts).toHaveLength(100);
+      expect(result.posts).toBe(100);
       expect(result.truncated).toBe(true);
     } finally {
       restore();
@@ -104,10 +137,9 @@ describe("fetchConversation page budget", () => {
       { count: 40 },
     ]);
     try {
-      const api = new XApi("bearer", { pageDelayMs: 0 });
-      const { value: result } = await api.fetchConversation(ROOT_ID, 500);
+      const result = await runFetch(500);
       expect(maxResults(urls)).toEqual(["100", "100"]);
-      expect(result.posts).toHaveLength(140);
+      expect(result.posts).toBe(140);
       expect(result.truncated).toBe(false);
     } finally {
       restore();
@@ -115,13 +147,13 @@ describe("fetchConversation page budget", () => {
   });
 });
 
-describe("fetchConversation search window", () => {
+describe("the conversation search window", () => {
   const HOUR_MS = 60 * 60 * 1000;
 
   it("bounds the search at the root's creation time, not X's 30-day default", async () => {
     const { urls, restore } = serveSearchPages([{ count: 5 }]);
     try {
-      await new XApi("bearer", { pageDelayMs: 0 }).fetchConversation(ROOT_ID, 500);
+      await runFetch(500);
       const startTime = urls[0]?.searchParams.get("start_time") ?? "";
       // Second-precision RFC3339 is what /tweets/search/all documents.
       expect(startTime).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/);
@@ -134,7 +166,7 @@ describe("fetchConversation search window", () => {
   it("keeps the window on every page of a paginated fetch", async () => {
     const { urls, restore } = serveSearchPages([{ count: 100, nextToken: "page2" }, { count: 3 }]);
     try {
-      await new XApi("bearer", { pageDelayMs: 0 }).fetchConversation(ROOT_ID, 500);
+      await runFetch(500);
       const times = urls.map((u) => u.searchParams.get("start_time"));
       expect(times).toHaveLength(2);
       expect(new Set(times).size).toBe(1);
@@ -147,9 +179,25 @@ describe("fetchConversation search window", () => {
   it("omits start_time when since_id already bounds the range", async () => {
     const { urls, restore } = serveSearchPages([{ count: 2 }]);
     try {
-      await new XApi("bearer", { pageDelayMs: 0 }).fetchConversation(ROOT_ID, 500, "998877");
+      await runFetch(500, { sinceId: "998877" });
       expect(urls[0]?.searchParams.get("since_id")).toBe("998877");
       expect(urls[0]?.searchParams.has("start_time")).toBe(false);
+    } finally {
+      restore();
+    }
+  });
+
+  /**
+   * Resuming the history keeps the window: until_id says where to stop going
+   * back, start_time still says the conversation can't predate its own root.
+   */
+  it("sends until_id alongside the window when resuming older posts", async () => {
+    const { urls, restore } = serveSearchPages([{ count: 2 }]);
+    try {
+      await runFetch(500, { untilId: "998877" });
+      expect(urls[0]?.searchParams.get("until_id")).toBe("998877");
+      expect(urls[0]?.searchParams.has("since_id")).toBe(false);
+      expect(urls[0]?.searchParams.has("start_time")).toBe(true);
     } finally {
       restore();
     }
@@ -184,10 +232,9 @@ describe("what the client reports billing", () => {
     // X ships the parent again under includes because the reply references it.
     const restore = serveOnePage([parent, reply], [parent]);
     try {
-      const { value, receipt } = await new XApi("bearer", { pageDelayMs: 0 }).fetchConversation(
-        ROOT_ID,
-        100,
-      );
+      const { value, receipt } = await new XApi("bearer", {
+        pageDelayMs: 0,
+      }).searchConversationPage(ROOT_ID, { maxResults: 100 });
       expect(value.posts).toHaveLength(2);
       expect(receipt).toEqual({ reads: 2, ownedReads: 0 });
     } finally {
@@ -200,10 +247,9 @@ describe("what the client reports billing", () => {
     const quoted = apiTweet(snowflakeId(MS - 60_000), MS - 60_000);
     const restore = serveOnePage([apiTweet(ROOT_ID, MS)], [quoted]);
     try {
-      const { value, receipt } = await new XApi("bearer", { pageDelayMs: 0 }).fetchConversation(
-        ROOT_ID,
-        100,
-      );
+      const { value, receipt } = await new XApi("bearer", {
+        pageDelayMs: 0,
+      }).searchConversationPage(ROOT_ID, { maxResults: 100 });
       expect(value.referenced.map((p) => p.id)).toEqual([quoted.id]);
       expect(receipt).toEqual({ reads: 2, ownedReads: 0 });
     } finally {
@@ -255,7 +301,9 @@ describe("wire shapes", () => {
       const api = new XApi("bearer", { pageDelayMs: 0 });
       // A cast would make this an empty conversation — money spent, nothing
       // to show, and no sign anything went wrong.
-      await expect(api.fetchConversation(ROOT_ID, 100)).rejects.toThrow(XApiShapeError);
+      await expect(api.searchConversationPage(ROOT_ID, { maxResults: 100 })).rejects.toThrow(
+        XApiShapeError,
+      );
     } finally {
       restore();
     }
@@ -305,10 +353,9 @@ describe("wire shapes", () => {
       unexpected_envelope: { note: "hello" },
     });
     try {
-      const { value: result } = await new XApi("bearer", { pageDelayMs: 0 }).fetchConversation(
-        ROOT_ID,
-        100,
-      );
+      const { value: result } = await new XApi("bearer", {
+        pageDelayMs: 0,
+      }).searchConversationPage(ROOT_ID, { maxResults: 100 });
       expect(result.posts.map((p) => p.id)).toEqual([ROOT_ID]);
       expect(result.posts[0]?.authorHandle).toBe("a");
     } finally {
@@ -331,25 +378,39 @@ describe("wire shapes", () => {
 });
 
 /**
- * A call that dies mid-pagination bought its earlier pages all the same. No
- * Billed value ever comes back from a throw, so the error itself carries the
- * spend out — the only path on which it can still reach a meter.
+ * A run that dies mid-pagination bought its earlier pages all the same. Each
+ * page is charged as it lands, so that spend is already on the request's meter
+ * when the next one throws — and a call that dies with reads behind it and no
+ * value to return attaches them to the error, the only path left.
  */
-describe("what a dying call carries out", () => {
-  it("attaches the pages a conversation fetch bought before failing", async () => {
+describe("what a dying run carries out", () => {
+  /** A run that throws, and the estimate its meter is left holding. */
+  async function runFetchFailing(
+    maxPosts: number,
+  ): Promise<{ error: unknown; cost: FetchCost }> {
+    const store = new SqlStore(await bunDriver(":memory:"));
+    await store.upsertPosts([makePost({ id: ROOT_ID })]);
+    const meter = new SpendMeter();
+    const api = new XApi("bearer", { pageDelayMs: 0 });
+    const error = await runConversationFetch(store, api, meter, ROOT_ID, { maxPosts }).catch(
+      (e: unknown) => e,
+    );
+    return { error, cost: meter.cost() };
+  }
+
+  it("keeps the pages a conversation fetch bought before failing", async () => {
     // Page 1 succeeds; the request for page 2 dies on the wire.
     const { restore } = serveSearchPages([{ count: 100, nextToken: "page2" }]);
     try {
-      const api = new XApi("bearer", { pageDelayMs: 0 });
-      const error = await api.fetchConversation(ROOT_ID, 500).catch((e: unknown) => e);
+      const { error, cost } = await runFetchFailing(500);
       expect(error).toBeInstanceOf(Error);
-      expect(spentOnFailure(error)).toEqual({ reads: 100, ownedReads: 0 });
+      expect(cost).toMatchObject({ posts: 100, billable: 100 });
     } finally {
       restore();
     }
   });
 
-  it("merges a dying media re-lookup's spend into the fetch's", async () => {
+  it("counts a dying media re-lookup's page alongside the run's", async () => {
     const MS = Date.parse(ROOT_AT);
     const included = {
       ...apiTweet(snowflakeId(MS - 60_000), MS - 60_000),
@@ -360,7 +421,7 @@ describe("what a dying call carries out", () => {
       if (calls++ === 0) {
         return new Response(
           JSON.stringify({
-            data: [apiTweet(ROOT_ID, MS)],
+            data: [apiTweet(snowflakeId(MS + 1000), MS + 1000)],
             includes: { tweets: [included] },
             meta: { result_count: 1 },
           }),
@@ -370,10 +431,12 @@ describe("what a dying call carries out", () => {
       throw new Error("lookup died");
     });
     try {
-      const api = new XApi("bearer", { pageDelayMs: 0 });
-      const error = await api.fetchConversation(ROOT_ID, 100).catch((e: unknown) => e);
-      // The page billed two posts; the lookup died having returned none.
-      expect(spentOnFailure(error)).toEqual({ reads: 2, ownedReads: 0 });
+      const { error, cost } = await runFetchFailing(100);
+      expect(error).toBeInstanceOf(Error);
+      // The page billed two posts; the lookup died having returned none, so it
+      // has nothing of its own to attach.
+      expect(cost).toMatchObject({ posts: 2, billable: 2 });
+      expect(spentOnFailure(error)).toBeNull();
     } finally {
       restore();
     }

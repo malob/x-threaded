@@ -3,6 +3,7 @@ import {
   rowToPost,
   type ConversationMeta,
   type ConversationRow,
+  type ConversationStatus,
   type OAuthTokens,
   type PostRow,
   type SavedItem,
@@ -69,6 +70,10 @@ function toTokenState(value: string): TokenState {
   return value === "refreshing" || value === "broken" ? value : "ready";
 }
 
+function toConversationStatus(value: string): ConversationStatus {
+  return value === "partial" ? "partial" : "complete";
+}
+
 const UPSERT_POST = `INSERT OR REPLACE INTO posts
    (id, conversation_id, parent_id, author_id, author_handle, author_name,
     author_avatar_url, text, created_at, likes, replies, reposts, quotes,
@@ -128,15 +133,48 @@ export class SqlStore implements Storage {
       rootText: row.root_text,
       rootCreatedAt: row.root_created_at,
       fetchedAt: row.fetched_at,
+      status: toConversationStatus(row.status),
+      fullReadAt: row.full_read_at,
     };
+  }
+
+  async openConversation(rootId: string, at: string): Promise<void> {
+    // The root's own fields stay blank until a run resolves it; NULLIF below
+    // is what fills them in then. Only the status is forced on conflict — a
+    // fetch is in flight, so whatever the row claimed before is now in doubt.
+    await this.db.run(
+      `INSERT INTO conversations
+         (root_id, root_author_handle, root_text, root_created_at, fetched_at, status, full_read_at)
+       VALUES (?, '', '', '', ?, 'partial', NULL)
+       ON CONFLICT(root_id) DO UPDATE SET status = 'partial'`,
+      [rootId, at],
+    );
   }
 
   async upsertConversation(meta: ConversationMeta): Promise<void> {
     await this.db.run(
-      `INSERT INTO conversations (root_id, root_author_handle, root_text, root_created_at, fetched_at)
-       VALUES (?, ?, ?, ?, ?)
-       ON CONFLICT(root_id) DO UPDATE SET fetched_at = excluded.fetched_at`,
-      [meta.rootId, meta.rootAuthorHandle, meta.rootText, meta.rootCreatedAt, meta.fetchedAt],
+      `INSERT INTO conversations
+         (root_id, root_author_handle, root_text, root_created_at, fetched_at, status, full_read_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(root_id) DO UPDATE SET
+         fetched_at = excluded.fetched_at,
+         status = excluded.status,
+         -- Null means "no full read happened here", not "forget the last one".
+         full_read_at = COALESCE(excluded.full_read_at, full_read_at),
+         -- Written once, when the root is first known: openConversation leaves
+         -- these blank, and a re-fetch must not clobber a known root.
+         root_author_handle = COALESCE(NULLIF(root_author_handle, ''), excluded.root_author_handle),
+         root_text = COALESCE(NULLIF(root_text, ''), excluded.root_text),
+         root_created_at = COALESCE(NULLIF(root_created_at, ''), excluded.root_created_at)`,
+      [
+        meta.rootId,
+        meta.rootAuthorHandle,
+        meta.rootText,
+        meta.rootCreatedAt,
+        meta.fetchedAt,
+        meta.status,
+        meta.fullReadAt,
+      ],
     );
   }
 
@@ -215,6 +253,18 @@ export class SqlStore implements Storage {
     const row = await this.db.first<IdRow>(
       `SELECT id FROM posts WHERE conversation_id = ?
        ORDER BY LENGTH(id) DESC, id DESC LIMIT 1`,
+      [conversationId],
+    );
+    return row?.id ?? null;
+  }
+
+  async oldestReplyId(conversationId: string): Promise<string | null> {
+    // Numeric order out of a text column, the same way newestPostId gets it:
+    // length first, then lexically. The root is the row whose id is its own
+    // conversation id, and it is excluded (see the Storage docstring).
+    const row = await this.db.first<IdRow>(
+      `SELECT id FROM posts WHERE conversation_id = ? AND id <> conversation_id
+       ORDER BY LENGTH(id) ASC, id ASC LIMIT 1`,
       [conversationId],
     );
     return row?.id ?? null;

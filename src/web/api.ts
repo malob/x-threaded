@@ -112,6 +112,11 @@ export function refreshConversation(rootId: string): Promise<RefreshResponse> {
   return request(`/api/conversations/${rootId}/refresh`, { method: "POST" });
 }
 
+/** Buy the older replies a stopped fetch never reached. Costs money. */
+export function resumeConversation(rootId: string): Promise<RefreshResponse> {
+  return request(`/api/conversations/${rootId}/resume`, { method: "POST" });
+}
+
 export function markConversationRead(rootId: string): Promise<OkResponse> {
   return request(`/api/conversations/${rootId}/read`, { method: "POST" });
 }

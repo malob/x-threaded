@@ -2,23 +2,31 @@ import { postReads } from "../shared/pricing";
 import type { ConversationResponse, Post } from "../shared/types";
 import type { SpendMeter } from "./meter";
 import { getQuotedFor, type Storage } from "./storage";
-import type { FetchedConversation, XApiClient } from "./xapi";
+import type { XApiClient } from "./xapi";
 
-/** Everything a client needs to render a conversation, read from the store. */
+/**
+ * Everything a client needs to render a conversation, read from the store.
+ *
+ * `truncated` comes from the stored status, never from whatever the fetch in
+ * this request happened to report: incompleteness outlives the request that
+ * discovered it, and a cached read that forgets it is a cache claiming to be
+ * whole (2026-07-30 review, H2).
+ */
 export async function conversationResponse(
   store: Storage,
   rootId: string,
   focusId: string | null,
-  opts: { truncated?: boolean; fromCache: boolean },
+  opts: { fromCache: boolean },
 ): Promise<ConversationResponse> {
   const posts = await store.getPosts(rootId);
+  const meta = await store.getConversationMeta(rootId);
   return {
     rootId,
     focusId,
     posts,
     quoted: await getQuotedFor(store, posts),
     unreadIds: await store.getUnreadIds(rootId),
-    truncated: opts.truncated ?? false,
+    truncated: meta?.status === "partial",
     fromCache: opts.fromCache,
   };
 }
@@ -59,33 +67,30 @@ export async function resolveQuotedPosts(
 }
 
 /**
- * Upsert a fetch result (posts + referenced) and resolve its quotes.
+ * Store what one search page returned, crediting the reads X's same-day dedup
+ * covers.
  *
- * Two things reach the meter here: the credit for posts the fetch paid for
- * that we had already read today, and whatever the quote resolution buys.
- * The fetch's own receipt is charged by its caller, at the call — a rule that
- * keeps the accounting right when the next line throws.
+ * Check before upserting: writing the posts overwrites `fetched_at`, and every
+ * one of them would then read as already-read-today — the credit would swallow
+ * the whole bill and every fetch would report itself free.
+ *
+ * Only posts a page actually returned belong here. A post the caller already
+ * held came either from the store, which never charged for it, or from a
+ * lookup that charged separately; crediting those would net out a read someone
+ * paid for.
  */
-export async function ingest(
+export async function persistFetchedPosts(
   store: Storage,
-  xapi: XApiClient,
   meter: SpendMeter,
-  fetched: FetchedConversation,
-  extra: Post[] = [],
+  posts: Post[],
 ): Promise<void> {
-  const byId = new Map(fetched.posts.map((p) => [p.id, p]));
-  for (const post of extra) if (!byId.has(post.id)) byId.set(post.id, post);
-  for (const post of fetched.referenced) if (!byId.has(post.id)) byId.set(post.id, post);
-  const all = [...byId.values()];
-  // Check before upserting: writing the posts overwrites fetched_at, and every
-  // one of them would then read as already-read-today.
-  //
-  // Only the fetch's own posts are credited. An `extra` came either from the
-  // store, which never charged for it, or from a lookup that charged
-  // separately — crediting those would net out a read someone paid for.
-  const fetchedIds = [...fetched.posts, ...fetched.referenced].map((p) => p.id);
-  const free = await store.postIdsReadToday([...new Set(fetchedIds)]);
+  if (posts.length === 0) return;
+  // First occurrence wins, and callers pass a page's results before its
+  // includes: X attaches media only to the results, so the same post arriving
+  // in both is fuller as a result than as someone else's referenced parent.
+  const byId = new Map<string, Post>();
+  for (const post of posts) if (!byId.has(post.id)) byId.set(post.id, post);
+  const free = await store.postIdsReadToday([...byId.keys()]);
   meter.credit(postReads(free.size));
-  await store.upsertPosts(all);
-  await resolveQuotedPosts(store, xapi, meter, all, byId);
+  await store.upsertPosts([...byId.values()]);
 }

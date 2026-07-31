@@ -54,7 +54,12 @@ export interface ConversationResponse {
   quoted: Record<string, Post>;
   /** IDs of posts not yet marked read. */
   unreadIds: string[];
-  /** True when the fetch stopped at MAX_POSTS_PER_FETCH. */
+  /**
+   * True when we hold only part of this conversation: a fetch stopped at
+   * MAX_POSTS_PER_FETCH, or one never finished. A property of what is stored,
+   * not of the request that noticed — so it is still true on a later cached
+   * read, and "load older replies" is the way out of it.
+   */
   truncated: boolean;
   /** True when served from the local cache without hitting the X API. */
   fromCache: boolean;

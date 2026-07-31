@@ -22,9 +22,10 @@ const EXPANSIONS =
   "author_id,referenced_tweets.id,referenced_tweets.id.author_id,attachments.media_keys";
 const USER_FIELDS = "name,username,profile_image_url";
 const MEDIA_FIELDS = "type,url,preview_image_url,width,height";
-const PAGE_SIZE = 100;
+/** Largest page we ask /tweets/search/all for. */
+export const SEARCH_PAGE_SIZE = 100;
 /** Smallest page /tweets/search/all accepts; asking for less is a 400. */
-const MIN_PAGE_SIZE = 10;
+export const MIN_SEARCH_PAGE_SIZE = 10;
 const PAGE_DELAY_MS = 1100;
 /**
  * How far before the root's own timestamp the search window opens. The root
@@ -72,11 +73,53 @@ export class XApiShapeError extends Error {
   }
 }
 
-export interface FetchedConversation {
+/** One /tweets/search/all response, parsed. */
+export interface ConversationPage {
   posts: Post[];
   /** Referenced posts from includes (quoted posts, recovered parents). */
   referenced: Post[];
-  truncated: boolean;
+  /**
+   * Referenced posts X shipped with media keys but no media objects — the
+   * endpoint only attaches media to main results. Looking them up again is
+   * how their images resolve, and that is a second response, so the caller
+   * decides whether it is worth another read.
+   */
+  unresolvedMediaIds: string[];
+  /** Absent when this was the last page: the search has nothing more. */
+  nextToken?: string;
+}
+
+export interface SearchPageOptions {
+  /** Between MIN_SEARCH_PAGE_SIZE and SEARCH_PAGE_SIZE; the caller's budget. */
+  maxResults: number;
+  /** Only posts newer than this ID. */
+  sinceId?: string;
+  /** Only posts older than this ID; exclusive, per the endpoint's docs. */
+  untilId?: string;
+  /** Continues a search; the pacing gap is taken before the request. */
+  nextToken?: string;
+  /**
+   * Lower bound on time, from `conversationStartTime`. Ignored when `sinceId`
+   * is set — that already bounds the range, and the two can't both apply.
+   */
+  startTime?: string;
+}
+
+/**
+ * Where a conversation's search window opens, or undefined when it can't be
+ * derived.
+ *
+ * Without start_time, /tweets/search/all quietly searches only the last 30
+ * days and an older conversation comes back missing its history — no error,
+ * no truncation flag. The root's ID dates the conversation, so the window is
+ * bounded there. A conversation ID that isn't a snowflake can't date anything:
+ * send no start_time and let X apply its default rather than fabricate a
+ * bound — the search itself will come back empty for an ID this malformed
+ * anyway.
+ */
+export function conversationStartTime(conversationId: string): string | undefined {
+  const conversationMs = snowflakeMs(conversationId);
+  return conversationMs === null ? undefined : rfc3339(conversationMs - START_TIME_MARGIN_MS);
 }
 
 /**
@@ -195,7 +238,7 @@ export type XApiClient = Pick<
   XApi,
   | "getPost"
   | "getPostsByIds"
-  | "fetchConversation"
+  | "searchConversationPage"
   | "getMe"
   | "getOwnPosts"
   | "getBookmarkFolders"
@@ -429,103 +472,62 @@ export class XApi {
   }
 
   /**
-   * Fetch every post in a conversation via full-archive search, paginated.
-   * Never requests more than maxPosts allows, stopping at or below it and
-   * reporting truncation.
+   * One page of a conversation from full-archive search: one request, one
+   * response, no loop. Paging, budgets and what to keep are the caller's;
+   * this end only knows the wire.
    *
-   * Billed $0.005 per post a page returned, `includes` posts included: we
-   * ingest and render those, so we count them. A post a page returns twice —
+   * Billed $0.005 per post the page returned, `includes` posts included: we
+   * ingest and render those, so we count them. A post the page returns twice —
    * as a result and again as another post's referenced parent — is one read;
    * one page is one response, and X cannot bill the same post twice for
-   * serving it once. The media re-lookup below is a second response, so its
-   * receipt adds (2026-07-30 review, H1).
+   * serving it once (2026-07-30 review, H1).
    */
-  async fetchConversation(
+  async searchConversationPage(
     conversationId: string,
-    maxPosts: number,
-    sinceId?: string,
-  ): Promise<Billed<FetchedConversation>> {
-    const fetchedAt = new Date().toISOString();
-    const posts: Post[] = [];
-    const referencedById = new Map<string, Post>();
-    const unresolvedMedia = new Set<string>();
-    let nextToken: string | undefined;
-    let truncated = false;
-    let receipt = NO_READS;
-
-    // Without start_time, /tweets/search/all quietly searches only the last 30
-    // days and an older conversation comes back missing its history — no error,
-    // no truncation flag. The root's ID dates the conversation, so bound the
-    // window there. since_id already bounds it, and the two can't both apply.
-    // A conversation ID that isn't a snowflake can't date anything: send no
-    // start_time and let X apply its default rather than fabricate a bound —
-    // the search itself will come back empty for an ID this malformed anyway.
-    const conversationMs = sinceId ? null : snowflakeMs(conversationId);
-    const startTime =
-      conversationMs === null ? undefined : rfc3339(conversationMs - START_TIME_MARGIN_MS);
-
-    try {
-      for (;;) {
-        // Ask for no more than the budget allows: checking the cap only after a
-        // full 100-post page would bill for up to 99 posts past it. The API
-        // won't serve a page smaller than MIN_PAGE_SIZE, so a budget with less
-        // than that left ends the fetch short rather than overshooting.
-        const remaining = maxPosts - posts.length;
-        if (remaining < MIN_PAGE_SIZE) {
-          truncated = true;
-          break;
-        }
-
-        const params: Record<string, string> = {
-          query: `conversation_id:${conversationId}`,
-          max_results: String(Math.min(PAGE_SIZE, remaining)),
-          "tweet.fields": POST_FIELDS,
-          expansions: EXPANSIONS,
-          "user.fields": USER_FIELDS,
-          "media.fields": MEDIA_FIELDS,
-        };
-        if (sinceId) params.since_id = sinceId;
-        if (startTime) params.start_time = startTime;
-        if (nextToken) params.next_token = nextToken;
-
-        const page = await this.get("/tweets/search/all", SearchPageSchema, params);
-        const users = new Map((page.includes?.users ?? []).map((u) => [u.id, u]));
-        const media = mediaMap(page.includes);
-        const pageIds = new Set<string>();
-        for (const tweet of page.data ?? []) {
-          posts.push(toPost(tweet, users, media, fetchedAt));
-          pageIds.add(tweet.id);
-        }
-        for (const tweet of page.includes?.tweets ?? []) {
-          const post = toPost(tweet, users, media, fetchedAt);
-          referencedById.set(post.id, post);
-          pageIds.add(post.id);
-          if ((tweet.attachments?.media_keys?.length ?? 0) > 0 && post.media === null) {
-            unresolvedMedia.add(post.id);
-          }
-        }
-        receipt = addReceipts(receipt, postReads(pageIds.size));
-
-        nextToken = page.meta?.next_token;
-        if (!nextToken) break;
-        await sleep(this.pageDelayMs);
-      }
-
-      // Referenced posts arrive without their media objects (the API only ships
-      // media for main results); re-look them up to resolve images.
-      const postIds = new Set(posts.map((p) => p.id));
-      const toRefetch = [...unresolvedMedia].filter((id) => !postIds.has(id));
-      if (toRefetch.length > 0) {
-        const refetched = await this.getPostsByIds(toRefetch);
-        for (const post of refetched.value) {
-          referencedById.set(post.id, post);
-        }
-        receipt = addReceipts(receipt, refetched.receipt);
-      }
-    } catch (err) {
-      throw withSpent(err, receipt);
+    opts: SearchPageOptions,
+  ): Promise<Billed<ConversationPage>> {
+    const params: Record<string, string> = {
+      query: `conversation_id:${conversationId}`,
+      max_results: String(opts.maxResults),
+      "tweet.fields": POST_FIELDS,
+      expansions: EXPANSIONS,
+      "user.fields": USER_FIELDS,
+      "media.fields": MEDIA_FIELDS,
+    };
+    if (opts.sinceId) params.since_id = opts.sinceId;
+    if (opts.untilId) params.until_id = opts.untilId;
+    // since_id already bounds the range, and the two can't both apply.
+    if (opts.startTime && !opts.sinceId) params.start_time = opts.startTime;
+    // Pacing belongs with the request rather than with the caller's loop: any
+    // caller walking this endpoint owes X the same gap between pages.
+    if (opts.nextToken) {
+      params.next_token = opts.nextToken;
+      await sleep(this.pageDelayMs);
     }
 
-    return { value: { posts, referenced: [...referencedById.values()], truncated }, receipt };
+    const page = await this.get("/tweets/search/all", SearchPageSchema, params);
+    const users = new Map((page.includes?.users ?? []).map((u) => [u.id, u]));
+    const media = mediaMap(page.includes);
+    const fetchedAt = new Date().toISOString();
+    const pageIds = new Set<string>();
+    const posts: Post[] = [];
+    const referenced: Post[] = [];
+    const unresolvedMediaIds: string[] = [];
+    for (const tweet of page.data ?? []) {
+      posts.push(toPost(tweet, users, media, fetchedAt));
+      pageIds.add(tweet.id);
+    }
+    for (const tweet of page.includes?.tweets ?? []) {
+      const post = toPost(tweet, users, media, fetchedAt);
+      referenced.push(post);
+      pageIds.add(post.id);
+      if ((tweet.attachments?.media_keys?.length ?? 0) > 0 && post.media === null) {
+        unresolvedMediaIds.push(post.id);
+      }
+    }
+    return {
+      value: { posts, referenced, unresolvedMediaIds, nextToken: page.meta?.next_token },
+      receipt: postReads(pageIds.size),
+    };
   }
 }

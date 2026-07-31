@@ -256,8 +256,10 @@ const HELP: [string, string][] = [
 interface ThreadProps {
   conversation: ConversationResponse;
   refreshing: boolean;
+  resuming: boolean;
   newCount: number | null;
   onRefresh: () => void;
+  onResume: () => void;
   onSetRead: (ids: string[], read: boolean) => void;
   onMarkAllRead: () => void;
 }
@@ -265,8 +267,10 @@ interface ThreadProps {
 export function Thread({
   conversation,
   refreshing,
+  resuming,
   newCount,
   onRefresh,
+  onResume,
   onSetRead,
   onMarkAllRead,
 }: ThreadProps) {
@@ -588,7 +592,18 @@ export function Thread({
           ) : (
             <> · free (already read today)</>
           ))}
-        {conversation.truncated && " · truncated at fetch cap"}
+        {conversation.truncated && (
+          <>
+            {" · "}
+            <span title="A fetch stopped before the whole conversation was read">
+              older replies missing
+            </span>
+            {" · "}
+            <button className="notice-btn" onClick={onResume} disabled={resuming}>
+              {resuming ? "loading older…" : "load older replies"}
+            </button>
+          </>
+        )}
         {unread.size > 0 && (
           <>
             <span className="new-badge"> · {unread.size} unread</span> ·{" "}

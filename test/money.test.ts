@@ -13,11 +13,11 @@
  * both rather than repeating them.
  */
 import { afterEach, describe, expect, it, setSystemTime } from "bun:test";
-import { ingest } from "../src/server/conversations";
+import { runConversationFetch } from "../src/server/conversation-fetch";
 import { SpendMeter } from "../src/server/meter";
 import { SELF_ID } from "../src/server/oauth";
 import type { Storage } from "../src/server/storage";
-import { XApiError, type FetchedConversation } from "../src/server/xapi";
+import { XApiError, type ConversationPage } from "../src/server/xapi";
 import { OWNED_READ_USD, POST_READ_USD } from "../src/shared/pricing";
 import type {
   ApiError,
@@ -28,20 +28,20 @@ import type {
   RefreshResponse,
   SyncResponse,
 } from "../src/shared/types";
-import { searchReceipt } from "./fake-xapi";
 import { makePost } from "./fixtures";
 import {
   SELF_USER_ID,
   TEST_OAUTH,
   fetchConversationRequest,
-  fetchResult,
   idsRequested,
   makeAuthedApp,
   makeBookmarkApp,
   makeTestApp,
   methods,
   replyTo,
+  searchPage,
   seedConversation,
+  servePages,
   type TestApp,
 } from "./harness";
 
@@ -53,43 +53,49 @@ async function seedPostReadOn(store: Storage, day: string, post = makePost()): P
 }
 
 /**
- * What a route does with a conversation fetch: charge what the client
- * reported, ingest, and read the estimate off the meter. Cost is a property
- * of the request now, not of what ingest happened to store, so exercising the
- * arithmetic means charging the fetch the way a route charges it.
+ * One conversation fetch, driven the way a route drives it: the service pages,
+ * charges, credits and stores, and the estimate is read off the request's
+ * meter afterwards. Cost is a property of the request, not of what happened to
+ * end up in the store, so exercising the arithmetic means running the real
+ * sequence — the ordering these tests pin only exists inside it.
+ *
+ * `known` is what the caller already holds (the pasted post), which the run
+ * stores but is not billed for.
  */
 async function ingestFetch(
   { store, xapi }: Pick<TestApp, "store" | "xapi">,
-  fetched: FetchedConversation,
-  extra: Post[] = [],
+  page: ConversationPage,
+  known: Post[] = [],
 ): Promise<FetchCost> {
+  const rootId = (page.posts[0] ?? known[0])!.conversationId;
   const meter = new SpendMeter();
-  meter.charge({ value: fetched, receipt: searchReceipt(fetched) });
-  await ingest(store, xapi, meter, fetched, extra);
+  servePages(xapi, [page]);
+  await runConversationFetch(store, xapi, meter, rootId, { maxPosts: 500, known });
   return meter.cost();
 }
 
 const YESTERDAY = "2024-05-31";
 
-describe("ingest — what actually bills", () => {
+describe("a conversation fetch — what actually bills", () => {
   it("bills every post of a first read", async () => {
     const app = await makeTestApp();
     const root = makePost();
     const posts = [root, replyTo(root), replyTo(root)];
 
-    const cost = await ingestFetch(app, fetchResult(posts));
+    const cost = await ingestFetch(app, searchPage(posts));
 
     expect(cost).toEqual({ posts: 3, billable: 3, usd: 3 * POST_READ_USD });
-    expect(app.xapi.calls).toEqual([]);
+    // One page, and nothing else bought: the root came back in it.
+    expect(methods(app.xapi)).toEqual(["searchConversationPage"]);
   });
 
   it("bills nothing for a second ingest the same day", async () => {
     const app = await makeTestApp();
     const root = makePost();
     const posts = [root, replyTo(root)];
-    await ingestFetch(app, fetchResult(posts));
+    await ingestFetch(app, searchPage(posts));
 
-    const again = await ingestFetch(app, fetchResult(posts));
+    const again = await ingestFetch(app, searchPage(posts));
 
     expect(again).toEqual({ posts: 2, billable: 0, usd: 0 });
   });
@@ -99,7 +105,7 @@ describe("ingest — what actually bills", () => {
     const stale = await seedPostReadOn(app.store, YESTERDAY);
 
     // The same post comes back from X today, carrying today's fetchedAt.
-    const cost = await ingestFetch(app, fetchResult([makePost({ id: stale.id })]));
+    const cost = await ingestFetch(app, searchPage([makePost({ id: stale.id })]));
 
     expect(cost.billable).toBe(1);
   });
@@ -116,9 +122,9 @@ describe("ingest — what actually bills", () => {
     const app = await makeTestApp();
     const stale = await seedPostReadOn(app.store, YESTERDAY);
     const readToday = makePost();
-    await ingestFetch(app, fetchResult([readToday]));
+    await ingestFetch(app, searchPage([readToday]));
 
-    const cost = await ingestFetch(app, fetchResult([makePost({ id: stale.id }), readToday]));
+    const cost = await ingestFetch(app, searchPage([makePost({ id: stale.id }), readToday]));
 
     expect(cost).toEqual({ posts: 2, billable: 1, usd: POST_READ_USD });
   });
@@ -128,7 +134,7 @@ describe("ingest — what actually bills", () => {
     const root = makePost();
     const reply = replyTo(root);
 
-    const cost = await ingestFetch(app, fetchResult([root, reply], { referenced: [root] }));
+    const cost = await ingestFetch(app, searchPage([root, reply], { referenced: [root] }));
 
     expect(cost).toEqual({ posts: 2, billable: 2, usd: 2 * POST_READ_USD });
   });
@@ -137,7 +143,7 @@ describe("ingest — what actually bills", () => {
     const app = await makeTestApp();
     const root = makePost();
 
-    const cost = await ingestFetch(app, fetchResult([root]), [root, root]);
+    const cost = await ingestFetch(app, searchPage([root]), [root, root]);
 
     expect(cost.posts).toBe(1);
     expect(cost.billable).toBe(1);
@@ -153,12 +159,28 @@ describe("ingest — what actually bills", () => {
     const root = makePost();
     const orphan = replyTo(root);
 
-    const cost = await ingestFetch(app, fetchResult([root]), [orphan]);
+    const cost = await ingestFetch(app, searchPage([root]), [orphan]);
 
     expect(cost).toEqual({ posts: 1, billable: 1, usd: POST_READ_USD });
     expect((await app.store.getPosts(root.id)).map((p) => p.id).sort()).toEqual(
       [root.id, orphan.id].sort(),
     );
+  });
+
+  /**
+   * The fetch paid for the current metrics; the caller's copy came out of the
+   * store and may be weeks old. Storing the extras after the pages must not
+   * put the stale one back on top of what was just bought.
+   */
+  it("keeps the fetched copy of a post the caller also held", async () => {
+    const app = await makeTestApp();
+    const root = makePost({ metrics: { ...makePost().metrics, likes: 1 } });
+    const stale = { ...root, metrics: { ...root.metrics, likes: 0 } };
+    await app.store.upsertPosts([stale]);
+
+    await ingestFetch(app, searchPage([root]), [stale]);
+
+    expect((await app.store.getPost(root.id))?.metrics.likes).toBe(1);
   });
 
   /**
@@ -172,7 +194,7 @@ describe("ingest — what actually bills", () => {
     await app.store.upsertPosts([known]);
     const root = makePost();
 
-    const cost = await ingestFetch(app, fetchResult([root]), [known]);
+    const cost = await ingestFetch(app, searchPage([root]), [known]);
 
     expect(cost).toEqual({ posts: 1, billable: 1, usd: POST_READ_USD });
   });
@@ -185,7 +207,7 @@ describe("ingest — quoted-post resolution", () => {
     await app.store.upsertPosts([quoted]);
     const root = makePost({ quotedPostId: quoted.id });
 
-    await ingestFetch(app, fetchResult([root]));
+    await ingestFetch(app, searchPage([root]));
 
     expect(app.xapi.count("getPostsByIds")).toBe(0);
   });
@@ -195,7 +217,7 @@ describe("ingest — quoted-post resolution", () => {
     const quoted = makePost();
     const root = makePost({ quotedPostId: quoted.id });
 
-    await ingestFetch(app, fetchResult([root], { referenced: [quoted] }));
+    await ingestFetch(app, searchPage([root], { referenced: [quoted] }));
 
     expect(app.xapi.count("getPostsByIds")).toBe(0);
   });
@@ -208,7 +230,7 @@ describe("ingest — quoted-post resolution", () => {
     const reply = replyTo(root, { quotedPostId: q2.id });
     app.xapi.onGetPostsByIds = (ids) => [q1, q2].filter((p) => ids.includes(p.id));
 
-    await ingestFetch(app, fetchResult([root, reply]));
+    await ingestFetch(app, searchPage([root, reply]));
 
     expect(app.xapi.count("getPostsByIds")).toBe(1);
     expect(idsRequested(app.xapi)[0]?.sort()).toEqual([q1.id, q2.id].sort());
@@ -224,7 +246,7 @@ describe("ingest — quoted-post resolution", () => {
     const root = makePost({ quotedPostId: quoted.id });
     app.xapi.onGetPostsByIds = () => [quoted];
 
-    const cost = await ingestFetch(app, fetchResult([root]));
+    const cost = await ingestFetch(app, searchPage([root]));
 
     expect(cost).toEqual({ posts: 2, billable: 2, usd: 2 * POST_READ_USD });
   });
@@ -243,7 +265,7 @@ describe("ingest — quoted-post resolution", () => {
     const byId = new Map([level1, level2, level3].map((p) => [p.id, p]));
     app.xapi.onGetPostsByIds = (ids) => ids.map((id) => byId.get(id)!).filter(Boolean);
 
-    await ingestFetch(app, fetchResult([root]));
+    await ingestFetch(app, searchPage([root]));
 
     expect(idsRequested(app.xapi)).toEqual([[level1.id], [level2.id]]);
     expect(await app.store.hasPost(level2.id)).toBe(true);
@@ -262,21 +284,21 @@ describe("POST /api/conversations — force semantics", () => {
     const root = makePost();
     const reply = replyTo(root);
     await seedConversation(store, root, [reply]);
-    xapi.onFetchConversation = () => fetchResult([root, reply]);
+    xapi.onSearchConversationPage = () => searchPage([root, reply]);
 
     const response = await fetchConversationRequest(app, root.id, { force: true });
 
     expect(response.status).toBe(200);
     const body = (await response.json()) as { unreadIds: string[] };
     expect(body.unreadIds.sort()).toEqual([root.id, reply.id].sort());
-    expect(xapi.count("fetchConversation")).toBe(1);
+    expect(xapi.count("searchConversationPage")).toBe(1);
   });
 
   it("keeps a forced refetch free when the posts were already read today", async () => {
     const { app, store, xapi } = await makeTestApp();
     const root = makePost();
     await seedConversation(store, root);
-    xapi.onFetchConversation = () => fetchResult([root]);
+    xapi.onSearchConversationPage = () => searchPage([root]);
 
     const response = await fetchConversationRequest(app, root.id, { force: true });
 
@@ -368,9 +390,10 @@ describe("POST /api/conversations/:rootId/refresh — the UTC-day fork", () => {
     return { ...harness, root };
   }
 
-  /** The sinceId argument of the nth fetchConversation call. */
+  /** The since_id the first search page of a refresh was asked for. */
   function sinceIdOf(xapi: { calls: { method: string; args: unknown[] }[] }): unknown {
-    return xapi.calls.find((c) => c.method === "fetchConversation")?.args[2];
+    const call = xapi.calls.find((c) => c.method === "searchConversationPage");
+    return (call?.args[1] as { sinceId?: string } | undefined)?.sinceId;
   }
 
   it("404s a root that was never cached", async () => {
@@ -387,14 +410,14 @@ describe("POST /api/conversations/:rootId/refresh — the UTC-day fork", () => {
   it("re-reads the whole conversation with no since_id on the same UTC day", async () => {
     const { app, store, xapi, root } = await seedAt(SAME_DAY);
     setSystemTime(new Date("2024-06-01T23:00:00.000Z"));
-    xapi.onFetchConversation = () => fetchResult([root]);
+    xapi.onSearchConversationPage = () => searchPage([root]);
 
     const response = await app.request(`/api/conversations/${root.id}/refresh`, {
       method: "POST",
     });
 
     expect(response.status).toBe(200);
-    expect(xapi.count("fetchConversation")).toBe(1);
+    expect(xapi.count("searchConversationPage")).toBe(1);
     expect(sinceIdOf(xapi)).toBeUndefined();
     // A same-day re-read is free, which is the whole reason this branch exists.
     expect(((await response.json()) as RefreshResponse).cost).toMatchObject({ billable: 0 });
@@ -409,7 +432,7 @@ describe("POST /api/conversations/:rootId/refresh — the UTC-day fork", () => {
     const reply = replyTo(root, { createdAt: "2024-06-01T13:00:00.000Z" });
     await store.upsertPosts([reply]);
     setSystemTime(new Date("2024-06-02T09:00:00.000Z"));
-    xapi.onFetchConversation = () => fetchResult([]);
+    xapi.onSearchConversationPage = () => searchPage([]);
 
     const response = await app.request(`/api/conversations/${root.id}/refresh`, {
       method: "POST",
@@ -421,31 +444,43 @@ describe("POST /api/conversations/:rootId/refresh — the UTC-day fork", () => {
   });
 
   /**
-   * Characterization, not endorsement (2026-07-30 review, H2): the cross-day
-   * branch never writes a new `fetchedAt`, so once a conversation is a day
-   * old the free same-day branch is unreachable for it forever. Cost-safe by
-   * accident, but metrics stop updating. Stage 5b decides what replaces it.
+   * The cross-day branch used to leave `fetchedAt` where it was, because that
+   * one column had to answer both "when did we last look" and "is a full
+   * re-read free today" — and advancing it would have made the next refresh
+   * buy a whole conversation believing it free (2026-07-30 review, H2).
+   *
+   * Two columns, two answers: this branch advances the freshness one and
+   * leaves the full-read one alone, so metrics stop rotting without the trap
+   * coming back.
    */
-  it("leaves fetchedAt untouched on the cross-day branch", async () => {
+  it("advances fetchedAt on the cross-day branch, but not the free-re-read clock", async () => {
     const { app, store, xapi, root } = await seedAt(SAME_DAY);
-    setSystemTime(new Date("2024-06-03T09:00:00.000Z"));
-    xapi.onFetchConversation = () => fetchResult([]);
+    const laterDay = "2024-06-03T09:00:00.000Z";
+    setSystemTime(new Date(laterDay));
+    xapi.onSearchConversationPage = () => searchPage([]);
 
     await app.request(`/api/conversations/${root.id}/refresh`, { method: "POST" });
 
-    expect((await store.getConversationMeta(root.id))?.fetchedAt).toBe(SAME_DAY);
+    expect(await store.getConversationMeta(root.id)).toMatchObject({
+      fetchedAt: laterDay,
+      fullReadAt: SAME_DAY,
+    });
+
+    // And the branch is unchanged by it: still since_id, still not free.
+    await app.request(`/api/conversations/${root.id}/refresh`, { method: "POST" });
+    expect(sinceIdOf(xapi)).toBe(root.id);
   });
 
   it("treats 23:59:59Z and 00:00:01Z as different UTC days", async () => {
     const before = await seedAt("2024-06-01T23:59:59.000Z");
-    before.xapi.onFetchConversation = () => fetchResult([before.root]);
+    before.xapi.onSearchConversationPage = () => searchPage([before.root]);
     await before.app.request(`/api/conversations/${before.root.id}/refresh`, { method: "POST" });
     expect(sinceIdOf(before.xapi)).toBeUndefined();
 
     const after = await seedAt("2024-06-01T23:59:59.000Z");
     await after.store.upsertPosts([after.root]);
     setSystemTime(new Date("2024-06-02T00:00:01.000Z"));
-    after.xapi.onFetchConversation = () => fetchResult([]);
+    after.xapi.onSearchConversationPage = () => searchPage([]);
     await after.app.request(`/api/conversations/${after.root.id}/refresh`, { method: "POST" });
     expect(sinceIdOf(after.xapi)).toBe(after.root.id);
   });
@@ -456,10 +491,10 @@ describe("POST /api/conversations/:rootId/refresh — the UTC-day fork", () => {
     const fresh = replyTo(root, { createdAt: "2024-06-01T12:40:00.000Z" });
     // The first refresh establishes `known`; the second returns it again
     // alongside one genuinely new post.
-    xapi.onFetchConversation = () => fetchResult([root, known]);
+    xapi.onSearchConversationPage = () => searchPage([root, known]);
     await app.request(`/api/conversations/${root.id}/refresh`, { method: "POST" });
 
-    xapi.onFetchConversation = () => fetchResult([root, known, fresh]);
+    xapi.onSearchConversationPage = () => searchPage([root, known, fresh]);
     const response = await app.request(`/api/conversations/${root.id}/refresh`, {
       method: "POST",
     });
@@ -557,7 +592,7 @@ describe("what a failed request discloses", () => {
     const root = makePost();
     const quoting = replyTo(root, { quotedPostId: "1796000000000000000" });
     xapi.onGetPost = () => root;
-    xapi.onFetchConversation = () => fetchResult([root, quoting]);
+    xapi.onSearchConversationPage = () => searchPage([root, quoting]);
     // The quote lookup inside ingest throws — after the search was paid for.
     xapi.onGetPostsByIds = () => {
       throw new Error("X is having a moment");
@@ -587,13 +622,17 @@ describe("what a failed request discloses", () => {
     const { app, xapi } = await makeTestApp();
     const root = makePost();
     xapi.onGetPost = () => root;
-    xapi.onFetchConversation = () => {
-      // The real client attaches what a dying call had already billed to the
-      // error itself (xapi.test pins that); no Billed value ever comes back,
-      // so the error is the only way that spend can reach the meter.
-      throw Object.assign(new XApiError("X died on page 3", 500), {
-        spentReceipt: { reads: 200, ownedReads: 0 },
-      });
+    // Each page is charged as it lands, so the two that did are already on the
+    // request's meter when the third fails.
+    let served = 0;
+    xapi.onSearchConversationPage = () => {
+      if (served++ < 2) {
+        return searchPage(
+          Array.from({ length: 100 }, () => replyTo(root)),
+          { nextToken: `page${served + 1}` },
+        );
+      }
+      throw new XApiError("X died on page 3", 500);
     };
 
     const response = await fetchConversationRequest(app, root.id);
@@ -603,6 +642,35 @@ describe("what a failed request discloses", () => {
     // The lookup that resolved the URL, plus two hundred posts the dead
     // fetch bought before page three failed.
     expect(body.cost).toEqual({ posts: 201, billable: 201, usd: 201 * POST_READ_USD });
+  });
+
+  /**
+   * The other half of the same rule: a call that dies with reads behind it and
+   * no value to hand back attaches them to the error, and the error handler
+   * has to add them in — otherwise that spend is disclosed nowhere.
+   */
+  it("absorbs the spend an error carried out of a dying lookup", async () => {
+    const { app, xapi } = await makeTestApp();
+    const root = makePost();
+    const quoting = replyTo(root, { quotedPostId: "1796000000000000000" });
+    xapi.onGetPost = () => root;
+    xapi.onSearchConversationPage = () => searchPage([root, quoting]);
+    xapi.onGetPostsByIds = () => {
+      throw Object.assign(new XApiError("X died mid-lookup", 500), {
+        spentReceipt: { reads: 40, ownedReads: 0 },
+      });
+    };
+
+    const response = await fetchConversationRequest(app, root.id);
+
+    expect(response.status).toBe(502);
+    // The URL lookup, the two posts the page returned, and the forty the
+    // lookup had bought before it fell over.
+    expect(((await response.json()) as ApiError).cost).toEqual({
+      posts: 43,
+      billable: 43,
+      usd: 43 * POST_READ_USD,
+    });
   });
 });
 

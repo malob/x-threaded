@@ -1,6 +1,11 @@
 import { NO_READS, addReceipts, ownedReads, postReads, type Receipt } from "../src/shared/pricing";
 import type { Post } from "../src/shared/types";
-import type { Billed, FetchedConversation, XApiClient } from "../src/server/xapi";
+import type {
+  Billed,
+  ConversationPage,
+  SearchPageOptions,
+  XApiClient,
+} from "../src/server/xapi";
 
 /** What a canned method hands back: the payload, without the receipt. */
 type Payload<M extends keyof XApiClient> =
@@ -13,10 +18,10 @@ type Canned<M extends keyof XApiClient> = (
 
 /**
  * What one /tweets/search/all response bills: each distinct post it returned,
- * once — results and includes alike. Shared with the tests that drive `ingest`
- * directly, so there is one statement of the rule.
+ * once — results and includes alike. Shared with the tests that drive the
+ * fetch service directly, so there is one statement of the rule.
  */
-export function searchReceipt({ posts, referenced }: FetchedConversation): Receipt {
+export function searchReceipt({ posts, referenced }: ConversationPage): Receipt {
   return postReads(new Set([...posts, ...referenced].map((p) => p.id)).size);
 }
 
@@ -42,7 +47,7 @@ export class FakeXApi implements XApiClient {
 
   onGetPost?: Canned<"getPost">;
   onGetPostsByIds?: Canned<"getPostsByIds">;
-  onFetchConversation?: Canned<"fetchConversation">;
+  onSearchConversationPage?: Canned<"searchConversationPage">;
   onGetMe?: Canned<"getMe">;
   onGetOwnPosts?: Canned<"getOwnPosts">;
   onGetBookmarkFolders?: Canned<"getBookmarkFolders">;
@@ -77,17 +82,16 @@ export class FakeXApi implements XApiClient {
     );
   }
 
-  fetchConversation(
+  searchConversationPage(
     conversationId: string,
-    maxPosts: number,
-    sinceId?: string,
-  ): Promise<Billed<FetchedConversation>> {
+    opts: SearchPageOptions,
+  ): Promise<Billed<ConversationPage>> {
     return this.record(
-      "fetchConversation",
-      this.onFetchConversation,
-      [conversationId, maxPosts, sinceId],
-      // One canned result stands for one search response, so a post in both
-      // the results and the includes is the one read the real client counts.
+      "searchConversationPage",
+      this.onSearchConversationPage,
+      [conversationId, opts],
+      // One canned page stands for one search response, so a post in both the
+      // results and the includes is the one read the real client counts.
       searchReceipt,
     );
   }

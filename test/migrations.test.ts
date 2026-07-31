@@ -89,7 +89,7 @@ CREATE TABLE IF NOT EXISTS saved_items (
 
 /** A stand-in for the migrations later stages will add. */
 const FUTURE: Migration = {
-  name: "0005_future.sql",
+  name: "0007_future.sql",
   sql: `-- A later migration; note the semicolon and the apostrophe in X's prose.
 ALTER TABLE settings ADD COLUMN note TEXT;`,
 };
@@ -134,6 +134,7 @@ describe("loadMigrations", () => {
       "0003_oauth_user_id.sql",
       "0004_settings_and_saved.sql",
       "0005_token_lease.sql",
+      "0006_conversation_lifecycle.sql",
     ]);
     expect(MIGRATIONS.every((migration) => migration.sql.length > 0)).toBe(true);
   });
@@ -231,6 +232,27 @@ describe("applyMigrations — a pre-ledger database with data", () => {
     expect(await driver.all(`SELECT id FROM posts`)).toEqual([{ id: "1" }]);
   });
 
+  /**
+   * The conversation lifecycle columns arrive on a database whose rows were
+   * all written by the old ordering — a full fetch that finished — so calling
+   * them complete, and dating their full read from fetched_at, is a statement
+   * about those rows rather than a guess.
+   */
+  it("baselines existing conversations as completely read", async () => {
+    const driver = await seededLegacyDriver();
+    await driver.run(
+      `INSERT INTO conversations (root_id, root_author_handle, root_text, root_created_at,
+         fetched_at)
+       VALUES ('1', 'someone', 'hello', '2024-01-01', '2024-02-03T04:05:06.000Z')`,
+    );
+
+    await applyMigrations(driver, MIGRATIONS);
+
+    expect(await driver.all(`SELECT status, full_read_at FROM conversations`)).toEqual([
+      { status: "complete", full_read_at: "2024-02-03T04:05:06.000Z" },
+    ]);
+  });
+
   it("baselines only once — a later run behaves like any other", async () => {
     const driver = await seededLegacyDriver();
     await applyMigrations(driver, MIGRATIONS);
@@ -266,7 +288,7 @@ describe("applyMigrations — an already-ledgered database", () => {
   it("rolls a failing migration back whole, and does not record it", async () => {
     const driver = emptyDriver();
     const broken: Migration = {
-      name: "0005_broken.sql",
+      name: "0007_broken.sql",
       sql: `CREATE TABLE half_done (id TEXT);
             INSERT INTO no_such_table (id) VALUES ('x');`,
     };
@@ -315,7 +337,7 @@ SELECT 1;`;
 
   it("finds every statement in the real migrations", () => {
     const statements = MIGRATIONS.flatMap((migration) => splitStatements(migration.sql));
-    expect(statements).toHaveLength(15);
+    expect(statements).toHaveLength(18);
     expect(statements.every((statement) => !statement.includes("--"))).toBe(true);
   });
 });
@@ -328,10 +350,14 @@ SELECT 1;`;
 describe("applyMigrations — historical partial schemas", () => {
   it("records only what is present and runs the rest (pre-oauth era)", async () => {
     // The 0001-era shape: posts/conversations/read_state, nothing later.
+    // conversations is spelled out as 0001 created it, because a later
+    // migration backfills one of its columns from another.
     const db = new Database(":memory:");
     db.run(`
       CREATE TABLE posts (id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL);
-      CREATE TABLE conversations (root_id TEXT PRIMARY KEY);
+      CREATE TABLE conversations (
+        root_id TEXT PRIMARY KEY, root_author_handle TEXT NOT NULL,
+        root_text TEXT NOT NULL, root_created_at TEXT NOT NULL, fetched_at TEXT NOT NULL);
       CREATE TABLE read_state (post_id TEXT PRIMARY KEY);
     `);
     db.run(`INSERT INTO posts (id, conversation_id) VALUES ('1', '1')`);
@@ -374,7 +400,9 @@ describe("applyMigrations — interrupted legacy schemas self-heal", () => {
     const db = new Database(":memory:");
     db.run(`
       CREATE TABLE posts (id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL);
-      CREATE TABLE conversations (root_id TEXT PRIMARY KEY);
+      CREATE TABLE conversations (
+        root_id TEXT PRIMARY KEY, root_author_handle TEXT NOT NULL,
+        root_text TEXT NOT NULL, root_created_at TEXT NOT NULL, fetched_at TEXT NOT NULL);
     `);
     const driver = bunDriverFor(db);
 
