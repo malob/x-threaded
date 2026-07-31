@@ -100,6 +100,32 @@ export interface Billed<T> {
   readonly receipt: Receipt;
 }
 
+/** An error can leave a paginated call with reads already billed behind it. */
+interface SpentCarrier {
+  spentReceipt?: Receipt;
+}
+
+/**
+ * Attach the reads a failing call had already billed before it threw, merging
+ * with whatever an inner call attached on the way up. A paginated fetch that
+ * dies on page five bought pages one through four whether or not a value ever
+ * comes back — without this, that spend would vanish with the throw, and the
+ * error handler would disclose nothing.
+ */
+function withSpent(err: unknown, receipt: Receipt): unknown {
+  if (!(err instanceof Error)) return err;
+  const carrier = err as Error & SpentCarrier;
+  const total = addReceipts(carrier.spentReceipt ?? NO_READS, receipt);
+  if (total.reads + total.ownedReads > 0) carrier.spentReceipt = total;
+  return err;
+}
+
+/** The reads an error carried out of a failed call, if any. */
+export function spentOnFailure(err: unknown): Receipt | null {
+  const receipt = err instanceof Error ? (err as Error & SpentCarrier).spentReceipt : undefined;
+  return receipt ?? null;
+}
+
 /** The v2 API HTML-escapes &, <, > in post text; x.com renders them unescaped. */
 function unescapeText(text: string): string {
   return text.replaceAll("&lt;", "<").replaceAll("&gt;", ">").replaceAll("&amp;", "&");
@@ -323,32 +349,36 @@ export class XApi {
     const ids: string[] = [];
     let paginationToken: string | undefined;
     let complete = false;
-    for (let page = 0; page < maxPages; page++) {
-      const params: Record<string, string> = { max_results: "100" };
-      if (paginationToken) params.pagination_token = paginationToken;
-      const result = await this.get(
-        `/users/${userId}/bookmarks/folders/${folderId}`,
-        BookmarkFolderPageSchema,
-        params,
-        accessToken,
-      );
-      ids.push(...(result.data ?? []).map((t) => t.id));
-      paginationToken = result.meta?.next_token;
-      if (!paginationToken) {
-        complete = true;
-        break;
+    try {
+      for (let page = 0; page < maxPages; page++) {
+        const params: Record<string, string> = { max_results: "100" };
+        if (paginationToken) params.pagination_token = paginationToken;
+        const result = await this.get(
+          `/users/${userId}/bookmarks/folders/${folderId}`,
+          BookmarkFolderPageSchema,
+          params,
+          accessToken,
+        );
+        ids.push(...(result.data ?? []).map((t) => t.id));
+        paginationToken = result.meta?.next_token;
+        if (!paginationToken) {
+          complete = true;
+          break;
+        }
       }
+      // ids and posts are returned separately: hydration can silently drop a
+      // post whose author went private or deleted it, and a bookmark that
+      // failed to hydrate is still a bookmark — reconciling removals against
+      // the hydrated subset would delete it (Stage 0 adversarial review).
+      const hydrated =
+        ids.length > 0 ? await this.getPostsByIds(ids) : { value: [], receipt: NO_READS };
+      return {
+        value: { posts: hydrated.value, ids, complete },
+        receipt: addReceipts(ownedReads(ids.length), hydrated.receipt),
+      };
+    } catch (err) {
+      throw withSpent(err, ownedReads(ids.length));
     }
-    // ids and posts are returned separately: hydration can silently drop a
-    // post whose author went private or deleted it, and a bookmark that
-    // failed to hydrate is still a bookmark — reconciling removals against
-    // the hydrated subset would delete it (Stage 0 adversarial review).
-    const hydrated =
-      ids.length > 0 ? await this.getPostsByIds(ids) : { value: [], receipt: NO_READS };
-    return {
-      value: { posts: hydrated.value, ids, complete },
-      receipt: addReceipts(ownedReads(ids.length), hydrated.receipt),
-    };
   }
 
   /** Look up a single post ($0.005). */
@@ -376,20 +406,24 @@ export class XApi {
    */
   async getPostsByIds(ids: string[]): Promise<Billed<Post[]>> {
     const results: Post[] = [];
-    for (let i = 0; i < ids.length; i += 100) {
-      const page = await this.get("/tweets", SearchPageSchema, {
-        ids: ids.slice(i, i + 100).join(","),
-        "tweet.fields": POST_FIELDS,
-        expansions: EXPANSIONS,
-        "user.fields": USER_FIELDS,
-        "media.fields": MEDIA_FIELDS,
-      });
-      const users = new Map((page.includes?.users ?? []).map((u) => [u.id, u]));
-      const media = mediaMap(page.includes);
-      const fetchedAt = new Date().toISOString();
-      for (const tweet of page.data ?? []) {
-        results.push(toPost(tweet, users, media, fetchedAt));
+    try {
+      for (let i = 0; i < ids.length; i += 100) {
+        const page = await this.get("/tweets", SearchPageSchema, {
+          ids: ids.slice(i, i + 100).join(","),
+          "tweet.fields": POST_FIELDS,
+          expansions: EXPANSIONS,
+          "user.fields": USER_FIELDS,
+          "media.fields": MEDIA_FIELDS,
+        });
+        const users = new Map((page.includes?.users ?? []).map((u) => [u.id, u]));
+        const media = mediaMap(page.includes);
+        const fetchedAt = new Date().toISOString();
+        for (const tweet of page.data ?? []) {
+          results.push(toPost(tweet, users, media, fetchedAt));
+        }
       }
+    } catch (err) {
+      throw withSpent(err, postReads(results.length));
     }
     return { value: results, receipt: postReads(results.length) };
   }
@@ -430,62 +464,66 @@ export class XApi {
     const startTime =
       conversationMs === null ? undefined : rfc3339(conversationMs - START_TIME_MARGIN_MS);
 
-    for (;;) {
-      // Ask for no more than the budget allows: checking the cap only after a
-      // full 100-post page would bill for up to 99 posts past it. The API
-      // won't serve a page smaller than MIN_PAGE_SIZE, so a budget with less
-      // than that left ends the fetch short rather than overshooting.
-      const remaining = maxPosts - posts.length;
-      if (remaining < MIN_PAGE_SIZE) {
-        truncated = true;
-        break;
-      }
-
-      const params: Record<string, string> = {
-        query: `conversation_id:${conversationId}`,
-        max_results: String(Math.min(PAGE_SIZE, remaining)),
-        "tweet.fields": POST_FIELDS,
-        expansions: EXPANSIONS,
-        "user.fields": USER_FIELDS,
-        "media.fields": MEDIA_FIELDS,
-      };
-      if (sinceId) params.since_id = sinceId;
-      if (startTime) params.start_time = startTime;
-      if (nextToken) params.next_token = nextToken;
-
-      const page = await this.get("/tweets/search/all", SearchPageSchema, params);
-      const users = new Map((page.includes?.users ?? []).map((u) => [u.id, u]));
-      const media = mediaMap(page.includes);
-      const pageIds = new Set<string>();
-      for (const tweet of page.data ?? []) {
-        posts.push(toPost(tweet, users, media, fetchedAt));
-        pageIds.add(tweet.id);
-      }
-      for (const tweet of page.includes?.tweets ?? []) {
-        const post = toPost(tweet, users, media, fetchedAt);
-        referencedById.set(post.id, post);
-        pageIds.add(post.id);
-        if ((tweet.attachments?.media_keys?.length ?? 0) > 0 && post.media === null) {
-          unresolvedMedia.add(post.id);
+    try {
+      for (;;) {
+        // Ask for no more than the budget allows: checking the cap only after a
+        // full 100-post page would bill for up to 99 posts past it. The API
+        // won't serve a page smaller than MIN_PAGE_SIZE, so a budget with less
+        // than that left ends the fetch short rather than overshooting.
+        const remaining = maxPosts - posts.length;
+        if (remaining < MIN_PAGE_SIZE) {
+          truncated = true;
+          break;
         }
-      }
-      receipt = addReceipts(receipt, postReads(pageIds.size));
 
-      nextToken = page.meta?.next_token;
-      if (!nextToken) break;
-      await sleep(this.pageDelayMs);
-    }
+        const params: Record<string, string> = {
+          query: `conversation_id:${conversationId}`,
+          max_results: String(Math.min(PAGE_SIZE, remaining)),
+          "tweet.fields": POST_FIELDS,
+          expansions: EXPANSIONS,
+          "user.fields": USER_FIELDS,
+          "media.fields": MEDIA_FIELDS,
+        };
+        if (sinceId) params.since_id = sinceId;
+        if (startTime) params.start_time = startTime;
+        if (nextToken) params.next_token = nextToken;
 
-    // Referenced posts arrive without their media objects (the API only ships
-    // media for main results); re-look them up to resolve images.
-    const postIds = new Set(posts.map((p) => p.id));
-    const toRefetch = [...unresolvedMedia].filter((id) => !postIds.has(id));
-    if (toRefetch.length > 0) {
-      const refetched = await this.getPostsByIds(toRefetch);
-      for (const post of refetched.value) {
-        referencedById.set(post.id, post);
+        const page = await this.get("/tweets/search/all", SearchPageSchema, params);
+        const users = new Map((page.includes?.users ?? []).map((u) => [u.id, u]));
+        const media = mediaMap(page.includes);
+        const pageIds = new Set<string>();
+        for (const tweet of page.data ?? []) {
+          posts.push(toPost(tweet, users, media, fetchedAt));
+          pageIds.add(tweet.id);
+        }
+        for (const tweet of page.includes?.tweets ?? []) {
+          const post = toPost(tweet, users, media, fetchedAt);
+          referencedById.set(post.id, post);
+          pageIds.add(post.id);
+          if ((tweet.attachments?.media_keys?.length ?? 0) > 0 && post.media === null) {
+            unresolvedMedia.add(post.id);
+          }
+        }
+        receipt = addReceipts(receipt, postReads(pageIds.size));
+
+        nextToken = page.meta?.next_token;
+        if (!nextToken) break;
+        await sleep(this.pageDelayMs);
       }
-      receipt = addReceipts(receipt, refetched.receipt);
+
+      // Referenced posts arrive without their media objects (the API only ships
+      // media for main results); re-look them up to resolve images.
+      const postIds = new Set(posts.map((p) => p.id));
+      const toRefetch = [...unresolvedMedia].filter((id) => !postIds.has(id));
+      if (toRefetch.length > 0) {
+        const refetched = await this.getPostsByIds(toRefetch);
+        for (const post of refetched.value) {
+          referencedById.set(post.id, post);
+        }
+        receipt = addReceipts(receipt, refetched.receipt);
+      }
+    } catch (err) {
+      throw withSpent(err, receipt);
     }
 
     return { value: { posts, referenced: [...referencedById.values()], truncated }, receipt };

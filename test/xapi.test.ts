@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { XApi, XApiError, XApiShapeError } from "../src/server/xapi";
+import { spentOnFailure, XApi, XApiError, XApiShapeError } from "../src/server/xapi";
 import { snowflakeMs } from "../src/shared/snowflake";
 import type { Post } from "../src/shared/types";
 import { makePost, snowflakeId } from "./fixtures";
@@ -324,6 +324,73 @@ describe("wire shapes", () => {
       const error = await new XApi("bearer").getPost(ROOT_ID).catch((e: unknown) => e);
       expect(error).toBeInstanceOf(XApiError);
       expect((error as Error).message.length).toBeLessThan(500);
+    } finally {
+      restore();
+    }
+  });
+});
+
+/**
+ * A call that dies mid-pagination bought its earlier pages all the same. No
+ * Billed value ever comes back from a throw, so the error itself carries the
+ * spend out — the only path on which it can still reach a meter.
+ */
+describe("what a dying call carries out", () => {
+  it("attaches the pages a conversation fetch bought before failing", async () => {
+    // Page 1 succeeds; the request for page 2 dies on the wire.
+    const { restore } = serveSearchPages([{ count: 100, nextToken: "page2" }]);
+    try {
+      const api = new XApi("bearer", { pageDelayMs: 0 });
+      const error = await api.fetchConversation(ROOT_ID, 500).catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(Error);
+      expect(spentOnFailure(error)).toEqual({ reads: 100, ownedReads: 0 });
+    } finally {
+      restore();
+    }
+  });
+
+  it("merges a dying media re-lookup's spend into the fetch's", async () => {
+    const MS = Date.parse(ROOT_AT);
+    const included = {
+      ...apiTweet(snowflakeId(MS - 60_000), MS - 60_000),
+      attachments: { media_keys: ["m1"] },
+    };
+    let calls = 0;
+    const restore = withMockFetch(() => {
+      if (calls++ === 0) {
+        return new Response(
+          JSON.stringify({
+            data: [apiTweet(ROOT_ID, MS)],
+            includes: { tweets: [included] },
+            meta: { result_count: 1 },
+          }),
+        );
+      }
+      // The media re-lookup for the included post dies before returning.
+      throw new Error("lookup died");
+    });
+    try {
+      const api = new XApi("bearer", { pageDelayMs: 0 });
+      const error = await api.fetchConversation(ROOT_ID, 100).catch((e: unknown) => e);
+      // The page billed two posts; the lookup died having returned none.
+      expect(spentOnFailure(error)).toEqual({ reads: 2, ownedReads: 0 });
+    } finally {
+      restore();
+    }
+  });
+
+  it("attaches what a lookup bought when a later page dies", async () => {
+    let calls = 0;
+    const restore = withMockFetch(() => {
+      if (calls++ === 0) return new Response(searchPage({ count: 100 }, 0));
+      throw new Error("page 2 died");
+    });
+    try {
+      const ids = Array.from({ length: 150 }, (_, i) =>
+        snowflakeId(Date.parse(ROOT_AT) + (i + 1) * 1000),
+      );
+      const error = await new XApi("bearer").getPostsByIds(ids).catch((e: unknown) => e);
+      expect(spentOnFailure(error)).toEqual({ reads: 100, ownedReads: 0 });
     } finally {
       restore();
     }

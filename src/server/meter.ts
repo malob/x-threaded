@@ -27,6 +27,15 @@ export class SpendMeter {
   }
 
   /**
+   * Record reads a failing call carried out with its error (see xapi's
+   * spentOnFailure): the pages it bought before it threw billed all the same,
+   * and never came back as a value anyone could charge.
+   */
+  absorb(receipt: Receipt): void {
+    this.charged = addReceipts(this.charged, receipt);
+  }
+
+  /**
    * Forgive reads X's same-day dedup covers. Only ever posts this request also
    * charged for: crediting a post that arrived free from the store would net
    * out a read someone actually paid for.

@@ -230,6 +230,62 @@ describe("POST /api/conversations — what lands in Saved", () => {
 
     expect((await store.listSavedItems()).map((i) => i.postId)).toEqual([root.id]);
   });
+
+  it("re-adds a cached conversation whose entry was removed, for free", async () => {
+    const { app, store, xapi } = await makeTestApp();
+    const root = makePost({ authorId: "999" });
+    xapi.onGetPost = () => root;
+    xapi.onFetchConversation = () => fetchResult([root]);
+    await fetchConversationRequest(app, root.id);
+    await store.removeSavedItem(root.id);
+    const callsBefore = [...xapi.calls];
+
+    // Cached now, so this paste never reaches the fetch path. The cached
+    // path runs the same gate — otherwise removing an entry would make the
+    // conversation unsaveable for as long as it stays cached.
+    const response = await fetchConversationRequest(app, root.id);
+
+    expect(response.status).toBe(200);
+    expect((await store.listSavedItems()).map((i) => i.postId)).toEqual([root.id]);
+    expect(xapi.calls).toEqual(callsBefore);
+  });
+
+  it("adds nothing on the cached path when the queue already represents it", async () => {
+    const { app, store, xapi } = await makeTestApp();
+    const root = makePost({ authorId: "999" });
+    const reply = replyTo(root);
+    await store.upsertPosts([reply]);
+    await store.addSavedItems([
+      { postId: reply.id, source: "bookmark", addedAt: "2024-01-01T00:00:00.000Z" },
+    ]);
+    xapi.onFetchConversation = () => fetchResult([root, reply]);
+    await fetchConversationRequest(app, reply.id);
+
+    await fetchConversationRequest(app, reply.id);
+
+    expect((await store.listSavedItems()).map((i) => i.postId)).toEqual([reply.id]);
+  });
+
+  it("saves your own thread when OAuth is off, whatever a leftover row says", async () => {
+    // A userId left behind by a removed OAuth setup must not suppress the
+    // save: with user context off, the Your posts tab doesn't exist, and
+    // Saved is the only place this thread would be findable.
+    const { app, store, xapi } = await makeTestApp();
+    await store.putOAuthTokens(SELF_ID, {
+      accessToken: "stale",
+      refreshToken: "stale",
+      expiresAt: 0,
+      scope: "",
+      userId: "999",
+    });
+    const root = makePost({ authorId: "999" });
+    xapi.onGetPost = () => root;
+    xapi.onFetchConversation = () => fetchResult([root]);
+
+    await fetchConversationRequest(app, root.id);
+
+    expect((await store.listSavedItems()).map((i) => i.postId)).toEqual([root.id]);
+  });
 });
 
 describe("GET /api/me/posts — threads param", () => {

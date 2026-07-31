@@ -15,12 +15,14 @@
 import { afterEach, describe, expect, it, setSystemTime } from "bun:test";
 import { ingest } from "../src/server/conversations";
 import { SpendMeter } from "../src/server/meter";
+import { SELF_ID } from "../src/server/oauth";
 import type { Storage } from "../src/server/storage";
 import { XApiError, type FetchedConversation } from "../src/server/xapi";
 import { OWNED_READ_USD, POST_READ_USD } from "../src/shared/pricing";
 import type {
   ApiError,
   FetchCost,
+  FoldersResponse,
   OwnPostsResponse,
   Post,
   RefreshResponse,
@@ -30,6 +32,7 @@ import { searchReceipt } from "./fake-xapi";
 import { makePost } from "./fixtures";
 import {
   SELF_USER_ID,
+  TEST_OAUTH,
   fetchConversationRequest,
   fetchResult,
   idsRequested,
@@ -578,6 +581,52 @@ describe("what a failed request discloses", () => {
     const response = await fetchConversationRequest(app, "1796000000000000000");
 
     expect(await response.json()).toEqual({ error: "no such post" });
+  });
+
+  it("discloses the pages a paginated fetch bought before it died", async () => {
+    const { app, xapi } = await makeTestApp();
+    const root = makePost();
+    xapi.onGetPost = () => root;
+    xapi.onFetchConversation = () => {
+      // The real client attaches what a dying call had already billed to the
+      // error itself (xapi.test pins that); no Billed value ever comes back,
+      // so the error is the only way that spend can reach the meter.
+      throw Object.assign(new XApiError("X died on page 3", 500), {
+        spentReceipt: { reads: 200, ownedReads: 0 },
+      });
+    };
+
+    const response = await fetchConversationRequest(app, root.id);
+
+    expect(response.status).toBe(502);
+    const body = (await response.json()) as ApiError;
+    // The lookup that resolved the URL, plus two hundred posts the dead
+    // fetch bought before page three failed.
+    expect(body.cost).toEqual({ posts: 201, billable: 201, usd: 201 * POST_READ_USD });
+  });
+});
+
+describe("GET /api/bookmarks/folders — first-use identity spend", () => {
+  it("reports the getMe read the first-ever call pays", async () => {
+    const { app, store, xapi } = await makeTestApp({ oauth: TEST_OAUTH });
+    // Valid tokens with no cached user ID, so userContext must buy a getMe.
+    await store.putOAuthTokens(SELF_ID, {
+      accessToken: "access",
+      refreshToken: "refresh",
+      expiresAt: Date.now() + 60 * 60 * 1000,
+      scope: "tweet.read",
+      userId: null,
+    });
+    xapi.onGetMe = () => ({ id: "42", username: "m", name: "M" });
+    xapi.onGetBookmarkFolders = () => [];
+
+    const first = (await (await app.request("/api/bookmarks/folders")).json()) as FoldersResponse;
+    // Folders are free; the read that resolved who "the user" is was not.
+    expect(first.cost).toEqual({ posts: 1, billable: 1, usd: POST_READ_USD });
+
+    // Identity now cached: the next call spends nothing and says nothing.
+    const second = (await (await app.request("/api/bookmarks/folders")).json()) as FoldersResponse;
+    expect(second.cost).toBeUndefined();
   });
 });
 

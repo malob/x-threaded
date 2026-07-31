@@ -35,7 +35,7 @@ import { jsonBody } from "./request";
 import { getQuotedFor, type Storage } from "./storage";
 import { groupOwnThreads } from "./threads";
 import { userContext } from "./user-context";
-import { XApiError, XApiShapeError, type XApiClient } from "./xapi";
+import { spentOnFailure, XApiError, XApiShapeError, type XApiClient } from "./xapi";
 
 export interface AppDeps {
   store: Storage;
@@ -113,11 +113,32 @@ const ReadStateRequest = v.object({
 export function buildApp({ store, xapi, maxPosts, oauth = null }: AppDeps): ApiApp {
   const app = new Hono<AppEnv>();
 
+  /**
+   * Queue a conversation for reading unless something already stands for it:
+   * an entry on any post in the thread (a bookmarked mid-thread reply is the
+   * common one), or it being the user's own thread, which the Your posts tab
+   * covers. That last check applies only while OAuth is configured — a userId
+   * left behind by a removed setup must not suppress the one place the
+   * thread would still be findable.
+   */
+  async function saveUnlessRepresented(rootId: string, rootAuthorId: string | null): Promise<void> {
+    const self = oauth ? ((await store.getOAuthTokens(SELF_ID))?.userId ?? null) : null;
+    if (self !== null && rootAuthorId === self) return;
+    if (await store.hasSavedConversation(rootId)) return;
+    await store.addSavedItems([
+      { postId: rootId, source: "manual", addedAt: new Date().toISOString() },
+    ]);
+  }
+
   app.onError((err, c) => {
     // Money moves before a request finishes, and the reads it already paid
     // for are not refunded by throwing. Every error body carries the estimate
-    // when there is one to carry (2026-07-30 review, H1).
-    const meter = c.get("meter");
+    // when there is one to carry — including the pages a paginated call
+    // bought before it died, which ride out on the error itself because no
+    // value ever came back to charge (2026-07-30 review, H1).
+    const failed = spentOnFailure(err);
+    const meter = failed ? meterOf(c) : c.get("meter");
+    if (failed && meter) meter.absorb(failed);
     const spent: { cost?: FetchCost } = meter?.spent ? { cost: meter.cost() } : {};
 
     if (err instanceof XApiError) {
@@ -195,6 +216,9 @@ export function buildApp({ store, xapi, maxPosts, oauth = null }: AppDeps): ApiA
     const { token, userId } = await userContext(store, xapi, oauth, meter);
     return c.json({
       folders: meter.charge(await xapi.getBookmarkFolders(token, userId)),
+      // Folders are free, but the first-ever call here pays a getMe to learn
+      // who "the user" is — spend that would otherwise leave no trace.
+      ...(meter.spent ? { cost: meter.cost() } : {}),
     } satisfies FoldersResponse);
   });
 
@@ -461,6 +485,10 @@ export function buildApp({ store, xapi, maxPosts, oauth = null }: AppDeps): ApiA
     const firstFetch = !(await store.hasConversation(rootId));
 
     if (!firstFetch && !body.force) {
+      // A paste that lands on a cached conversation is still "queue this":
+      // if only the fetch path saved, removing an entry would make its
+      // conversation unsaveable for as long as it stays cached.
+      await saveUnlessRepresented(rootId, (await store.getPost(rootId))?.authorId ?? null);
       return c.json({
         ...(await conversationResponse(store, rootId, focusId, { fromCache: true })),
         // Served from the cache, but the lookup that found out *which*
@@ -483,17 +511,7 @@ export function buildApp({ store, xapi, maxPosts, oauth = null }: AppDeps): ApiA
 
     // Every explicit fetch lands in the saved queue as a manual entry —
     // pasted URLs, but since ed8ea1a also inbox card clicks and deep links.
-    // Save unless the queue already represents this reading job: an entry on
-    // any post in the thread (a bookmarked mid-thread reply is the common
-    // one) covers it, and your own threads have the Your posts tab. Either
-    // way a second entry is a chore to dismiss, not a queue entry.
-    const self = (await store.getOAuthTokens(SELF_ID))?.userId ?? null;
-    const ownThread = self !== null && root.authorId === self;
-    if (!ownThread && !(await store.hasSavedConversation(rootId))) {
-      await store.addSavedItems([
-        { postId: rootId, source: "manual", addedAt: new Date().toISOString() },
-      ]);
-    }
+    await saveUnlessRepresented(rootId, root.authorId);
 
     // The row is the "cached" marker, so it commits last: anything that throws
     // above leaves nothing to serve rather than an empty conversation the

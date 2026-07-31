@@ -165,6 +165,8 @@ export interface SettingsResponse {
 
 export interface FoldersResponse {
   folders: { id: string; name: string }[];
+  /** Folders are free, but the first-ever call pays a getMe; absent when $0. */
+  cost?: FetchCost;
 }
 
 /**
