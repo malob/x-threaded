@@ -325,8 +325,13 @@ async function refreshUnderLease(
   // the spent token, bricking the grant we were holding the replacement for).
   // Retry the conditional write itself, never the exchange: the CAS makes a
   // repeat attempt safe, and X is never contacted again.
+  // Keep trying for as long as the lease is plausibly still ours: giving up
+  // any earlier converts a database blip shorter than the lease into a
+  // spent-token recovery and a forced re-login. Past the window the CAS
+  // would lose anyway, so the deadline is the protocol's own.
+  const finalizeDeadline = Date.now() + timings.leaseMs + timings.graceMs;
   let landed = false;
-  for (let attempt = 0; ; attempt++) {
+  for (;;) {
     try {
       landed = await store.finalizeTokenLease(SELF_ID, leaseId, row.refreshToken, {
         ...rotated,
@@ -337,7 +342,7 @@ async function refreshUnderLease(
       });
       break;
     } catch (error) {
-      if (attempt >= 2) throw error;
+      if (Date.now() >= finalizeDeadline) throw error;
       await sleep(timings.pollMs);
     }
   }
