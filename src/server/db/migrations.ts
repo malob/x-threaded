@@ -58,29 +58,25 @@ const LEDGER_TABLE = "d1_migrations";
 const RECORD_SQL = `INSERT INTO "d1_migrations" (name) VALUES (?)`;
 
 /**
- * Whether a database already contains what a migration creates, decided per
- * migration by probing for its distinctive schema artifact.
+ * Migrations that must be *recorded without running* when their effect is
+ * already present, probed by their distinctive schema artifact.
  *
  * Pre-ledger databases were built by the retired `SCHEMA` + `addMissingColumns`
- * path, so their migrations must be *recorded*, not re-run (0003's ALTER TABLE
- * throws on a column that already exists). An earlier draft inferred all four
- * from one `posts` sentinel; the Stage 2b adversarial review showed that
- * over-claims on databases from older schema eras (posts present, oauth_tokens
- * never created) — recording migrations that never ran and leaving the tables
- * missing for good. Probing each migration for its own artifact records
- * exactly what is present and runs exactly what is not, whatever era the
- * database stopped at — and makes replay after a half-completed baseline
- * impossible, since an unrecorded-but-present migration is re-detected on the
- * next boot rather than re-executed.
+ * path. Nearly every migration is pure `CREATE ... IF NOT EXISTS`, so on such
+ * a database the right move is simply to RUN it — a no-op where the objects
+ * exist, and self-healing where an interrupted legacy startup left only a
+ * prefix of them (two adversarial-review rounds arrived here: a one-sentinel
+ * baseline over-claimed on older eras, and per-migration single-artifact
+ * probes still blessed partial prefixes). The sole exception is 0003, whose
+ * bare `ALTER TABLE ADD COLUMN` throws when the column exists — the one case
+ * where detection is the only honest option, and a column either exists or
+ * doesn't, so its probe can't half-match.
  *
- * Migrations without a probe (0005 onward) always run when unrecorded: only
- * the pre-ledger era needs detection, and it ended with these four.
+ * Future non-idempotent migrations must either be written idempotently or add
+ * a probe here.
  */
-const BASELINE_PROBES: Record<string, (driver: SqlDriver) => Promise<boolean>> = {
-  "0001_init.sql": (driver) => tableExists(driver, "posts"),
-  "0002_oauth_tokens.sql": (driver) => tableExists(driver, "oauth_tokens"),
+const RECORD_WITHOUT_RUN: Record<string, (driver: SqlDriver) => Promise<boolean>> = {
   "0003_oauth_user_id.sql": (driver) => columnExists(driver, "oauth_tokens", "user_id"),
-  "0004_settings_and_saved.sql": (driver) => tableExists(driver, "settings"),
 };
 
 /**
@@ -90,17 +86,17 @@ const BASELINE_PROBES: Record<string, (driver: SqlDriver) => Promise<boolean>> =
  * own ledger row, so a migration is either fully applied and recorded or
  * neither.
  *
- * Baselining: any migration that is unrecorded but whose probe finds its
- * artifact already present (see BASELINE_PROBES) is recorded without being
- * executed. Probing runs before anything is written, and the ledger's creation
- * commits in the same batch as the baseline rows — so an interruption at any
- * point leaves either nothing (re-probed next boot) or a consistent ledger,
- * never an empty ledger that would replay 0003 into a duplicate-column error
- * (Stage 2b adversarial review, finding 2). A genuinely fresh database probes
- * false everywhere and runs everything.
+ * Baselining: unrecorded migrations RUN — they are idempotent, so a legacy or
+ * partially-created schema is healed rather than guessed at — except the ones
+ * in RECORD_WITHOUT_RUN whose probe finds their effect already present; those
+ * are recorded without executing, at their ordinal position so the ledger
+ * reads in migration order. Crash-safety is by re-derivation, not ceremony:
+ * an interruption anywhere leaves a state where the idempotent migrations
+ * re-run harmlessly and 0003 is re-detected, so every restart converges.
  */
 export async function applyMigrations(driver: SqlDriver, migrations: Migration[]): Promise<void> {
   const hadLedger = await tableExists(driver, LEDGER_TABLE);
+  if (!hadLedger) await driver.run(CREATE_LEDGER_SQL);
   const applied = new Set<string>(
     hadLedger
       ? (await driver.all<{ name: string }>(`SELECT name FROM "d1_migrations"`)).map(
@@ -109,23 +105,12 @@ export async function applyMigrations(driver: SqlDriver, migrations: Migration[]
       : [],
   );
 
-  const preApplied: string[] = [];
   for (const migration of migrations) {
     if (applied.has(migration.name)) continue;
-    const probe = BASELINE_PROBES[migration.name];
-    if (probe && (await probe(driver))) preApplied.push(migration.name);
-  }
-
-  const setup: { sql: string; params: unknown[] }[] = [];
-  if (!hadLedger) setup.push({ sql: CREATE_LEDGER_SQL, params: [] });
-  setup.push(...preApplied.map((name) => ({ sql: RECORD_SQL, params: [name] })));
-  if (setup.length > 0) await driver.batch(setup);
-  for (const name of preApplied) applied.add(name);
-
-  for (const migration of migrations) {
-    if (applied.has(migration.name)) continue;
+    const probe = RECORD_WITHOUT_RUN[migration.name];
+    const alreadyPresent = probe ? await probe(driver) : false;
     await driver.batch([
-      ...splitStatements(migration.sql).map((sql) => ({ sql, params: [] })),
+      ...(alreadyPresent ? [] : splitStatements(migration.sql).map((sql) => ({ sql, params: [] }))),
       { sql: RECORD_SQL, params: [migration.name] },
     ]);
   }

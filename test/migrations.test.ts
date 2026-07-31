@@ -367,3 +367,31 @@ describe("applyMigrations — historical partial schemas", () => {
     expect(await ledger(driver)).toEqual(MIGRATION_NAMES);
   });
 });
+
+describe("applyMigrations — interrupted legacy schemas self-heal", () => {
+  it("fills in read_state when a legacy crash left only posts/conversations", async () => {
+    const db = new Database(":memory:");
+    db.run(`
+      CREATE TABLE posts (id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL);
+      CREATE TABLE conversations (root_id TEXT PRIMARY KEY);
+    `);
+    const driver = bunDriverFor(db);
+
+    await applyMigrations(driver, MIGRATIONS);
+
+    expect(await tables(driver)).toContain("read_state");
+    expect(await ledger(driver)).toEqual(MIGRATION_NAMES);
+  });
+
+  it("fills in saved_items when settings exists without it", async () => {
+    const db = new Database(":memory:");
+    db.run(LEGACY_SCHEMA);
+    db.run(`DROP TABLE saved_items`);
+    const driver = bunDriverFor(db);
+
+    await applyMigrations(driver, MIGRATIONS);
+
+    expect(await tables(driver)).toContain("saved_items");
+    expect(await ledger(driver)).toEqual(MIGRATION_NAMES);
+  });
+});
