@@ -262,7 +262,7 @@ export function buildApp({ store, xapi, maxPosts, oauth = null }: AppDeps): ApiA
     }
     const meter = meterOf(c);
     const { token, userId } = await userContext(store, xapi, oauth, meter);
-    const { posts, ids, complete } = meter.charge(
+    const { posts, ids, missing, complete } = meter.charge(
       await xapi.getBookmarksByFolder(token, userId, folderId),
     );
     // Before the upsert, which overwrites fetched_at: hydrating a post read
@@ -297,6 +297,9 @@ export function buildApp({ store, xapi, maxPosts, oauth = null }: AppDeps): ApiA
       synced: posts.length,
       added: fresh.length,
       removed: gone.length,
+      // Bookmarks whose posts X wouldn't return get no saved row — there is
+      // nothing to render — but they are counted rather than silently absent.
+      unavailable: missing.length,
       complete,
       cost: meter.cost(),
     } satisfies SyncResponse);

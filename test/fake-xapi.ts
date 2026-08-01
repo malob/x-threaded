@@ -3,6 +3,7 @@ import type { Post } from "../src/shared/types";
 import type {
   Billed,
   ConversationPage,
+  MissingPost,
   SearchPageOptions,
   XApiClient,
 } from "../src/server/xapi";
@@ -76,8 +77,8 @@ export class FakeXApi implements XApiClient {
     return this.record("getPost", this.onGetPost, [id], () => postReads(1));
   }
 
-  getPostsByIds(ids: string[]): Promise<Billed<Post[]>> {
-    return this.record("getPostsByIds", this.onGetPostsByIds, [ids], (posts) =>
+  getPostsByIds(ids: string[]): Promise<Billed<{ posts: Post[]; missing: MissingPost[] }>> {
+    return this.record("getPostsByIds", this.onGetPostsByIds, [ids], ({ posts }) =>
       postReads(posts.length),
     );
   }
@@ -130,7 +131,9 @@ export class FakeXApi implements XApiClient {
     userId: string,
     folderId: string,
     maxPages = 10,
-  ): Promise<Billed<{ posts: Post[]; ids: string[]; complete: boolean }>> {
+  ): Promise<
+    Billed<{ posts: Post[]; ids: string[]; missing: MissingPost[]; complete: boolean }>
+  > {
     return this.record(
       "getBookmarksByFolder",
       this.onGetBookmarksByFolder,

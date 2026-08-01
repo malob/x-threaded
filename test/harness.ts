@@ -79,9 +79,13 @@ export async function makeBookmarkApp(
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ bookmarkFolderId: "folder1", bookmarkFolderName: "Reading" }),
   });
+  const ids = folderIds ?? folderPosts.map((p) => p.id);
+  const hydrated = new Set(folderPosts.map((p) => p.id));
   harness.xapi.onGetBookmarksByFolder = () => ({
     posts: folderPosts,
-    ids: folderIds ?? folderPosts.map((p) => p.id),
+    ids,
+    // Derived the way the real client derives it: enumerated but not hydrated.
+    missing: ids.filter((id) => !hydrated.has(id)).map((id) => ({ id })),
     complete,
   });
   return harness;

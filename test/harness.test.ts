@@ -55,6 +55,7 @@ describe("FakeXApi", () => {
     xapi.onGetBookmarksByFolder = () => ({
       posts: [hydrated],
       ids: [hydrated.id, "1796000000000000000"],
+      missing: [{ id: "1796000000000000000" }],
       complete: true,
     });
 
@@ -65,7 +66,7 @@ describe("FakeXApi", () => {
 
   it("records and counts every call, canned or not", async () => {
     const xapi = new FakeXApi();
-    xapi.onGetPostsByIds = () => [];
+    xapi.onGetPostsByIds = () => ({ posts: [], missing: [] });
     await xapi.getPostsByIds(["1", "2"]);
     await xapi.getPostsByIds(["3"]);
     await expect(xapi.getPost("4")).rejects.toThrow();

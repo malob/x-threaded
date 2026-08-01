@@ -265,7 +265,8 @@ describe("what the client reports billing", () => {
         ROOT_ID,
         "1796000000000000000",
       ]);
-      expect(value).toHaveLength(1);
+      expect(value.posts).toHaveLength(1);
+      expect(value.missing).toHaveLength(1);
       expect(receipt).toEqual({ reads: 1, ownedReads: 0 });
     } finally {
       restore();
@@ -460,6 +461,68 @@ describe("what a dying run carries out", () => {
   });
 });
 
+describe("getPostsByIds hydration loss", () => {
+  const hereMs = Date.parse(ROOT_AT) + 1000;
+  const here = snowflakeId(hereMs);
+  const gone = snowflakeId(hereMs + 1000);
+
+  it("names the ids the lookup couldn't return, with X's stated reason", async () => {
+    const restore = withMockFetch(
+      () =>
+        new Response(
+          JSON.stringify({
+            data: [apiTweet(here, hereMs)],
+            errors: [
+              {
+                resource_id: gone,
+                value: gone,
+                title: "Authorization Error",
+                detail: `Sorry, you are not authorized to see the Tweet with ids: [${gone}].`,
+                type: "https://api.twitter.com/2/problems/not-authorized-for-resource",
+              },
+            ],
+          }),
+        ),
+    );
+    try {
+      const { value, receipt } = await new XApi("bearer").getPostsByIds([here, gone]);
+      expect(value.posts.map((p) => p.id)).toEqual([here]);
+      expect(value.missing).toEqual([{ id: gone, reason: "Authorization Error" }]);
+      // Only the post actually returned bills.
+      expect(receipt).toEqual({ reads: 1, ownedReads: 0 });
+    } finally {
+      restore();
+    }
+  });
+
+  it("counts an absence X never explained as missing, without a reason", async () => {
+    const restore = withMockFetch(
+      () => new Response(JSON.stringify({ data: [apiTweet(here, hereMs)] })),
+    );
+    try {
+      const { value } = await new XApi("bearer").getPostsByIds([here, gone]);
+      expect(value.missing).toEqual([{ id: gone, reason: undefined }]);
+    } finally {
+      restore();
+    }
+  });
+
+  it("keeps the page when the errors array itself is garbage", async () => {
+    // A malformed errors member may cost the reasons, never the posts beside it.
+    const restore = withMockFetch(
+      () =>
+        new Response(JSON.stringify({ data: [apiTweet(here, hereMs)], errors: "not an array" })),
+    );
+    try {
+      const { value } = await new XApi("bearer").getPostsByIds([here, gone]);
+      expect(value.posts.map((p) => p.id)).toEqual([here]);
+      expect(value.missing).toEqual([{ id: gone, reason: undefined }]);
+    } finally {
+      restore();
+    }
+  });
+});
+
 /** Bookmark-folder page: the bare `{id}` stubs the endpoint actually returns. */
 interface FolderPage {
   ids: string[];
@@ -469,15 +532,29 @@ interface FolderPage {
 /**
  * Serve a folder enumeration, hydrating whatever IDs it then looks up. An
  * enumeration request past the end of the sequence throws: the point of these
- * tests is which pages get asked for.
+ * tests is which pages get asked for. IDs in `unavailable` enumerate like any
+ * bookmark but hydrate as a partial error, the way a deleted post's would.
  */
-function serveFolderPages(pages: FolderPage[]): () => void {
+function serveFolderPages(pages: FolderPage[], unavailable: string[] = []): () => void {
   let served = 0;
+  const withheld = new Set(unavailable);
   return withMockFetch((url) => {
     const parsed = new URL(url);
     if (parsed.pathname === "/2/tweets") {
       const ids = (parsed.searchParams.get("ids") ?? "").split(",").filter(Boolean);
-      const body = { data: ids.map((id, i) => apiTweet(id, Date.parse(ROOT_AT) + (i + 1) * 1000)) };
+      const body = {
+        data: ids
+          .filter((id) => !withheld.has(id))
+          .map((id, i) => apiTweet(id, Date.parse(ROOT_AT) + (i + 1) * 1000)),
+        errors: ids
+          .filter((id) => withheld.has(id))
+          .map((id) => ({
+            resource_id: id,
+            value: id,
+            title: "Not Found Error",
+            detail: `Could not find tweet with ids: [${id}].`,
+          })),
+      };
       return new Response(JSON.stringify(body));
     }
     const page = pages[served++];
@@ -526,6 +603,26 @@ describe("getBookmarksByFolder completeness", () => {
       // Two folder pages of stubs, then one lookup hydrating both: the nested
       // call's receipt lands in the scan's, exactly once.
       expect(receipt).toEqual({ reads: 2, ownedReads: 2 });
+    } finally {
+      restore();
+    }
+  });
+
+  it("passes hydration loss through beside the ids that stayed bookmarks", async () => {
+    const restore = serveFolderPages([{ ids: [folderId(1), folderId(2)] }], [folderId(2)]);
+    try {
+      const api = new XApi("bearer", { pageDelayMs: 0 });
+      const { value: result, receipt } = await api.getBookmarksByFolder(
+        "user-token",
+        "u1",
+        "folder1",
+      );
+      expect(result.posts.map((p) => p.id)).toEqual([folderId(1)]);
+      expect(result.ids).toEqual([folderId(1), folderId(2)]);
+      expect(result.missing).toEqual([{ id: folderId(2), reason: "Not Found Error" }]);
+      expect(result.complete).toBe(true);
+      // Two enumerated stubs, one post actually returned: a missing id bills nothing.
+      expect(receipt).toEqual({ reads: 1, ownedReads: 2 });
     } finally {
       restore();
     }
@@ -588,10 +685,24 @@ describe("POST /api/bookmarks/sync hydration loss", () => {
 
     const response = await app.request("/api/bookmarks/sync", { method: "POST" });
     expect(response.status).toBe(200);
-    expect(await response.json()).toMatchObject({ removed: 1, complete: true });
+    expect(await response.json()).toMatchObject({ removed: 1, complete: true, unavailable: 1 });
 
     const remaining = (await store.listSavedItems()).map((i) => i.postId);
     expect(remaining).toContain(missingId);
     expect(remaining).not.toContain(goneId);
+  });
+
+  it("reports bookmarks it couldn't hydrate without inventing entries", async () => {
+    const postA = makePost({ text: "hydrated bookmark" });
+    const ghostId = snowflakeId("2025-07-07T07:07:07.000Z");
+    const { app, store } = await makeBookmarkApp([postA], true, "u1", [postA.id, ghostId]);
+
+    const response = await app.request("/api/bookmarks/sync", { method: "POST" });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ added: 1, removed: 0, unavailable: 1 });
+
+    // Nothing to render for the ghost, so no saved row — but it is counted,
+    // and its folder id keeps it from ever reading as un-bookmarked.
+    expect((await store.listSavedItems()).map((i) => i.postId)).toEqual([postA.id]);
   });
 });

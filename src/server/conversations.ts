@@ -53,7 +53,9 @@ export async function resolveQuotedPosts(
       if (!byId.has(id) && !(await store.hasPost(id))) missing.push(id);
     }
     if (missing.length > 0) {
-      const fetched = meter.charge(await xapi.getPostsByIds(missing));
+      // Quote ids the lookup couldn't return are dropped here: the card
+      // simply doesn't resolve and the post falls back to its t.co link.
+      const fetched = meter.charge(await xapi.getPostsByIds(missing)).posts;
       for (const post of fetched) byId.set(post.id, post);
       await store.upsertPosts(fetched);
     }

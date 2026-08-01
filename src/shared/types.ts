@@ -123,6 +123,11 @@ export interface SyncResponse {
   synced: number;
   added: number;
   removed: number;
+  /**
+   * Bookmarks whose posts X wouldn't return (deleted, or the author went
+   * private): still bookmarked, never removed, but nothing to show in Saved.
+   */
+  unavailable: number;
   /** False when the scan hit its page cap; removals were skipped. */
   complete: boolean;
   /** Enumerating a folder and hydrating it both bill; a big folder is dollars. */

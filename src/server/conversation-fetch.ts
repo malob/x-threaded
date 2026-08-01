@@ -132,7 +132,9 @@ export async function runConversationFetch(
   const pageIds = new Set(posts.map((p) => p.id));
   const toRefetch = [...unresolvedMedia].filter((id) => !pageIds.has(id));
   if (toRefetch.length > 0) {
-    const refetched = meter.charge(await xapi.getPostsByIds(toRefetch));
+    // Ids the lookup couldn't return are dropped: the post already rendered
+    // from the search response, it just keeps its media unresolved.
+    const refetched = meter.charge(await xapi.getPostsByIds(toRefetch)).posts;
     for (const post of refetched) referencedById.set(post.id, post);
     await store.upsertPosts(refetched);
   }

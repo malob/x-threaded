@@ -51,9 +51,11 @@ export async function groupOwnThreads(
   // Roots older than the scan window aren't cached either; pull those from X
   // in one batch, then read them back the way every other root arrives here.
   // A lookup, not an Owned Read: the timeline's rate doesn't apply off it.
+  // A root the lookup can't return (deleted, went private) just leaves its
+  // thread grouped without one, same as before the fetch.
   const missing = wanted.filter((id) => !roots.has(id));
   if (missing.length > 0) {
-    await store.upsertPosts(meter.charge(await xapi.getPostsByIds(missing)));
+    await store.upsertPosts(meter.charge(await xapi.getPostsByIds(missing)).posts);
     for (const post of await store.getPostsByIds(missing)) roots.set(post.id, post);
   }
 

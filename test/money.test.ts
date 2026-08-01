@@ -228,7 +228,10 @@ describe("ingest — quoted-post resolution", () => {
     const q2 = makePost();
     const root = makePost({ quotedPostId: q1.id });
     const reply = replyTo(root, { quotedPostId: q2.id });
-    app.xapi.onGetPostsByIds = (ids) => [q1, q2].filter((p) => ids.includes(p.id));
+    app.xapi.onGetPostsByIds = (ids) => ({
+      posts: [q1, q2].filter((p) => ids.includes(p.id)),
+      missing: [],
+    });
 
     await ingestFetch(app, searchPage([root, reply]));
 
@@ -244,7 +247,7 @@ describe("ingest — quoted-post resolution", () => {
     const app = await makeTestApp();
     const quoted = makePost();
     const root = makePost({ quotedPostId: quoted.id });
-    app.xapi.onGetPostsByIds = () => [quoted];
+    app.xapi.onGetPostsByIds = () => ({ posts: [quoted], missing: [] });
 
     const cost = await ingestFetch(app, searchPage([root]));
 
@@ -263,7 +266,10 @@ describe("ingest — quoted-post resolution", () => {
     const level1 = makePost({ quotedPostId: level2.id });
     const root = makePost({ quotedPostId: level1.id });
     const byId = new Map([level1, level2, level3].map((p) => [p.id, p]));
-    app.xapi.onGetPostsByIds = (ids) => ids.map((id) => byId.get(id)!).filter(Boolean);
+    app.xapi.onGetPostsByIds = (ids) => ({
+      posts: ids.map((id) => byId.get(id)!).filter(Boolean),
+      missing: [],
+    });
 
     await ingestFetch(app, searchPage([root]));
 
@@ -755,7 +761,7 @@ describe("GET /api/me/posts — what the scan bills", () => {
       createdAt: "2024-06-01T00:00:00.000Z",
     });
     xapi.onGetOwnPosts = () => ({ posts: [continuation] });
-    xapi.onGetPostsByIds = () => [root];
+    xapi.onGetPostsByIds = () => ({ posts: [root], missing: [] });
 
     const response = await app.request("/api/me/posts");
 

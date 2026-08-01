@@ -75,10 +75,27 @@ export const IncludesSchema = v.object({
 });
 export type Includes = v.InferOutput<typeof IncludesSchema>;
 
+/**
+ * A partial-failure entry, served in `errors` beside `data` when some
+ * requested resources couldn't be returned (deleted post, protected author).
+ * The OpenAPI contract marks resource_id/value required on both Problem
+ * variants, but every field falls back per-field here: a garbled entry must
+ * degrade to "missing, no reason", never fail a page whose data is fine.
+ */
+const LookupErrorSchema = v.object({
+  resource_id: v.fallback(v.optional(v.string()), undefined),
+  value: v.fallback(v.optional(v.string()), undefined),
+  title: v.fallback(v.optional(v.string()), undefined),
+  detail: v.fallback(v.optional(v.string()), undefined),
+});
+export type LookupError = v.InferOutput<typeof LookupErrorSchema>;
+
 /** Any endpoint returning a list of posts: search, lookup-by-ids, a timeline. */
 export const SearchPageSchema = v.object({
   data: v.optional(v.array(ApiTweetSchema)),
   includes: v.optional(IncludesSchema),
+  // A malformed errors member costs the reasons, not the page.
+  errors: v.fallback(v.optional(v.array(LookupErrorSchema)), undefined),
   // result_count is optional even though X always sends it: nothing here
   // reads it, and a required-but-unread field can only ever cause a failure.
   meta: v.optional(v.object({ next_token: v.optional(v.string()), result_count: v.optional(v.number()) })),

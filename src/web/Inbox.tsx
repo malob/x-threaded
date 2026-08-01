@@ -212,6 +212,9 @@ export function Inbox({ onOpenPost }: { onOpenPost: (postId: string) => void }) 
       const parts = [];
       if (result.added > 0) parts.push(`+${result.added} new`);
       if (result.removed > 0) parts.push(`−${result.removed} un-bookmarked`);
+      // Still bookmarked on X, but the post can't be fetched (deleted, or the
+      // author went private) — without this the bookmark just never shows up.
+      if (result.unavailable > 0) parts.push(`${result.unavailable} unavailable`);
       // An unfinished scan can't tell "un-bookmarked" from "past the page
       // cap", so the server skips removals — say so instead of "up to date".
       if (!result.complete) parts.push("partial scan — removals skipped");

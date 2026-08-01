@@ -450,7 +450,10 @@ describe("GET /api/me/posts — grouping into threads", () => {
     const root = makePost({ authorId: SELF_USER_ID, createdAt: EARLIER });
     const continuation = replyTo(root, { authorId: SELF_USER_ID, createdAt: LATER });
     xapi.onGetOwnPosts = () => ({ posts: [continuation] });
-    xapi.onGetPostsByIds = (ids) => (ids.includes(root.id) ? [root] : []);
+    xapi.onGetPostsByIds = (ids) => ({
+      posts: ids.includes(root.id) ? [root] : [],
+      missing: [],
+    });
 
     const body = (await (await app.request("/api/me/posts")).json()) as OwnPostsResponse;
 

@@ -89,6 +89,13 @@ export interface ConversationPage {
   nextToken?: string;
 }
 
+/** A requested post the lookup couldn't return. */
+export interface MissingPost {
+  id: string;
+  /** X's stated reason ("Not Found Error", "Authorization Error") when it gave one. */
+  reason?: string;
+}
+
 export interface SearchPageOptions {
   /** Between MIN_SEARCH_PAGE_SIZE and SEARCH_PAGE_SIZE; the caller's budget. */
   maxResults: number;
@@ -388,7 +395,9 @@ export class XApi {
     userId: string,
     folderId: string,
     maxPages = 10,
-  ): Promise<Billed<{ posts: Post[]; ids: string[]; complete: boolean }>> {
+  ): Promise<
+    Billed<{ posts: Post[]; ids: string[]; missing: MissingPost[]; complete: boolean }>
+  > {
     const ids: string[] = [];
     let paginationToken: string | undefined;
     let complete = false;
@@ -409,14 +418,17 @@ export class XApi {
           break;
         }
       }
-      // ids and posts are returned separately: hydration can silently drop a
-      // post whose author went private or deleted it, and a bookmark that
-      // failed to hydrate is still a bookmark — reconciling removals against
-      // the hydrated subset would delete it (Stage 0 adversarial review).
+      // ids and posts are returned separately: hydration can drop a post
+      // whose author went private or deleted it, and a bookmark that failed
+      // to hydrate is still a bookmark — reconciling removals against the
+      // hydrated subset would delete it (Stage 0 adversarial review).
+      // `missing` names those drops so callers can report them.
       const hydrated =
-        ids.length > 0 ? await this.getPostsByIds(ids) : { value: [], receipt: NO_READS };
+        ids.length > 0
+          ? await this.getPostsByIds(ids)
+          : { value: { posts: [], missing: [] }, receipt: NO_READS };
       return {
-        value: { posts: hydrated.value, ids, complete },
+        value: { ...hydrated.value, ids, complete },
         receipt: addReceipts(ownedReads(ids.length), hydrated.receipt),
       };
     } catch (err) {
@@ -446,9 +458,17 @@ export class XApi {
   /**
    * Fetch specific posts by ID (up to 100 per request), media fully resolved.
    * Billed per post returned, so ids X had nothing for cost nothing.
+   *
+   * Requested ids that come back without a post are returned in `missing`
+   * rather than silently dropped — a bookmark whose author went private is
+   * still a bookmark, and callers can only say so when the loss is visible.
+   * Reasons come from the response's partial-error entries (attributed by
+   * resource_id), with absence-from-data as the backstop for anything X
+   * failed to explain.
    */
-  async getPostsByIds(ids: string[]): Promise<Billed<Post[]>> {
-    const results: Post[] = [];
+  async getPostsByIds(ids: string[]): Promise<Billed<{ posts: Post[]; missing: MissingPost[] }>> {
+    const posts: Post[] = [];
+    const reasons = new Map<string, string | undefined>();
     try {
       for (let i = 0; i < ids.length; i += 100) {
         const page = await this.get("/tweets", SearchPageSchema, {
@@ -462,13 +482,21 @@ export class XApi {
         const media = mediaMap(page.includes);
         const fetchedAt = new Date().toISOString();
         for (const tweet of page.data ?? []) {
-          results.push(toPost(tweet, users, media, fetchedAt));
+          posts.push(toPost(tweet, users, media, fetchedAt));
+        }
+        for (const error of page.errors ?? []) {
+          const id = error.resource_id ?? error.value;
+          if (id) reasons.set(id, error.title ?? error.detail);
         }
       }
     } catch (err) {
-      throw withSpent(err, postReads(results.length));
+      throw withSpent(err, postReads(posts.length));
     }
-    return { value: results, receipt: postReads(results.length) };
+    const returned = new Set(posts.map((p) => p.id));
+    const missing = ids
+      .filter((id) => !returned.has(id))
+      .map((id) => ({ id, reason: reasons.get(id) }));
+    return { value: { posts, missing }, receipt: postReads(posts.length) };
   }
 
   /**
