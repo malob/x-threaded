@@ -1,20 +1,16 @@
-import { useEffect, useState } from "react";
-import type {
-  AuthStatus,
-  OwnPostsResponse,
-  SavedListResponse,
-  SettingsResponse,
-} from "../shared/types";
+import { useState } from "react";
+import type { AuthStatus, SettingsResponse, SyncResponse } from "../shared/types";
 import {
-  getAuthStatus,
-  getFolders,
-  getOwnPosts,
-  getSaved,
-  getSettings,
-  removeSaved,
-  setBookmarkFolder,
-  syncBookmarks,
-} from "./api";
+  useAuthStatus,
+  useFolders,
+  useOwnPosts,
+  useRemoveSaved,
+  useSaved,
+  useSetBookmarkFolder,
+  useSettings,
+  useSyncBookmarks,
+  type OwnPostsScan,
+} from "./queries";
 import { PostView } from "./PostView";
 import { estimateFetchUsd, formatUsd } from "../shared/pricing";
 import { xPostUrl } from "../shared/urls";
@@ -24,9 +20,13 @@ type Tab = "saved" | "yours";
 /**
  * Whether opening this card costs anything, shown so clicking is informed
  * consent — inbox clicks fetch straight away rather than prompting.
+ *
+ * A loaded conversation is cheap, not free: opening one on a new UTC day
+ * refreshes it, and that read bills. So the tag says what we know — the
+ * conversation is here — and stops short of a promise the click can't keep.
  */
 function FetchCost({ loaded, replyCount }: { loaded: boolean; replyCount: number }) {
-  if (loaded) return <span className="cost-tag cost-free">loaded · free</span>;
+  if (loaded) return <span className="cost-tag cost-free">loaded</span>;
   return (
     <span className="cost-tag" title="Estimated from the reply count; the real total is usually within about 30%">
       unfetched · {formatUsd(estimateFetchUsd(replyCount))}
@@ -35,7 +35,10 @@ function FetchCost({ loaded, replyCount }: { loaded: boolean; replyCount: number
 }
 
 /** Prompt to authorize X, shown wherever user-context features are needed. */
-function ConnectPrompt({ auth }: { auth: AuthStatus | null }) {
+function ConnectPrompt({ auth }: { auth: AuthStatus | undefined }) {
+  // Undefined means we don't know yet, or couldn't find out. Either way this
+  // says nothing: claiming "no OAuth credentials" on a failed status call
+  // would be an accusation against the deployment, not a fact.
   if (!auth || auth.state === "authorized") return null;
   if (auth.state === "unconfigured") {
     return (
@@ -71,30 +74,31 @@ function FolderBar({
   syncing,
   syncNote,
 }: {
-  settings: SettingsResponse | null;
+  settings: SettingsResponse | undefined;
   onChange: (id: string | null, name: string) => void;
   onSync: () => void;
   syncing: boolean;
   syncNote: string | null;
 }) {
-  const [folders, setFolders] = useState<{ id: string; name: string }[] | null>(null);
   const [picking, setPicking] = useState(false);
-
-  const openPicker = () => {
-    setPicking(true);
-    if (!folders) {
-      getFolders()
-        .then((r) => setFolders(r.folders))
-        .catch(() => setFolders([]));
-    }
-  };
+  const folders = useFolders(picking);
+  const folderList = folders.data;
 
   if (picking) {
     return (
       <p className="notice">
-        {folders === null ? (
+        {folders.error ? (
+          // A failed call used to render as "no folders found — create one on
+          // x.com", which sends the reader to fix something that isn't broken.
+          <>
+            couldn’t load folders — {folders.error.message} ·{" "}
+            <button className="notice-btn" onClick={() => void folders.refetch()}>
+              retry
+            </button>
+          </>
+        ) : !folderList ? (
           "loading folders…"
-        ) : folders.length === 0 ? (
+        ) : folderList.folders.length === 0 ? (
           <>no bookmark folders found — create one on x.com, then reopen this picker</>
         ) : (
           <>
@@ -103,13 +107,13 @@ function FolderBar({
               defaultValue={settings?.bookmarkFolderId ?? ""}
               onChange={(e) => {
                 const id = e.target.value || null;
-                const name = folders.find((f) => f.id === id)?.name ?? "";
+                const name = folderList.folders.find((f) => f.id === id)?.name ?? "";
                 onChange(id, name);
                 setPicking(false);
               }}
             >
               <option value="">— none —</option>
-              {folders.map((f) => (
+              {folderList.folders.map((f) => (
                 <option key={f.id} value={f.id}>
                   {f.name}
                 </option>
@@ -130,7 +134,7 @@ function FolderBar({
       {settings?.bookmarkFolderId ? (
         <>
           syncing from{" "}
-          <button className="notice-btn" onClick={openPicker}>
+          <button className="notice-btn" onClick={() => setPicking(true)}>
             {settings.bookmarkFolderName || "a folder"} ▾
           </button>{" "}
           ·{" "}
@@ -139,13 +143,30 @@ function FolderBar({
           </button>
         </>
       ) : (
-        <button className="notice-btn" onClick={openPicker}>
+        <button className="notice-btn" onClick={() => setPicking(true)}>
           choose a bookmark folder to sync ▾
         </button>
       )}
       {syncNote && <span className="new-badge"> · {syncNote}</span>}
     </p>
   );
+}
+
+/** What a finished sync is worth saying out loud. */
+function describeSync(result: SyncResponse): string {
+  const parts = [];
+  if (result.added > 0) parts.push(`+${result.added} new`);
+  if (result.removed > 0) parts.push(`−${result.removed} un-bookmarked`);
+  // Still bookmarked on X, but the post can't be fetched (deleted, or the
+  // author went private) — without this the bookmark just never shows up.
+  if (result.unavailable > 0) parts.push(`${result.unavailable} unavailable`);
+  // An unfinished scan can't tell "un-bookmarked" from "past the page
+  // cap", so the server skips removals — say so instead of "up to date".
+  if (!result.complete) parts.push("partial scan — removals skipped");
+  // Syncing a folder reads every post in it, and a large one is dollars:
+  // the note is the only place that spend is ever visible.
+  if (result.cost.billable > 0) parts.push(`cost ${formatUsd(result.cost.usd, false)}`);
+  return parts.length > 0 ? parts.join(" · ") : "up to date";
 }
 
 const TAB_KEY = "inboxTab";
@@ -159,126 +180,91 @@ export function Inbox({ onOpenPost }: { onOpenPost: (postId: string) => void }) 
     setTabState(next);
     localStorage.setItem(TAB_KEY, next);
   };
-  const [saved, setSaved] = useState<SavedListResponse | null>(null);
-  const [own, setOwn] = useState<OwnPostsResponse | null>(null);
-  const [settings, setSettings] = useState<SettingsResponse | null>(null);
-  const [syncing, setSyncing] = useState(false);
+  /** Bumping this is how the tab buys a timeline scan; see `useOwnPosts`. */
+  const [scan, setScan] = useState<OwnPostsScan>({ threads: 10, attempt: 0 });
   const [syncNote, setSyncNote] = useState<string | null>(null);
-  const [loadingOwn, setLoadingOwn] = useState(false);
-  /** How many threads the Your posts tab is currently asking for. */
-  const [ownTarget, setOwnTarget] = useState(10);
-  const [auth, setAuth] = useState<AuthStatus | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  /** Failures from the writes; the reads carry their own errors. */
+  const [actionError, setActionError] = useState<string | null>(null);
 
-  const loadSaved = () => {
-    getSaved()
-      .then(setSaved)
-      .catch((e: Error) => setError(e.message));
-  };
+  const saved = useSaved();
+  const settings = useSettings();
+  const authQuery = useAuthStatus();
+  const auth = authQuery.data;
+  const authorized = auth?.state === "authorized";
+  const own = useOwnPosts(scan, tab === "yours" && authorized);
+  const savedList = saved.data;
+  const ownList = own.data;
 
-  useEffect(() => {
-    loadSaved();
-    getSettings()
-      .then(setSettings)
-      .catch(() => setSettings(null));
-    getAuthStatus()
-      .then(setAuth)
-      .catch(() => setAuth(null));
-  }, []);
+  const sync = useSyncBookmarks();
+  const setFolder = useSetBookmarkFolder();
+  const removeSaved = useRemoveSaved();
 
-  const loadOwn = (threads = ownTarget) => {
-    setLoadingOwn(true);
-    setError(null);
-    getOwnPosts(threads)
-      .then((r) => {
-        setOwn(r);
-        setOwnTarget(threads);
-      })
-      .catch((e: Error) => setError(e.message))
-      .finally(() => setLoadingOwn(false));
-  };
-
-  // Your posts cost real API reads, so fetch them on first view, not on mount.
-  useEffect(() => {
-    // loadOwn() flips the loading flag before it awaits, which is the setState
-    // the rule objects to. Kicking off a fetch when the tab becomes visible is
-    // what an effect is for, and this is about to become a query anyway.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    if (tab === "yours" && auth?.state === "authorized" && !own && !loadingOwn) loadOwn();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tab, auth]);
-
-  const sync = async () => {
-    setSyncing(true);
+  const runSync = () => {
     setSyncNote(null);
-    try {
-      const result = await syncBookmarks();
-      const parts = [];
-      if (result.added > 0) parts.push(`+${result.added} new`);
-      if (result.removed > 0) parts.push(`−${result.removed} un-bookmarked`);
-      // Still bookmarked on X, but the post can't be fetched (deleted, or the
-      // author went private) — without this the bookmark just never shows up.
-      if (result.unavailable > 0) parts.push(`${result.unavailable} unavailable`);
-      // An unfinished scan can't tell "un-bookmarked" from "past the page
-      // cap", so the server skips removals — say so instead of "up to date".
-      if (!result.complete) parts.push("partial scan — removals skipped");
-      // Syncing a folder reads every post in it, and a large one is dollars:
-      // the note is the only place that spend is ever visible.
-      if (result.cost.billable > 0) parts.push(`cost ${formatUsd(result.cost.usd, false)}`);
-      setSyncNote(parts.length > 0 ? parts.join(" · ") : "up to date");
-      loadSaved();
-    } catch (e) {
-      setError((e as Error).message);
-    } finally {
-      setSyncing(false);
-    }
+    setActionError(null);
+    sync.mutate(undefined, {
+      onSuccess: (result) => setSyncNote(describeSync(result)),
+      onError: (e) => setActionError(e.message),
+    });
   };
 
-  const changeFolder = async (id: string | null, name: string) => {
-    try {
-      setSettings(await setBookmarkFolder(id, name));
-      if (id) void sync();
-    } catch (e) {
-      setError((e as Error).message);
-    }
+  const changeFolder = (id: string | null, name: string) => {
+    setActionError(null);
+    setFolder.mutate(
+      { id, name },
+      {
+        // Picking a folder is only half the instruction; the list is empty
+        // until it has been scanned.
+        onSuccess: () => {
+          if (id) runSync();
+        },
+        onError: (e) => setActionError(e.message),
+      },
+    );
   };
 
-  const drop = async (postId: string) => {
-    try {
-      await removeSaved(postId);
-      loadSaved();
-    } catch (e) {
-      setError((e as Error).message);
-    }
+  const drop = (postId: string) => {
+    setActionError(null);
+    removeSaved.mutate(postId, { onError: (e) => setActionError(e.message) });
   };
+
+  const errorMessage = actionError ?? saved.error?.message ?? own.error?.message ?? null;
 
   return (
     <div>
       <div className="tabs">
         <button className={tab === "saved" ? "tab active" : "tab"} onClick={() => setTab("saved")}>
-          Saved{saved ? ` (${saved.items.length})` : ""}
+          Saved{savedList ? ` (${savedList.items.length})` : ""}
         </button>
         <button className={tab === "yours" ? "tab active" : "tab"} onClick={() => setTab("yours")}>
           Your posts
         </button>
       </div>
 
-      {error && <div className="error">{error}</div>}
-      <ConnectPrompt auth={auth} />
+      {errorMessage && <div className="error">{errorMessage}</div>}
+      {authQuery.error ? (
+        // Not knowing is a state of its own: without this the tab simply went
+        // blank, and the reader had no idea anything had failed. The wording
+        // avoids repeating the message, which often already says "auth status
+        // unavailable (500)".
+        <p className="notice">couldn’t check your X connection — {authQuery.error.message}</p>
+      ) : (
+        <ConnectPrompt auth={auth} />
+      )}
 
       {tab === "saved" ? (
         <>
-          {auth?.state === "authorized" && (
+          {authorized && (
             <FolderBar
-              settings={settings}
+              settings={settings.data}
               onChange={changeFolder}
-              onSync={() => void sync()}
-              syncing={syncing}
+              onSync={runSync}
+              syncing={sync.isPending}
               syncNote={syncNote}
             />
           )}
           <ul className="conversations">
-            {saved?.items.map((item) => (
+            {savedList?.items.map((item) => (
               <li
                 key={item.post.id}
                 onClick={(e) => {
@@ -286,7 +272,7 @@ export function Inbox({ onOpenPost }: { onOpenPost: (postId: string) => void }) 
                   onOpenPost(item.post.id);
                 }}
               >
-                <PostView post={item.post} quoted={saved.quoted} />
+                <PostView post={item.post} quoted={savedList.quoted} />
                 <div className="post-meta inbox-meta">
                   <FetchCost loaded={item.loaded} replyCount={item.post.metrics.replies} />
                   {item.source === "bookmark" ? "bookmarked" : "added here"} ·{" "}
@@ -302,7 +288,7 @@ export function Inbox({ onOpenPost }: { onOpenPost: (postId: string) => void }) 
                       un-bookmark on x.com ↗
                     </a>
                   ) : (
-                    <button className="notice-btn" onClick={() => void drop(item.post.id)}>
+                    <button className="notice-btn" onClick={() => drop(item.post.id)}>
                       remove
                     </button>
                   )}
@@ -310,7 +296,7 @@ export function Inbox({ onOpenPost }: { onOpenPost: (postId: string) => void }) 
               </li>
             ))}
           </ul>
-          {saved?.items.length === 0 && (
+          {savedList?.items.length === 0 && (
             <p className="notice">
               nothing saved yet — bookmark posts into your folder on x.com, or paste a URL above
             </p>
@@ -320,16 +306,22 @@ export function Inbox({ onOpenPost }: { onOpenPost: (postId: string) => void }) 
         <>
           <p className="notice">
             {auth.user ? `@${auth.user.username} · ` : ""}
-            your recent threads{own ? ` (${own.items.length})` : ""} ·{" "}
-            <button className="notice-btn" onClick={() => loadOwn(10)} disabled={loadingOwn}>
-              {loadingOwn ? "loading…" : "refresh"}
+            your recent threads{ownList ? ` (${ownList.items.length})` : ""} ·{" "}
+            <button
+              className="notice-btn"
+              onClick={() => setScan((previous) => ({ threads: 10, attempt: previous.attempt + 1 }))}
+              disabled={own.isFetching}
+            >
+              {own.isFetching ? "loading…" : "refresh"}
             </button>
             {/* Scanning the timeline is an Owned Read per post, so asking for
                 more threads is a purchase, not a page turn. */}
-            {own && own.cost.billable > 0 && <> · scan {formatUsd(own.cost.usd, false)}</>}
+            {ownList && ownList.cost.billable > 0 && (
+              <> · scan {formatUsd(ownList.cost.usd, false)}</>
+            )}
           </p>
           <ul className="conversations">
-            {own?.items.map((item) => (
+            {ownList?.items.map((item) => (
               <li
                 key={item.root.id}
                 onClick={(e) => {
@@ -337,7 +329,7 @@ export function Inbox({ onOpenPost }: { onOpenPost: (postId: string) => void }) 
                   onOpenPost(item.root.id);
                 }}
               >
-                <PostView post={item.root} quoted={own.quoted} />
+                <PostView post={item.root} quoted={ownList.quoted} />
                 <div className="post-meta inbox-meta">
                   <FetchCost loaded={item.loaded} replyCount={item.root.metrics.replies} />
                   {item.ownPostCount > 1 && <>thread of {item.ownPostCount} · </>}
@@ -347,15 +339,17 @@ export function Inbox({ onOpenPost }: { onOpenPost: (postId: string) => void }) 
               </li>
             ))}
           </ul>
-          {own?.items.length === 0 && <p className="notice">no recent posts found</p>}
-          {own?.hasMore && (
+          {ownList?.items.length === 0 && <p className="notice">no recent posts found</p>}
+          {ownList?.hasMore && (
             <p className="notice">
               <button
                 className="notice-btn"
-                onClick={() => loadOwn(ownTarget + 10)}
-                disabled={loadingOwn}
+                onClick={() =>
+                  setScan((previous) => ({ ...previous, threads: previous.threads + 10 }))
+                }
+                disabled={own.isFetching}
               >
-                {loadingOwn ? "loading…" : "load 10 more"}
+                {own.isFetching ? "loading…" : "load 10 more"}
               </button>
             </p>
           )}

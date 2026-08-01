@@ -1,63 +1,63 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import type { ConversationResponse } from "../shared/types";
+import { resolvePost } from "./api";
 import {
-  getConversation,
-  loadConversation,
-  markConversationRead,
-  refreshConversation,
-  resolvePost,
-  resumeConversation,
-  setReadState,
-} from "./api";
+  conversationQueryOptions,
+  useConversation,
+  useLoadConversation,
+  useMarkAllRead,
+  useRefreshConversation,
+  useResumeConversation,
+  useSetRead,
+} from "./queries";
 import { Inbox } from "./Inbox";
 import { Thread } from "./Thread";
 import { estimateFetchUsd, formatUsd } from "../shared/pricing";
 import { appPath, parsePostPath, xPostUrl } from "../shared/urls";
 
 export function App() {
+  const queryClient = useQueryClient();
   const [url, setUrl] = useState("");
-  const [current, setCurrent] = useState<ConversationResponse | null>(null);
+  /** The conversation on screen; its posts live in the query cache, not here. */
+  const [rootId, setRootId] = useState<string | null>(null);
+  /**
+   * Which post the route points at. This is where the reader is, not part of
+   * the conversation, so it survives refreshes and resumes on its own instead
+   * of being carried through every response.
+   */
+  const [focusId, setFocusId] = useState<string | null>(null);
   /** Post ID from a deep link whose conversation isn't cached; awaiting consent to fetch. */
   const [pending, setPending] = useState<string | null>(null);
   /** Estimated cost of fetching `pending`, when the post itself is cached. */
   const [pendingCost, setPendingCost] = useState<number | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [refreshing, setRefreshing] = useState(false);
-  const [resuming, setResuming] = useState(false);
-  const [newCount, setNewCount] = useState<number | null>(null);
+  /** What the last refresh found, tagged with the conversation it looked at. */
+  const [newCount, setNewCount] = useState<{ rootId: string; count: number } | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  // The inbox reloads itself whenever it mounts, so leaving a conversation is
-  // enough to pick up new read state — no cross-component refresh plumbing.
-  const autoRefresh = async (rootId: string) => {
-    setRefreshing(true);
-    try {
-      const fresh = await refreshConversation(rootId);
-      // Keep the deep-link focus; the refresh response doesn't know about it.
-      setCurrent((prev) => ({ ...fresh, focusId: prev?.focusId ?? null }));
-      setNewCount(fresh.newCount);
-    } catch (e) {
-      setError((e as Error).message);
-    } finally {
-      setRefreshing(false);
-    }
-  };
+  const conversationQuery = useConversation(rootId);
+  const load = useLoadConversation();
+  const refresh = useRefreshConversation({
+    onRefreshed: (id, fresh) => setNewCount({ rootId: id, count: fresh.newCount }),
+    onError: setError,
+  });
+  const resume = useResumeConversation({ onError: setError });
+  const setRead = useSetRead({ onError: setError });
+  const markAllRead = useMarkAllRead({ onError: setError });
 
-  /**
-   * Buy the history a stopped fetch never reached. Deliberately manual: the
-   * conversation reads fine without it, and going back for the older replies
-   * costs money, so it happens when someone asks for it.
-   */
-  const resumeOlder = async (rootId: string) => {
-    setResuming(true);
-    try {
-      const older = await resumeConversation(rootId);
-      setCurrent((prev) => ({ ...older, focusId: prev?.focusId ?? null }));
-    } catch (e) {
-      setError((e as Error).message);
-    } finally {
-      setResuming(false);
-    }
+  const data = conversationQuery.data;
+  const conversation = useMemo(() => (data ? { ...data, focusId } : null), [data, focusId]);
+
+  /** Show a conversation the API just handed us, and put it in the URL. */
+  const showLoaded = (response: ConversationResponse, push: boolean) => {
+    setRootId(response.rootId);
+    setFocusId(response.focusId);
+    setPending(null);
+    const shownId = response.focusId ?? response.rootId;
+    const post = response.posts.find((p) => p.id === shownId);
+    const path = appPath(post?.authorHandle, shownId);
+    if (push) history.pushState({}, "", path);
+    else history.replaceState({}, "", path);
   };
 
   /**
@@ -72,13 +72,13 @@ export function App() {
     setNewCount(null);
     setPending(null);
     try {
-      const { rootId, replyCount } = await resolvePost(postId);
-      if (!rootId) {
+      const { rootId: resolved, replyCount } = await resolvePost(postId);
+      if (!resolved) {
         if (fetchIfMissing) {
           await fetchConversation(postId, push);
           return;
         }
-        setCurrent(null);
+        setRootId(null);
         setPending(postId);
         setPendingCost(replyCount === null ? null : estimateFetchUsd(replyCount));
         // Route to the post anyway, so reloading returns to this prompt
@@ -87,14 +87,22 @@ export function App() {
         if (push) history.pushState({}, "", appPath(undefined, postId));
         return;
       }
-      const cached = await getConversation(rootId);
-      const focusId = postId === rootId ? null : postId;
-      setCurrent({ ...cached, focusId });
+      // Read the stored conversation now rather than serve the slot's contents:
+      // it is free, and a slot filled by an earlier refresh still carries that
+      // refresh's cost receipt, which this open did not incur.
+      const cached = await queryClient.fetchQuery({
+        ...conversationQueryOptions(resolved),
+        staleTime: 0,
+      });
+      setRootId(resolved);
+      setFocusId(postId === resolved ? null : postId);
       if (push) {
         const post = cached.posts.find((p) => p.id === postId);
         history.pushState({}, "", appPath(post?.authorHandle, postId));
       }
-      void autoRefresh(rootId);
+      // The inbox reloads itself whenever it mounts, so leaving a conversation
+      // is enough to pick up new read state — no cross-component plumbing.
+      refresh.refresh(resolved);
     } catch (e) {
       setError((e as Error).message);
     }
@@ -102,21 +110,11 @@ export function App() {
 
   /** Fetch a conversation from the API and show it. */
   const fetchConversation = async (postId: string, push = true) => {
-    setLoading(true);
     setError(null);
     try {
-      const response = await loadConversation(postId);
-      setCurrent(response);
-      setPending(null);
-      const shownId = response.focusId ?? response.rootId;
-      const post = response.posts.find((p) => p.id === shownId);
-      const path = appPath(post?.authorHandle, shownId);
-      if (push) history.pushState({}, "", path);
-      else history.replaceState({}, "", path);
+      showLoaded(await load.mutateAsync(postId), push);
     } catch (e) {
       setError((e as Error).message);
-    } finally {
-      setLoading(false);
     }
   };
 
@@ -125,7 +123,8 @@ export function App() {
   };
 
   const goHome = (push = true) => {
-    setCurrent(null);
+    setRootId(null);
+    setFocusId(null);
     setNewCount(null);
     setPending(null);
     if (push) history.pushState({}, "", "/");
@@ -144,54 +143,29 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    if (!current) {
+    if (!data) {
       document.title = "x-threaded";
       return;
     }
-    const root = current.posts.find((p) => p.id === current.rootId);
-    const snippet = root ? `@${root.authorHandle}: ${root.text.slice(0, 60)}` : current.rootId;
+    const root = data.posts.find((p) => p.id === data.rootId);
+    const snippet = root ? `@${root.authorHandle}: ${root.text.slice(0, 60)}` : data.rootId;
     document.title = `${snippet} — x-threaded`;
-  }, [current]);
+  }, [data]);
 
   const submitUrl = async () => {
-    setLoading(true);
     setError(null);
     setNewCount(null);
     try {
-      const response = await loadConversation(url);
-      setCurrent(response);
-      setPending(null);
-      const shownId = response.focusId ?? response.rootId;
-      const post = response.posts.find((p) => p.id === shownId);
-      history.pushState({}, "", appPath(post?.authorHandle, shownId));
-      if (response.fromCache) void autoRefresh(response.rootId);
+      const response = await load.mutateAsync(url);
+      showLoaded(response, true);
+      if (response.fromCache) refresh.refresh(response.rootId);
     } catch (e) {
       setError((e as Error).message);
-    } finally {
-      setLoading(false);
     }
   };
 
-  const setRead = (ids: string[], read: boolean) => {
-    setCurrent((prev) => {
-      if (!prev) return prev;
-      setReadState(ids, read).catch((e: Error) => setError(e.message));
-      const unread = new Set(prev.unreadIds);
-      for (const id of ids) {
-        if (read) unread.delete(id);
-        else unread.add(id);
-      }
-      return { ...prev, unreadIds: [...unread] };
-    });
-  };
-
-  const markAllRead = () => {
-    setCurrent((prev) => {
-      if (!prev) return prev;
-      markConversationRead(prev.rootId).catch((e: Error) => setError(e.message));
-      return { ...prev, unreadIds: [] };
-    });
-  };
+  const loading = load.isPending;
+  const errorMessage = error ?? conversationQuery.error?.message ?? null;
 
   return (
     <main>
@@ -210,14 +184,14 @@ export function App() {
         <button type="submit" disabled={loading}>
           {loading ? "Loading…" : "Load"}
         </button>
-        {(current || pending) && (
+        {(conversation || pending) && (
           <button type="button" onClick={() => goHome()}>
             Back
           </button>
         )}
       </form>
 
-      {error && <div className="error">{error}</div>}
+      {errorMessage && <div className="error">{errorMessage}</div>}
 
       {pending ? (
         <div className="load-prompt">
@@ -235,16 +209,17 @@ export function App() {
             </a>
           </p>
         </div>
-      ) : current ? (
+      ) : conversation ? (
         <Thread
-          conversation={current}
-          refreshing={refreshing}
-          resuming={resuming}
-          newCount={newCount}
-          onRefresh={() => void autoRefresh(current.rootId)}
-          onResume={() => void resumeOlder(current.rootId)}
-          onSetRead={setRead}
-          onMarkAllRead={markAllRead}
+          key={conversation.rootId}
+          conversation={conversation}
+          refreshing={refresh.refreshingRootId === conversation.rootId}
+          resuming={resume.resumingRootId === conversation.rootId}
+          newCount={newCount?.rootId === conversation.rootId ? newCount.count : null}
+          onRefresh={() => refresh.refresh(conversation.rootId)}
+          onResume={() => resume.resume(conversation.rootId)}
+          onSetRead={(ids, read) => setRead.mutate({ rootId: conversation.rootId, ids, read })}
+          onMarkAllRead={() => markAllRead.mutate(conversation.rootId)}
         />
       ) : (
         <Inbox onOpenPost={(postId) => void openPost(postId, true, true)} />

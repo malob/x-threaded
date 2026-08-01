@@ -42,24 +42,30 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return body as T;
 }
 
-export function resolvePost(postId: string): Promise<ResolveResponse> {
-  return request(`/api/resolve/${postId}`);
+/**
+ * The GETs take an optional `AbortSignal` so a query can hand them the one
+ * TanStack cancels when nobody is waiting for the answer any more. Mutations
+ * don't: a write that has left the browser has to be seen through.
+ */
+export function resolvePost(postId: string, signal?: AbortSignal): Promise<ResolveResponse> {
+  return request(`/api/resolve/${postId}`, { signal });
 }
 
-export function getSaved(): Promise<SavedListResponse> {
-  return request("/api/saved");
+export function getSaved(signal?: AbortSignal): Promise<SavedListResponse> {
+  return request("/api/saved", { signal });
 }
 
 export function removeSaved(postId: string): Promise<OkResponse> {
   return request(`/api/saved/${postId}`, { method: "DELETE" });
 }
 
-export function getOwnPosts(threads = 10): Promise<OwnPostsResponse> {
-  return request(`/api/me/posts?threads=${threads}`);
+/** The one GET that bills; `useOwnPosts` explains why its caller withholds the signal. */
+export function getOwnPosts(threads = 10, signal?: AbortSignal): Promise<OwnPostsResponse> {
+  return request(`/api/me/posts?threads=${threads}`, { signal });
 }
 
-export function getSettings(): Promise<SettingsResponse> {
-  return request("/api/settings");
+export function getSettings(signal?: AbortSignal): Promise<SettingsResponse> {
+  return request("/api/settings", { signal });
 }
 
 export function setBookmarkFolder(
@@ -73,17 +79,17 @@ export function setBookmarkFolder(
   });
 }
 
-export function getFolders(): Promise<FoldersResponse> {
-  return request("/api/bookmarks/folders");
+export function getFolders(signal?: AbortSignal): Promise<FoldersResponse> {
+  return request("/api/bookmarks/folders", { signal });
 }
 
 const AUTH_STATES: readonly string[] = ["unconfigured", "unauthorized", "broken", "authorized"];
 
-export async function getAuthStatus(): Promise<AuthStatus> {
+export async function getAuthStatus(signal?: AbortSignal): Promise<AuthStatus> {
   // Unlike other endpoints, a non-2xx here is still a meaningful answer — as
   // long as it is one of the four states. Anything else would be an error
   // body wearing the union's clothes, so it goes to the caller's catch.
-  const response = await fetch("/api/auth/status");
+  const response = await fetch("/api/auth/status", { signal });
   expectJson(response);
   const body = (await response.json()) as { state?: string };
   if (!AUTH_STATES.includes(body.state ?? "")) {
@@ -96,8 +102,11 @@ export function syncBookmarks(): Promise<SyncResponse> {
   return request("/api/bookmarks/sync", { method: "POST" });
 }
 
-export function getConversation(rootId: string): Promise<ConversationResponse> {
-  return request(`/api/conversations/${rootId}`);
+export function getConversation(
+  rootId: string,
+  signal?: AbortSignal,
+): Promise<ConversationResponse> {
+  return request(`/api/conversations/${rootId}`, { signal });
 }
 
 export function loadConversation(url: string, force = false): Promise<ConversationResponse> {
