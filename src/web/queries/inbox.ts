@@ -96,12 +96,28 @@ export interface OwnPostsScan {
  * - `gcTime: Infinity` — a scan the reader paid for is theirs for the session.
  *   Without it, stepping into a conversation for five minutes would quietly
  *   re-bill on the way back.
+ *
+ * A failed scan is the sharp edge. A query that errored holds no data, and
+ * query-core treats "no data" as stale whatever `staleTime` says, so the
+ * library considers a re-fetch due from then on: flipping to the saved tab and
+ * back (`enabled` false→true) or remounting the inbox (`retryOnMount` defaults
+ * to true) would each re-issue the scan, and a scan that fails at X can bill
+ * on the way. Hence both `retryOnMount: false` and a key that stays disabled
+ * once it has errored. The invariant: after a failed scan, no code path may
+ * re-issue a billable request until a click mints a new attempt. "Refresh"
+ * mints one, which is why the error is rendered next to that button.
  */
 export function useOwnPosts(scan: OwnPostsScan, enabled: boolean) {
+  const queryClient = useQueryClient();
+  const key = ownPostsKey(scan.threads, scan.attempt);
+  // Read out of the cache rather than from this hook's own result, so the gate
+  // holds across a remount: the failure outlives the component that saw it.
+  const failed = queryClient.getQueryState(key)?.status === "error";
   return useQuery({
-    queryKey: ownPostsKey(scan.threads, scan.attempt),
+    queryKey: key,
     queryFn: () => getOwnPosts(scan.threads),
-    enabled,
+    enabled: enabled && !failed,
+    retryOnMount: false,
     gcTime: Infinity,
     // Keep the current list on screen while a bigger scan runs, so "load 10
     // more" doesn't blank the list it is extending.

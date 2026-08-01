@@ -171,6 +171,18 @@ function describeSync(result: SyncResponse): string {
 
 const TAB_KEY = "inboxTab";
 
+/**
+ * The scan the Your-posts tab is on, kept outside the component because the
+ * inbox unmounts every time a conversation is opened.
+ *
+ * As component state it rewound to attempt 0 on the way back, so the tab
+ * showed the first scan again and the next "refresh" click asked for a key the
+ * cache already held — answering a request to go and buy a new scan out of the
+ * old one. A page reload does reset it, deliberately: the QueryClient is new
+ * then too, so attempt 0 is genuinely unbought.
+ */
+let lastScan: OwnPostsScan = { threads: 10, attempt: 0 };
+
 export function Inbox({ onOpenPost }: { onOpenPost: (postId: string) => void }) {
   // Remembered across reloads and across trips into a conversation.
   const [tab, setTabState] = useState<Tab>(() =>
@@ -181,7 +193,11 @@ export function Inbox({ onOpenPost }: { onOpenPost: (postId: string) => void }) 
     localStorage.setItem(TAB_KEY, next);
   };
   /** Bumping this is how the tab buys a timeline scan; see `useOwnPosts`. */
-  const [scan, setScan] = useState<OwnPostsScan>({ threads: 10, attempt: 0 });
+  const [scan, setScanState] = useState<OwnPostsScan>(() => lastScan);
+  const setScan = (next: OwnPostsScan) => {
+    lastScan = next;
+    setScanState(next);
+  };
   const [syncNote, setSyncNote] = useState<string | null>(null);
   /** Failures from the writes; the reads carry their own errors. */
   const [actionError, setActionError] = useState<string | null>(null);
@@ -228,7 +244,11 @@ export function Inbox({ onOpenPost }: { onOpenPost: (postId: string) => void }) 
     removeSaved.mutate(postId, { onError: (e) => setActionError(e.message) });
   };
 
-  const errorMessage = actionError ?? saved.error?.message ?? own.error?.message ?? null;
+  // A failed scan now stays failed until someone clicks "refresh" (see
+  // `useOwnPosts`), so its message has to appear where that button is: on the
+  // saved tab it would be an error about another tab with no way to retry it.
+  const ownError = tab === "yours" ? own.error?.message : undefined;
+  const errorMessage = actionError ?? saved.error?.message ?? ownError ?? null;
 
   return (
     <div>
@@ -309,7 +329,7 @@ export function Inbox({ onOpenPost }: { onOpenPost: (postId: string) => void }) 
             your recent threads{ownList ? ` (${ownList.items.length})` : ""} ·{" "}
             <button
               className="notice-btn"
-              onClick={() => setScan((previous) => ({ threads: 10, attempt: previous.attempt + 1 }))}
+              onClick={() => setScan({ threads: 10, attempt: scan.attempt + 1 })}
               disabled={own.isFetching}
             >
               {own.isFetching ? "loading…" : "refresh"}
@@ -344,9 +364,7 @@ export function Inbox({ onOpenPost }: { onOpenPost: (postId: string) => void }) 
             <p className="notice">
               <button
                 className="notice-btn"
-                onClick={() =>
-                  setScan((previous) => ({ ...previous, threads: previous.threads + 10 }))
-                }
+                onClick={() => setScan({ ...scan, threads: scan.threads + 10 })}
                 disabled={own.isFetching}
               >
                 {own.isFetching ? "loading…" : "load 10 more"}

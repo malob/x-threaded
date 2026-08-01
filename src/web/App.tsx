@@ -1,14 +1,13 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import type { ConversationResponse } from "../shared/types";
 import { resolvePost } from "./api";
 import {
   conversationQueryOptions,
   useConversation,
+  useConversationWrites,
   useLoadConversation,
   useMarkAllRead,
-  useRefreshConversation,
-  useResumeConversation,
   useSetRead,
 } from "./queries";
 import { Inbox } from "./Inbox";
@@ -35,13 +34,26 @@ export function App() {
   const [newCount, setNewCount] = useState<{ rootId: string; count: number } | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  /**
+   * Which navigation is the current one.
+   *
+   * Opening a post is asynchronous, so Back-then-Forward leaves two of them in
+   * flight at once. The query cache is keyed by rootId and copes, but this
+   * component's `rootId`/`focusId`/history are single-valued: without a way to
+   * tell the loser apart, its continuation would still set them and push a URL
+   * for the conversation the reader has already left — and fire that
+   * conversation's refresh, which is a billable POST nobody asked for. Every
+   * navigation takes the next number; a continuation whose number has been
+   * superseded applies nothing at all.
+   */
+  const navigation = useRef(0);
+
   const conversationQuery = useConversation(rootId);
   const load = useLoadConversation();
-  const refresh = useRefreshConversation({
+  const writes = useConversationWrites({
     onRefreshed: (id, fresh) => setNewCount({ rootId: id, count: fresh.newCount }),
     onError: setError,
   });
-  const resume = useResumeConversation({ onError: setError });
   const setRead = useSetRead({ onError: setError });
   const markAllRead = useMarkAllRead({ onError: setError });
 
@@ -68,11 +80,13 @@ export function App() {
    * the estimated cost, so the click is already informed consent.
    */
   const openPost = async (postId: string, push = true, fetchIfMissing = false) => {
+    const epoch = ++navigation.current;
     setError(null);
     setNewCount(null);
     setPending(null);
     try {
       const { rootId: resolved, replyCount } = await resolvePost(postId);
+      if (epoch !== navigation.current) return;
       if (!resolved) {
         if (fetchIfMissing) {
           await fetchConversation(postId, push);
@@ -94,6 +108,7 @@ export function App() {
         ...conversationQueryOptions(resolved),
         staleTime: 0,
       });
+      if (epoch !== navigation.current) return;
       setRootId(resolved);
       setFocusId(postId === resolved ? null : postId);
       if (push) {
@@ -102,18 +117,23 @@ export function App() {
       }
       // The inbox reloads itself whenever it mounts, so leaving a conversation
       // is enough to pick up new read state — no cross-component plumbing.
-      refresh.refresh(resolved);
+      writes.refresh(resolved);
     } catch (e) {
+      if (epoch !== navigation.current) return;
       setError((e as Error).message);
     }
   };
 
   /** Fetch a conversation from the API and show it. */
   const fetchConversation = async (postId: string, push = true) => {
+    const epoch = ++navigation.current;
     setError(null);
     try {
-      showLoaded(await load.mutateAsync(postId), push);
+      const response = await load.mutateAsync(postId);
+      if (epoch !== navigation.current) return;
+      showLoaded(response, push);
     } catch (e) {
+      if (epoch !== navigation.current) return;
       setError((e as Error).message);
     }
   };
@@ -123,6 +143,9 @@ export function App() {
   };
 
   const goHome = (push = true) => {
+    // Going home is a navigation too: it has to outrank an open that is still
+    // resolving, or that open would drag the reader back into a conversation.
+    navigation.current += 1;
     setRootId(null);
     setFocusId(null);
     setNewCount(null);
@@ -153,13 +176,16 @@ export function App() {
   }, [data]);
 
   const submitUrl = async () => {
+    const epoch = ++navigation.current;
     setError(null);
     setNewCount(null);
     try {
       const response = await load.mutateAsync(url);
+      if (epoch !== navigation.current) return;
       showLoaded(response, true);
-      if (response.fromCache) refresh.refresh(response.rootId);
+      if (response.fromCache) writes.refresh(response.rootId);
     } catch (e) {
+      if (epoch !== navigation.current) return;
       setError((e as Error).message);
     }
   };
@@ -213,11 +239,17 @@ export function App() {
         <Thread
           key={conversation.rootId}
           conversation={conversation}
-          refreshing={refresh.refreshingRootId === conversation.rootId}
-          resuming={resume.resumingRootId === conversation.rootId}
+          // Per conversation, not per mutation: each control reports on the
+          // conversation it belongs to. Whichever writer holds a conversation's
+          // lock, both of its buttons are refused until it lets go — the button
+          // that isn't labelled with the write in progress stays enabled and
+          // its click is a no-op, which is the price of not lying about which
+          // operation is running.
+          refreshing={writes.isRefreshing(conversation.rootId)}
+          resuming={writes.isResuming(conversation.rootId)}
           newCount={newCount?.rootId === conversation.rootId ? newCount.count : null}
-          onRefresh={() => refresh.refresh(conversation.rootId)}
-          onResume={() => resume.resume(conversation.rootId)}
+          onRefresh={() => writes.refresh(conversation.rootId)}
+          onResume={() => writes.resume(conversation.rootId)}
           onSetRead={(ids, read) => setRead.mutate({ rootId: conversation.rootId, ids, read })}
           onMarkAllRead={() => markAllRead.mutate(conversation.rootId)}
         />

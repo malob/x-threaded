@@ -1,5 +1,5 @@
 import { queryOptions, skipToken, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useRef } from "react";
+import { useRef, useState } from "react";
 import type { ConversationResponse, RefreshResponse } from "../../shared/types";
 import {
   getConversation,
@@ -56,6 +56,19 @@ function withReadState(
 }
 
 /**
+ * The subset of `ids` the conversation still contains.
+ *
+ * A rollback puts read-state back, and read-state only exists for posts that
+ * are there: an id the conversation no longer has would become an unread that
+ * nothing can display and nobody can clear, while still counting in the "N
+ * unread" badge.
+ */
+function stillPresent(conversation: ConversationResponse, ids: string[]): string[] {
+  const posts = new Set(conversation.posts.map((post) => post.id));
+  return ids.filter((id) => posts.has(id));
+}
+
+/**
  * Fetch a conversation from X. Costs money, so it only ever runs from a
  * submitted URL or an inbox card whose price the reader has already seen.
  */
@@ -74,66 +87,94 @@ export function useLoadConversation() {
   });
 }
 
-export interface RefreshOptions {
+export interface ConversationWriteOptions {
   /** The rootId is the one this refresh asked for, not whatever is on screen. */
   onRefreshed: (rootId: string, response: RefreshResponse) => void;
   onError: (message: string) => void;
 }
 
+/** Which of the two billable writers is holding a conversation's lock. */
+type Writer = "refresh" | "resume";
+
 /**
- * Buy whatever is new in a conversation (a `since_id` read at X).
+ * The two ways of buying more of a conversation — "what's new since" and "what
+ * came before" — behind one lock per rootId.
  *
- * Two properties matter here. The response is written to its own rootId's
- * slot, so a refresh that lands after the reader has left cannot resurrect the
- * conversation they left. And a rootId already being refreshed is refused:
- * this fires from an effect on open, and StrictMode's double-invoked effects
- * (plus an impatient back-and-forward) would otherwise buy the same posts
- * twice.
+ * They share a lock instead of owning one each because a mutation only ever
+ * describes its latest call: `isPending` and `variables` belong to the most
+ * recent `mutate`, so with a resume of A in flight, starting a resume of B made
+ * A report idle. A's button re-enabled while its POST was still running, and a
+ * second click bought the same posts twice. Tracking per rootId is what fixes
+ * that; tracking per mutation cannot.
+ *
+ * Sharing one lock between the two writers is the other half. A refresh and a
+ * resume of the same conversation can overlap, and the response generated
+ * first can land last, painting a conversation over a strictly more complete
+ * one. Serializing the two writers per conversation is what prevents that
+ * clobber, so refusing a resume while that conversation is refreshing (and
+ * vice versa) is the point of the shared lock, not a limitation of it.
+ *
+ * Who holds what is kept twice, on purpose. The ref is the lock: taking it has
+ * to be synchronous, because two writes started in one tick — a handler that
+ * calls both, two async continuations resolving in the same microtask — both
+ * read React state from before either of them, and the second one is a
+ * duplicate charge. (Driving the built app against a stub server, a resume and
+ * a refresh dispatched in a single tick did exactly that with a state-only
+ * lock: two POSTs, two bills.) The state is how the lock is rendered — the
+ * buttons that stay disabled during a write come from it — and it is only ever
+ * written from the ref, so it cannot disagree with it.
  */
-export function useRefreshConversation({ onRefreshed, onError }: RefreshOptions) {
+export function useConversationWrites({ onRefreshed, onError }: ConversationWriteOptions) {
   const queryClient = useQueryClient();
-  const inFlight = useRef(new Set<string>());
-  const mutation = useMutation({
+  const held = useRef(new Map<string, Writer>());
+  const [writers, setWriters] = useState<ReadonlyMap<string, Writer>>(() => new Map());
+
+  const release = (rootId: string) => {
+    held.current.delete(rootId);
+    setWriters(new Map(held.current));
+  };
+
+  const refreshMutation = useMutation({
     mutationFn: (rootId: string) => refreshConversation(rootId),
     onSuccess: (fresh, rootId) => {
+      // Written to its own rootId's slot, so a refresh that lands after the
+      // reader has left cannot resurrect the conversation they left.
       queryClient.setQueryData<ConversationResponse>(conversationKey(rootId), fresh);
       onRefreshed(rootId, fresh);
     },
     onError: (error) => onError(error.message),
-    onSettled: (_data, _error, rootId) => {
-      inFlight.current.delete(rootId);
-    },
+    onSettled: (_data, _error, rootId) => release(rootId),
   });
 
-  return {
-    refresh: (rootId: string) => {
-      if (inFlight.current.has(rootId)) return;
-      inFlight.current.add(rootId);
-      mutation.mutate(rootId);
-    },
-    /** Which conversation is refreshing, so a different one doesn't say so. */
-    refreshingRootId: mutation.isPending ? (mutation.variables ?? null) : null,
-  };
-}
-
-/**
- * Buy the older replies a stopped fetch never reached. Deliberately manual:
- * the conversation reads fine without them, and going back for them costs
- * money, so it happens when someone asks for it.
- */
-export function useResumeConversation({ onError }: { onError: (message: string) => void }) {
-  const queryClient = useQueryClient();
-  const mutation = useMutation({
+  const resumeMutation = useMutation({
     mutationFn: (rootId: string) => resumeConversation(rootId),
     onSuccess: (older, rootId) => {
       queryClient.setQueryData<ConversationResponse>(conversationKey(rootId), older);
     },
     onError: (error) => onError(error.message),
+    onSettled: (_data, _error, rootId) => release(rootId),
   });
 
+  /** Take the conversation's lock and write, or refuse: someone already has it. */
+  const write = (rootId: string, writer: Writer, run: () => void) => {
+    if (held.current.has(rootId)) return;
+    held.current.set(rootId, writer);
+    setWriters(new Map(held.current));
+    run();
+  };
+
   return {
-    resume: (rootId: string) => mutation.mutate(rootId),
-    resumingRootId: mutation.isPending ? (mutation.variables ?? null) : null,
+    /** Buy whatever is new in a conversation (a `since_id` read at X). */
+    refresh: (rootId: string) => write(rootId, "refresh", () => refreshMutation.mutate(rootId)),
+    /**
+     * Buy the older replies a stopped fetch never reached. Deliberately manual:
+     * the conversation reads fine without them, and going back for them costs
+     * money, so it happens when someone asks for it.
+     */
+    resume: (rootId: string) => write(rootId, "resume", () => resumeMutation.mutate(rootId)),
+    /** Per conversation, so a write to one never speaks for another. */
+    isRefreshing: (rootId: string) => writers.get(rootId) === "refresh",
+    isResuming: (rootId: string) => writers.get(rootId) === "resume",
   };
 }
 
@@ -148,9 +189,15 @@ export interface SetReadVariables {
  *
  * The POST lives in `mutationFn`, not inside a state updater: React is allowed
  * to run an updater more than once, and this one used to fire a request from
- * inside it. The cached conversation is snapshotted before the change and put
- * back if the write fails, so a dot that came back doesn't lie about what the
- * server thinks.
+ * inside it. The change is undone if the write fails, so a dot that came back
+ * doesn't lie about what the server thinks.
+ *
+ * The undo is surgical, and has to be. The snapshot taken in `onMutate` is a
+ * record of what these ids' read-state was, not a checkpoint of the
+ * conversation: a refresh or a resume can land in the slot between the
+ * optimistic change and the failure, and restoring a whole snapshotted
+ * conversation over it would throw away posts the reader has just paid for.
+ * So the rollback edits whatever is in the cache at the time it runs.
  */
 export function useSetRead({ onError }: { onError: (message: string) => void }) {
   const queryClient = useQueryClient();
@@ -164,18 +211,39 @@ export function useSetRead({ onError }: { onError: (message: string) => void }) 
       queryClient.setQueryData<ConversationResponse>(conversationKey(rootId), (current) =>
         current ? withReadState(current, ids, read) : current,
       );
-      return { previous };
+      // Which of the touched ids were unread beforehand — enough to undo this
+      // change and nothing more. Nothing cached means nothing was changed.
+      if (!previous) return { wasUnread: null };
+      const unread = new Set(previous.unreadIds);
+      return { wasUnread: ids.filter((id) => unread.has(id)) };
     },
-    onError: (error, { rootId }, context) => {
-      if (context?.previous) {
-        queryClient.setQueryData<ConversationResponse>(conversationKey(rootId), context.previous);
+    onError: (error, { rootId, ids }, context) => {
+      const wasUnread = context?.wasUnread;
+      if (wasUnread) {
+        const restoreUnread = new Set(wasUnread);
+        queryClient.setQueryData<ConversationResponse>(conversationKey(rootId), (current) => {
+          if (!current) return current;
+          const touched = stillPresent(current, ids);
+          return withReadState(
+            withReadState(current, touched.filter((id) => restoreUnread.has(id)), false),
+            touched.filter((id) => !restoreUnread.has(id)),
+            true,
+          );
+        });
       }
       onError(error.message);
     },
   });
 }
 
-/** Mark every post in a conversation read, optimistically. */
+/**
+ * Mark every post in a conversation read, optimistically.
+ *
+ * Same rollback rule as `useSetRead`: on failure the posts that were unread go
+ * back to unread inside whatever conversation is cached by then, rather than
+ * the whole conversation reverting to the one that was on screen when the
+ * request left.
+ */
 export function useMarkAllRead({ onError }: { onError: (message: string) => void }) {
   const queryClient = useQueryClient();
   return useMutation({
@@ -186,11 +254,16 @@ export function useMarkAllRead({ onError }: { onError: (message: string) => void
       queryClient.setQueryData<ConversationResponse>(conversationKey(rootId), (current) =>
         current ? { ...current, unreadIds: [] } : current,
       );
-      return { previous };
+      return { wasUnread: previous?.unreadIds ?? null };
     },
     onError: (error, rootId, context) => {
-      if (context?.previous) {
-        queryClient.setQueryData<ConversationResponse>(conversationKey(rootId), context.previous);
+      const wasUnread = context?.wasUnread;
+      if (wasUnread) {
+        queryClient.setQueryData<ConversationResponse>(conversationKey(rootId), (current) =>
+          // A union, not a replacement: anything the conversation has learned
+          // is unread since — new replies from a refresh — stays unread too.
+          current ? withReadState(current, stillPresent(current, wasUnread), false) : current,
+        );
       }
       onError(error.message);
     },
