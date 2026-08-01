@@ -311,6 +311,8 @@ describe("wire shapes", () => {
   });
 
   it("rejects a looked-up post that has no id", async () => {
+    // Destructuring is how the id gets dropped; the binding is the cost.
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
     const { id: _dropped, ...idless } = apiTweet(ROOT_ID, Date.parse(ROOT_AT));
     const restore = serveBody({ data: idless });
     try {

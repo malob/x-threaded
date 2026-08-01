@@ -377,7 +377,7 @@ export function buildApp({ store, xapi, maxPosts, oauth = null }: AppDeps): ApiA
     const MAX_SCAN = Math.min(Math.max(target * 30, 300), 900);
     const posts: Post[] = [];
     let paginationToken: string | undefined;
-    let items: OwnThread[] = [];
+    let items: OwnThread[];
     for (;;) {
       const page = meter.charge(
         await xapi.getOwnPosts(token, userId, { max: 50, paginationToken }),

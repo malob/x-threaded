@@ -40,7 +40,7 @@ function ClampedText({ lines, children }: { lines: number; children: ReactNode }
   );
 }
 
-export function postUrl(post: Post): string {
+function postUrl(post: Post): string {
   return xPostUrl(post.authorHandle, post.id);
 }
 

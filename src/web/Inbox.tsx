@@ -200,6 +200,10 @@ export function Inbox({ onOpenPost }: { onOpenPost: (postId: string) => void }) 
 
   // Your posts cost real API reads, so fetch them on first view, not on mount.
   useEffect(() => {
+    // loadOwn() flips the loading flag before it awaits, which is the setState
+    // the rule objects to. Kicking off a fetch when the tab becomes visible is
+    // what an effect is for, and this is about to become a query anyway.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     if (tab === "yours" && auth?.state === "authorized" && !own && !loadingOwn) loadOwn();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tab, auth]);

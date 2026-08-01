@@ -57,6 +57,8 @@ export function describeStorageContract(name: string, makeStore: MakeStore): voi
 
       /** The row `meta` describes, as getConversationMeta hands it back. */
       function stored(overrides: Partial<ConversationMeta> = {}): Omit<ConversationMeta, "rootId"> {
+        // Destructuring is how the key gets dropped; the binding is the cost.
+        // eslint-disable-next-line @typescript-eslint/no-unused-vars
         const { rootId: _rootId, ...rest } = { ...meta, ...overrides };
         return rest;
       }

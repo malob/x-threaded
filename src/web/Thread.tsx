@@ -13,7 +13,7 @@ import {
   threadSpine,
   type TreeNode,
 } from "./tree";
-import { PostView, postUrl } from "./PostView";
+import { PostView } from "./PostView";
 import { formatUsd } from "../shared/pricing";
 import { appPath, xPostUrl } from "../shared/urls";
 
@@ -313,6 +313,11 @@ export function Thread({
       }
       scrollRequestRef.current = "center";
     }
+    // Resetting the view is the whole point of this effect: a different
+    // conversation must start from its own folds and cursor. The rule wants
+    // that expressed as a remount key, which is the caller's decision to make,
+    // not ours.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setFolds(opened);
     setCursorId(conversation.focusId ?? conversation.rootId);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -336,6 +341,10 @@ export function Thread({
   );
 
   if (import.meta.env.DEV || localStorage.getItem("xdbg")) {
+    // Lint is right that writing to window during render is impure. Moving it
+    // into an effect is already on the plan (2026-07-30 synthesis); doing it
+    // here would change when the snapshot is taken, so it waits for that stage.
+    // eslint-disable-next-line react-hooks/immutability
     (window as { __xdbg?: unknown }).__xdbg = {
       cursorId,
       spine: spine.map((s) => s.post.id),
@@ -413,11 +422,13 @@ export function Thread({
 
       if (pending === "g") {
         if (key === "g") moveCursor(visible[0]?.post.id);
-        else if (key === "x" && cursor) window.open(postUrl(cursor.post), "_blank", "noopener");
-        else handled = false;
+        else if (key === "x" && cursor) {
+          window.open(xPostUrl(cursor.post.authorHandle, cursor.post.id), "_blank", "noopener");
+        } else handled = false;
       } else if (pending === "y") {
-        if (key === "y" && cursor) void navigator.clipboard.writeText(postUrl(cursor.post));
-        else handled = false;
+        if (key === "y" && cursor) {
+          void navigator.clipboard.writeText(xPostUrl(cursor.post.authorHandle, cursor.post.id));
+        } else handled = false;
       } else if (pending === "z") {
         const owner = cursorId ? ownedBy(cursorId) : null;
         // Keyboard fold changes keep the cursor in view; mouse ones don't.

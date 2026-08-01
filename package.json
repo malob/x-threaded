@@ -7,6 +7,7 @@
     "dev:server": "./scripts/dev-server.sh",
     "dev:web": "vite",
     "build": "vite build",
+    "lint": "eslint .",
     "start": "bun src/server/index.ts",
     "test": "bun test",
     "test:d1": "bun test ./test-d1/storage-contract.d1.ts",

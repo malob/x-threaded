@@ -350,7 +350,7 @@ async function refreshUnderLease(
   // spent-token recovery and a forced re-login. Past the window the CAS
   // would lose anyway, so the deadline is the protocol's own.
   const finalizeDeadline = Date.now() + timings.leaseMs + timings.graceMs;
-  let landed = false;
+  let landed: boolean;
   for (;;) {
     try {
       landed = await store.finalizeTokenLease(SELF_ID, leaseId, row.refreshToken, {
