@@ -363,11 +363,15 @@ export function Thread({
 
   useEffect(() => {
     // A deep-linked focus post may sit behind closed folds; open its ancestry.
+    // Fold owners only, the same rule the keyboard's openAncestors follows
+    // (thread/keys.ts): every entry in this map is a decision about a fold.
     const opened = new Map<string, boolean>();
     if (conversation.focusId) {
+      const owner = (id: string): boolean =>
+        model !== null && (model.branchFolds.has(id) || model.segmentFolds.has(id));
       let current = model?.parents.get(conversation.focusId) ?? null;
       while (current !== null) {
-        opened.set(current, true);
+        if (owner(current)) opened.set(current, true);
         current = model?.parents.get(current) ?? null;
       }
       scrollRequestRef.current = "center";
@@ -416,9 +420,6 @@ export function Thread({
    * That is what keeps the context below from changing, and the cards from
    * re-rendering when it would have.
    */
-  const setFold = useCallback((id: string, open: boolean) => {
-    setView((prev) => ({ ...prev, folds: new Map(prev.folds).set(id, open) }));
-  }, []);
   const setCursor = useCallback((id: string) => {
     setView((prev) => ({ ...prev, cursorId: id }));
   }, []);
@@ -472,8 +473,13 @@ export function Thread({
     };
 
     const onKey = (e: KeyboardEvent) => {
-      const target = e.target as HTMLElement;
-      if (target.closest("input, textarea, select") || e.metaKey || e.ctrlKey || e.altKey) return;
+      // A key aimed at a form control is that control's, not ours. Targets are
+      // only Elements when the event came from the document's tree: a keydown
+      // dispatched on `window` carries a non-Element target, which is simply
+      // not inside an input rather than a reason to give up on the event.
+      const target = e.target;
+      const typing = target instanceof Element && target.closest("input, textarea, select") !== null;
+      if (typing || e.metaKey || e.ctrlKey || e.altKey) return;
       if (isModifierKey(e.key)) return;
       const { view: current, model, onSetRead: setRead } = latest.current;
       const { state, commands, handled } = applyKey(
@@ -504,6 +510,30 @@ export function Thread({
    */
   const setRead = useCallback((ids: string[], read: boolean) => {
     latest.current.onSetRead(ids, read);
+  }, []);
+
+  const setFold = useCallback((id: string, open: boolean) => {
+    setView((prev) => {
+      // A closing fold hides everything inside it. When that includes the
+      // cursor, the cursor comes out to the fold's owner — which stays
+      // visible; when it doesn't, the cursor stays where the reader left it,
+      // because collapsing an unrelated branch is not a statement about where
+      // you are. Scope membership is read through the `latest` ref (declared
+      // above — the same pattern setRead uses; the hooks compiler requires
+      // the ref to exist before a callback captures it), so this stays
+      // dependency-free and the stable context stays stable. No scroll
+      // request either way; mouse actions never move the viewport.
+      const hidden =
+        !open &&
+        prev.cursorId !== null &&
+        prev.cursorId !== id &&
+        latest.current.model.scopeIds(id).includes(prev.cursorId);
+      return {
+        ...prev,
+        folds: new Map(prev.folds).set(id, open),
+        cursorId: hidden ? id : prev.cursorId,
+      };
+    });
   }, []);
 
   /**

@@ -1,11 +1,14 @@
 /**
  * The keyboard layer, key by key.
  *
- * These lock the behavior of the vim bindings as they were when the reducer
- * was extracted from Thread.tsx — including the parts that look like
- * accidents, which are called out where they appear. The model under test is
- * the one the view builds (thread/model.ts), so a test agreeing with the
- * reducer but not with the app is not possible.
+ * These lock the behavior of the vim bindings: what each key does, what it
+ * refuses to do, and the commands it hands back to the caller. The model under
+ * test is the one the view builds (thread/model.ts), so a test agreeing with
+ * the reducer but not with the app is not possible.
+ *
+ * Where a test pins a decision rather than a mechanism — the cursor is never
+ * invisible, Escape always means cancel, the fold map holds only fold
+ * decisions — the comment on that test says which decision it is pinning.
  */
 import { describe, expect, it } from "bun:test";
 import type { Post } from "../src/shared/types";
@@ -109,6 +112,20 @@ const SPINE: readonly Spec[] = [
   ["s3", "A", "s2"],
 ];
 
+/**
+ * A chain that ends in a fork: root → b1 → c1, and c1 has two replies. The
+ * fold owners are root (which collapses the chain) and c1 (which collapses the
+ * fork); b1 owns no fold, which is what makes it the post the fold map must
+ * never mention.
+ */
+const DEEP: readonly Spec[] = [
+  ["root", "A", null],
+  ["b1", "B", "root"],
+  ["c1", "C", "b1"],
+  ["d1", "D", "c1"],
+  ["d2", "B", "c1"],
+];
+
 const scrollNearest: Command = { kind: "scroll-to-cursor", mode: "nearest", force: false };
 const scrollCenter: Command = { kind: "scroll-to-cursor", mode: "center", force: true };
 /** Fold entries, sorted so a map's insertion order doesn't matter. */
@@ -171,14 +188,46 @@ describe("j / k", () => {
     expect(t.press(t.start, "ArrowDown", "ArrowUp").state.cursorId).toBe(t.id("root"));
   });
 
-  it("lands on the first visible post when the cursor is inside a fold that just closed", () => {
-    // za on b2 closes the root's fork block, which hides b2 itself.
+  it("has a visible cursor to move from after a fold closes over it", () => {
+    // Decision: the cursor is never invisible. za on b2 closes the root's fork
+    // block, which would hide b2 — so the close takes the cursor with it, and
+    // j and k start from a post that is actually on screen.
     const closed = t.press(t.start, "j", "j", "j", "z", "a").state;
-    expect(closed.cursorId).toBe(t.id("b2"));
+    expect(closed.cursorId).toBe(t.id("root"));
     expect(t.visible(closed)).toEqual(["root"]);
     expect(t.press(closed, "j").state.cursorId).toBe(t.id("root"));
-    // k does the same, because Math.max(-1 - 1, 0) is also the top of the list.
     expect(t.press(closed, "k").state.cursorId).toBe(t.id("root"));
+  });
+
+  it("re-anchors to the nearest visible ancestor when the cursor is off the list", () => {
+    // Decision: the cursor is never invisible — and when something outside the
+    // reducer makes it so anyway (a mouse click on a rail is the only way
+    // left), the next motion walks it back into view instead of teleporting to
+    // the top of the thread. This is that state, spelled out: b1's chain
+    // closed with the cursor still on c1 inside it.
+    const hidden: KeyState = {
+      ...t.start,
+      cursorId: t.id("c1"),
+      folds: new Map([[t.id("b1"), false]]),
+    };
+    expect(t.visible(hidden)).toEqual(["root", "b1", "b2", "b3"]);
+
+    // The keypress re-anchors onto b1; it does not also advance to b2.
+    const down = t.press(hidden, "j");
+    expect(down.state.cursorId).toBe(t.id("b1"));
+    expect(down.commands).toEqual([scrollNearest]);
+    const up = t.press(hidden, "k");
+    expect(up.state.cursorId).toBe(t.id("b1"));
+    expect(up.commands).toEqual([scrollNearest]);
+
+    // From there, motion is ordinary again.
+    expect(t.press(down.state, "j").state.cursorId).toBe(t.id("b2"));
+    expect(t.press(up.state, "k").state.cursorId).toBe(t.id("root"));
+
+    // Only the relative motions re-anchor: gg and G name a post outright, and
+    // an off-list cursor is nothing to them.
+    expect(t.press(hidden, "G").state.cursorId).toBe(t.id("b3"));
+    expect(t.press(hidden, "g", "g").state.cursorId).toBe(t.id("root"));
   });
 });
 
@@ -350,9 +399,13 @@ describe("pending key sequences", () => {
 
     expect(t.press(t.start, "g", "z", "z").state.pending).toBe("z");
     expect(t.press(t.start, "y", "q").state.pending).toBeNull();
-    // Escape inside a sequence closes nothing.
-    const help = t.press(t.start, "?").state;
-    expect(t.press(help, "z", "Escape").state.helpOpen).toBe(true);
+
+    // Decision: Escape always means cancel. It is the one key a pending prefix
+    // does not get to swallow — it drops the prefix and stays handled (what it
+    // does to the help overlay is locked under "help overlay").
+    const escaped = t.press(t.start, "z", "Escape");
+    expect(escaped.state.pending).toBeNull();
+    expect(escaped.handled).toBe(true);
   });
 });
 
@@ -360,10 +413,12 @@ describe("z folds", () => {
   const t = thread(FORK);
 
   it("resolves the owning fold when the cursor is not an owner", () => {
-    // b2 owns nothing; the fold that hides it belongs to the root.
+    // b2 owns nothing; the fold that hides it belongs to the root. Closing it
+    // takes the cursor out to that owner (decision: the cursor is never
+    // invisible), which is where the second za reopens the block from.
     const closed = t.press(t.start, "j", "j", "j", "z", "a");
     expect(t.visible(closed.state)).toEqual(["root"]);
-    expect(closed.state.cursorId).toBe(t.id("b2"));
+    expect(closed.state.cursorId).toBe(t.id("root"));
     expect(closed.commands).toEqual([scrollNearest]);
     expect(t.visible(t.press(closed.state, "z", "a").state)).toEqual([
       "root",
@@ -386,6 +441,19 @@ describe("z folds", () => {
     ]);
     expect(t.press(t.start, "Enter").state.folds).toEqual(t.press(t.start, "z", "a").state.folds);
     expect(t.press(t.start, "Enter").commands).toEqual([scrollNearest]);
+  });
+
+  it("Enter closing a fold re-homes the cursor exactly as za does", () => {
+    // Enter and za are one command, so the re-home lives in the command rather
+    // than in the key: from c1, either one closes b1's chain and lands on b1.
+    const onC1 = t.press(t.start, "j", "j").state;
+    const viaEnter = t.press(onC1, "Enter");
+    const viaZa = t.press(onC1, "z", "a");
+    expect(viaEnter.state.cursorId).toBe(t.id("b1"));
+    expect(viaZa.state.cursorId).toBe(t.id("b1"));
+    expect(viaEnter.state.folds).toEqual(viaZa.state.folds);
+    expect(viaEnter.commands).toEqual([scrollNearest]);
+    expect(t.visible(viaEnter.state)).toEqual(["root", "b1", "b2", "b3"]);
   });
 
   it("zc closes the owning fold and brings the cursor to the owner", () => {
@@ -480,6 +548,15 @@ describe("z folds on a thread spine", () => {
     expect(t.visible(closed.state)).toEqual(["s1", "s2", "s3"]);
   });
 
+  it("opening someone else's fold leaves the cursor where it is", () => {
+    // The re-home is a closing rule only. s3 owns no fold, so za opens s2's
+    // reply block above it — which hides nothing, so nothing moves.
+    const onS3 = t.press(t.start, "j", "j").state;
+    const opened = t.press(onS3, "z", "a");
+    expect(opened.state.cursorId).toBe(t.id("s3"));
+    expect(t.visible(opened.state)).toEqual(["s1", "s2", "x2", "s3"]);
+  });
+
   it("zR opens every fold in the conversation, spine segments included", () => {
     expect(t.visible(t.press(t.start, "z", "R").state)).toEqual([
       "s1",
@@ -572,6 +649,50 @@ describe("help overlay", () => {
     const closed = t.press(t.start, "Escape");
     expect(closed.state.helpOpen).toBe(false);
     expect(closed.handled).toBe(true);
+  });
+
+  it("Escape closes the overlay from inside a half-typed sequence", () => {
+    // Decision: Escape always means cancel. The pending prefix does not get to
+    // swallow it, so one press drops the prefix and closes the overlay.
+    const help = t.press(t.start, "?").state;
+    const escaped = t.press(help, "z", "Escape");
+    expect(escaped.state.helpOpen).toBe(false);
+    expect(escaped.state.pending).toBeNull();
+    expect(escaped.handled).toBe(true);
+  });
+
+  it("Escape with nothing pending and nothing open leaves the state alone", () => {
+    const quiet = t.press(t.start, "Escape");
+    expect(quiet.state).toBe(t.start);
+    expect(quiet.commands).toEqual([]);
+    expect(quiet.handled).toBe(true);
+  });
+});
+
+describe("the fold map", () => {
+  const t = thread(DEEP, ["d1"]);
+
+  it("writes a decision only where there is a fold to decide", () => {
+    // Decision: every entry in the fold map is a fold decision about a fold
+    // owner. b1 sits on the path to d1 but owns no fold, so opening d1's
+    // ancestry writes root and c1 and says nothing at all about b1.
+    const jump = t.press(t.start, "n");
+    expect(jump.state.cursorId).toBe(t.id("d1"));
+    expect(foldEntries(jump.state)).toEqual(
+      (
+        [
+          [t.id("root"), true],
+          [t.id("c1"), true],
+        ] as [string, boolean][]
+      ).sort(),
+    );
+
+    // l opens the ancestry by the same rule when it descends into a fold it
+    // just closed.
+    const onC1 = t.press(t.start, "j", "j").state;
+    const reopened = t.press(onC1, "z", "a", "l");
+    expect(reopened.state.cursorId).toBe(t.id("d1"));
+    expect([...reopened.state.folds.keys()].sort()).toEqual([t.id("root"), t.id("c1")].sort());
   });
 });
 

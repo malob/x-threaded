@@ -40,7 +40,8 @@ export type CommandId =
   | "copy-x-link"
   | "copy-app-link"
   | "help-toggle"
-  | "help-close";
+  /** Escape: drop a half-typed sequence and close the help overlay, always. */
+  | "cancel";
 
 /** A binding's trigger: a single key, or a prefix key then a second key. */
 export type KeySeq = readonly [string] | readonly [string, string];
@@ -136,7 +137,9 @@ export const KEYMAP: readonly Binding[] = [
   { seq: ["y", "y"], command: "copy-x-link", help: { row: "copy", label: "yy" } },
   { seq: ["Y"], command: "copy-app-link", help: { row: "copy", label: "Y" } },
   { seq: ["?"], command: "help-toggle", help: { row: "help", label: "?" } },
-  { seq: ["Escape"], command: "help-close" },
+  // Escape is looked up ahead of any pending prefix (see keys.ts), which is
+  // what lets it cancel the sequence it interrupts instead of being eaten.
+  { seq: ["Escape"], command: "cancel" },
 ];
 
 function seqKey(pending: string | null, key: string): string {

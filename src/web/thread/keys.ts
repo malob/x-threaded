@@ -100,9 +100,11 @@ export function normalizeKey(key: string, shiftKey: boolean): string {
 
 export function applyKey(state: KeyState, model: KeyModel, key: string): KeyResult {
   // Every keystroke consumes any half-typed sequence, matching or not: `zj` is
-  // not a `j`, it is nothing at all.
+  // not a `j`, it is nothing at all. Cancel is the one key that outranks the
+  // sequence it interrupts, and looking it up with no prefix is what makes it
+  // one: `z` then Escape is an Escape, not a dropped `z`.
   const pending = state.pending;
-  const command = lookup(pending, key);
+  const command = lookup(null, key) === "cancel" ? "cancel" : lookup(pending, key);
   if (command === null) {
     if (pending === null && isPrefix(key)) {
       return { state: { ...state, pending: key }, commands: [], handled: true };
@@ -141,16 +143,36 @@ export function applyKey(state: KeyState, model: KeyModel, key: string): KeyResu
   const setFold = (id: string, open: boolean): void => {
     folds = new Map(folds).set(id, open);
   };
-  // Keyboard fold changes keep the cursor in view; mouse ones don't.
-  const foldAndFollow = (id: string, open: boolean): void => {
+  // The two halves of a fold from the keyboard. Both scroll the cursor into
+  // view — mouse fold changes never scroll — and they part ways on the cursor:
+  // opening reveals posts and moves nothing.
+  const openFold = (id: string): void => {
     requestScroll("nearest");
-    setFold(id, open);
+    setFold(id, true);
   };
+  /**
+   * Close a fold and take the cursor with it. A fold hides its contents but
+   * never its owner, so the owner is where the cursor can still be seen —
+   * vim's rule that a line folding away leaves the cursor on the fold line.
+   * Every keyboard close goes through here, so none of them can strand the
+   * cursor on a post nobody can see.
+   */
+  const closeFold = (id: string): void => {
+    setFold(id, false);
+    moveCursor(id);
+  };
+  /**
+   * Open every fold between a post and the root, so the post is on screen.
+   *
+   * The invariant this holds up: every entry in the fold map is a fold
+   * decision about a fold owner. Ancestors that own no fold are not written
+   * down — there is no fold there to have an opinion about.
+   */
   const openAncestors = (id: string): void => {
     const next = new Map(folds);
     let current = model.parentOf(id);
     while (current !== null) {
-      next.set(current, true);
+      if (model.isFoldOwner(current)) next.set(current, true);
       current = model.parentOf(current);
     }
     folds = next;
@@ -170,6 +192,11 @@ export function applyKey(state: KeyState, model: KeyModel, key: string): KeyResu
       }
     }
   };
+  /**
+   * Every fold in the cursor's scope, at once. Closing one cannot hide the
+   * cursor: every fold this touches is the cursor's own or a descendant's, and
+   * a fold hides its contents but never its owner.
+   */
   const foldScope = (open: boolean): void => {
     if (cursor === null) return;
     requestScroll("nearest");
@@ -182,6 +209,33 @@ export function applyKey(state: KeyState, model: KeyModel, key: string): KeyResu
   const foldAll = (open: boolean): void => {
     requestScroll("nearest");
     folds = new Map(model.foldOwners.map((id) => [id, open]));
+  };
+  /**
+   * The nearest ancestor of a post that is on screen — the post itself when it
+   * already is. The root is always visible, so this answers for every post the
+   * model knows.
+   */
+  const nearestVisible = (id: string): string | undefined => {
+    let current: string | null = id;
+    while (current !== null) {
+      if (model.visible.includes(current)) return current;
+      current = model.parentOf(current);
+    }
+    return undefined;
+  };
+  /**
+   * Where a j or k lands: one step along the visible order, clamped at both
+   * ends — the clamp is why a j at the bottom still nudges the scroll.
+   *
+   * Unless the cursor is not on that list at all, which happens when something
+   * closed a fold over it. Then the keypress only re-anchors: it lands on the
+   * nearest ancestor still on screen and does not also advance, so the first
+   * key after a cursor goes behind a fold is a step back into view rather than
+   * a jump to the top of the thread.
+   */
+  const lineStep = (dir: 1 | -1): string | undefined => {
+    if (cursor !== null && visIdx === -1) return nearestVisible(cursor);
+    return model.visible[Math.min(Math.max(visIdx + dir, 0), model.visible.length - 1)];
   };
   /** Walk out through ancestors until one of them has a sibling in `dir`. */
   const siblingCursor = (dir: 1 | -1): void => {
@@ -200,10 +254,10 @@ export function applyKey(state: KeyState, model: KeyModel, key: string): KeyResu
 
   switch (command) {
     case "cursor-next":
-      moveCursor(model.visible[Math.min(visIdx + 1, model.visible.length - 1)]);
+      moveCursor(lineStep(1));
       break;
     case "cursor-prev":
-      moveCursor(model.visible[Math.max(visIdx - 1, 0)]);
+      moveCursor(lineStep(-1));
       break;
     case "cursor-parent": {
       const parent = cursorId === null ? null : model.parentOf(cursorId);
@@ -251,21 +305,19 @@ export function applyKey(state: KeyState, model: KeyModel, key: string): KeyResu
       break;
     case "fold-toggle": {
       const owner = cursorId === null ? null : ownedBy(cursorId);
-      if (owner) foldAndFollow(owner, !isOpen(owner));
+      if (owner === null) break;
+      if (isOpen(owner)) closeFold(owner);
+      else openFold(owner);
       break;
     }
     case "fold-open": {
       const owner = cursorId === null ? null : ownedBy(cursorId);
-      if (owner) foldAndFollow(owner, true);
+      if (owner) openFold(owner);
       break;
     }
     case "fold-close": {
-      // Closing where the cursor sits would hide the cursor, so it comes along.
       const owner = cursorId === null ? null : ownedBy(cursorId);
-      if (owner) {
-        setFold(owner, false);
-        moveCursor(owner);
-      }
+      if (owner) closeFold(owner);
       break;
     }
     case "fold-open-subtree":
@@ -305,7 +357,9 @@ export function applyKey(state: KeyState, model: KeyModel, key: string): KeyResu
     case "help-toggle":
       helpOpen = !helpOpen;
       break;
-    case "help-close":
+    case "cancel":
+      // Whatever is half-typed is already dropped by the time we get here (the
+      // state settles with no pending key), so cancelling is just this.
       helpOpen = false;
       break;
     default:
