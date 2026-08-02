@@ -241,10 +241,9 @@ export function App() {
           conversation={conversation}
           // Per conversation, not per mutation: each control reports on the
           // conversation it belongs to. Whichever writer holds a conversation's
-          // lock, both of its buttons are refused until it lets go — the button
-          // that isn't labelled with the write in progress stays enabled and
-          // its click is a no-op, which is the price of not lying about which
-          // operation is running.
+          // lock, both of its buttons are refused until it lets go, so Thread
+          // disables both — only the one that holds the lock says what it is
+          // doing.
           refreshing={writes.isRefreshing(conversation.rootId)}
           resuming={writes.isResuming(conversation.rootId)}
           newCount={newCount?.rootId === conversation.rootId ? newCount.count : null}

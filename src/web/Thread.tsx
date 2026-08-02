@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { ConversationResponse, Post } from "../shared/types";
 import {
   buildTree,
@@ -8,14 +8,16 @@ import {
   foldOwnerIds,
   hiddenReplyCounts,
   parentIds,
-  scopeIds,
   subtreeSize,
   threadSpine,
   type TreeNode,
 } from "./tree";
 import { PostView } from "./PostView";
 import { formatUsd } from "../shared/pricing";
-import { appPath, xPostUrl } from "../shared/urls";
+import { xPostUrl } from "../shared/urls";
+import { HELP } from "./thread/keymap";
+import { applyKey, isModifierKey, normalizeKey, type Command, type ViewState } from "./thread/keys";
+import { keyModelOf } from "./thread/tree-model";
 
 interface Ctx {
   cursorId: string | null;
@@ -236,23 +238,6 @@ function SegmentReplies({ segment, replies, ctx }: { segment: TreeNode; replies:
   );
 }
 
-const HELP: [string, string][] = [
-  ["j / k, ↓ / ↑", "next / previous post"],
-  ["h / l, ← / →", "parent / first reply"],
-  ["{ / }", "previous / next sibling branch"],
-  ["n / N", "next / previous unread (marks read)"],
-  ["r / R", "mark read (fold-scoped) / mark unread + subtree"],
-  ["za  zo  zc", "toggle / open / close fold"],
-  ["zO / zC", "open / close subtree recursively"],
-  ["zR / zM", "open / close all folds"],
-  ["enter", "toggle fold"],
-  ["gg / G", "first / last post"],
-  ["zz", "center current post"],
-  ["gx", "open post on x.com"],
-  ["yy / Y", "copy x.com link / app deep link"],
-  ["?", "toggle this help"],
-];
-
 interface ThreadProps {
   conversation: ConversationResponse;
   refreshing: boolean;
@@ -290,9 +275,18 @@ export function Thread({
     return map;
   }, [root, spine]);
 
-  const [folds, setFolds] = useState<Map<string, boolean>>(new Map());
-  const [cursorId, setCursorId] = useState<string | null>(null);
-  const [helpOpen, setHelpOpen] = useState(false);
+  /**
+   * Cursor, folds and help live together because the keyboard reducer moves
+   * them together (src/web/thread/keys.ts). The half-typed key sequence stays
+   * out: it is keyboard state, but nothing renders it, and routing it through
+   * setState would re-render every post the moment you press `z`.
+   */
+  const [view, setView] = useState<ViewState>(() => ({
+    cursorId: null,
+    folds: new Map(),
+    helpOpen: false,
+  }));
+  const { cursorId, folds, helpOpen } = view;
   const pendingRef = useRef<string | null>(null);
   /**
    * Scroll-to-cursor happens only when something explicitly requests it
@@ -318,8 +312,11 @@ export function Thread({
     // that expressed as a remount key, which is the caller's decision to make,
     // not ours.
     // eslint-disable-next-line react-hooks/set-state-in-effect
-    setFolds(opened);
-    setCursorId(conversation.focusId ?? conversation.rootId);
+    setView((prev) => ({
+      ...prev,
+      folds: opened,
+      cursorId: conversation.focusId ?? conversation.rootId,
+    }));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [conversation.rootId, conversation.focusId]);
 
@@ -340,11 +337,9 @@ export function Thread({
     [root, conversation.truncated],
   );
 
-  if (import.meta.env.DEV || localStorage.getItem("xdbg")) {
-    // Lint is right that writing to window during render is impure. Moving it
-    // into an effect is already on the plan (2026-07-30 synthesis); doing it
-    // here would change when the snapshot is taken, so it waits for that stage.
-    // eslint-disable-next-line react-hooks/immutability
+  // A snapshot for the console, taken after the render it describes.
+  useEffect(() => {
+    if (!import.meta.env.DEV && !localStorage.getItem("xdbg")) return;
     (window as { __xdbg?: unknown }).__xdbg = {
       cursorId,
       spine: spine.map((s) => s.post.id),
@@ -352,233 +347,104 @@ export function Thread({
       branchFolds: [...owners.branchFolds],
       folds: [...folds.entries()],
     };
-  }
+  }, [cursorId, spine, owners, folds]);
 
-  const visible = useMemo(
-    () => (root ? documentOrder(root, spine, isOpen) : []),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [root, spine, folds, owners],
-  );
+  const visible = useMemo(() => {
+    const open = (id: string): boolean => folds.get(id) ?? !owners.segmentFolds.has(id);
+    return root ? documentOrder(root, spine, open) : [];
+  }, [root, spine, folds, owners]);
   const allOrder = useMemo(() => (root ? documentOrder(root, spine) : []), [root, spine]);
 
   const setFold = (id: string, open: boolean) => {
-    setFolds((prev) => new Map(prev).set(id, open));
+    setView((prev) => ({ ...prev, folds: new Map(prev.folds).set(id, open) }));
+  };
+  const setCursor = (id: string) => {
+    setView((prev) => ({ ...prev, cursorId: id }));
+  };
+  const toggleHelp = () => {
+    setView((prev) => ({ ...prev, helpOpen: !prev.helpOpen }));
   };
 
+  const keyModel = useMemo(
+    () =>
+      keyModelOf({
+        rootId: conversation.rootId,
+        spine,
+        owners,
+        parents,
+        byId,
+        visible,
+        allOrder,
+        unread,
+      }),
+    [conversation.rootId, spine, owners, parents, byId, visible, allOrder, unread],
+  );
+
+  /**
+   * The keydown listener is registered once and reads the current render
+   * through this ref, instead of being torn down and re-registered on every
+   * render — which used to include every keystroke. A layout effect refreshes
+   * it, so it is current before anything can be typed.
+   */
+  const latest = useRef({ view, model: keyModel, onSetRead });
+  useLayoutEffect(() => {
+    latest.current = { view, model: keyModel, onSetRead };
+  });
+
   useEffect(() => {
-    const allOwnerIds = [...owners.branchFolds, ...owners.segmentFolds];
-    const ownedBy = (id: string): string | null => {
-      let current: string | null = id;
-      while (current !== null) {
-        if (owners.branchFolds.has(current) || owners.segmentFolds.has(current)) return current;
-        current = parents.get(current) ?? null;
-      }
-      return null;
-    };
-    const moveCursor = (id: string | undefined) => {
-      if (!id) return;
-      scrollRequestRef.current ??= "nearest";
-      setCursorId(id);
-    };
-    const openAncestors = (id: string) => {
-      setFolds((prev) => {
-        const next = new Map(prev);
-        let current = parents.get(id) ?? null;
-        while (current !== null) {
-          next.set(current, true);
-          current = parents.get(current) ?? null;
-        }
-        return next;
-      });
-    };
-    const jumpUnread = (dir: 1 | -1) => {
-      if (unread.size === 0 || allOrder.length === 0) return;
-      const idx = allOrder.findIndex((n) => n.post.id === cursorId);
-      for (let step = 1; step <= allOrder.length; step++) {
-        const i = (idx + dir * step + allOrder.length * step) % allOrder.length;
-        const node = allOrder[i]!;
-        if (unread.has(node.post.id)) {
-          openAncestors(node.post.id);
-          scrollRequestRef.current = "center";
-          setCursorId(node.post.id);
-          onSetRead([node.post.id], true);
-          return;
-        }
+    const execute = (command: Command, setRead: (ids: string[], read: boolean) => void): void => {
+      switch (command.kind) {
+        case "scroll-to-cursor":
+          // A request, honored once the cursor and folds have settled. Only an
+          // insistent one (the unread jump) overrides a request already made.
+          if (command.force) scrollRequestRef.current = command.mode;
+          else scrollRequestRef.current ??= command.mode;
+          break;
+        case "scroll-to-post":
+          document
+            .getElementById(`post-${command.postId}`)
+            ?.scrollIntoView({ block: command.mode });
+          break;
+        case "set-read":
+          setRead([...command.ids], command.read);
+          break;
+        case "copy":
+          void navigator.clipboard.writeText(command.text);
+          break;
+        case "copy-app-link":
+          void navigator.clipboard.writeText(`${location.origin}${command.path}`);
+          break;
+        case "open-url":
+          window.open(command.url, "_blank", "noopener");
+          break;
       }
     };
 
     const onKey = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement;
       if (target.closest("input, textarea, select") || e.metaKey || e.ctrlKey || e.altKey) return;
-      if (e.key === "Shift" || e.key === "Meta" || e.key === "Control" || e.key === "Alt") return;
-      let key = e.key;
-      if (key === "/" && e.shiftKey) key = "?";
-      else if (key.length === 1 && e.shiftKey && key >= "a" && key <= "z") key = key.toUpperCase();
-      const cursor = cursorId ? byId.get(cursorId) : undefined;
-      const visIdx = visible.findIndex((n) => n.post.id === cursorId);
-      const pending = pendingRef.current;
-      pendingRef.current = null;
-      let handled = true;
-
-      if (pending === "g") {
-        if (key === "g") moveCursor(visible[0]?.post.id);
-        else if (key === "x" && cursor) {
-          window.open(xPostUrl(cursor.post.authorHandle, cursor.post.id), "_blank", "noopener");
-        } else handled = false;
-      } else if (pending === "y") {
-        if (key === "y" && cursor) {
-          void navigator.clipboard.writeText(xPostUrl(cursor.post.authorHandle, cursor.post.id));
-        } else handled = false;
-      } else if (pending === "z") {
-        const owner = cursorId ? ownedBy(cursorId) : null;
-        // Keyboard fold changes keep the cursor in view; mouse ones don't.
-        const foldAndFollow = (id: string, open: boolean) => {
-          scrollRequestRef.current ??= "nearest";
-          setFold(id, open);
-        };
-        switch (key) {
-          case "a":
-            if (owner) foldAndFollow(owner, !isOpen(owner));
-            break;
-          case "o":
-            if (owner) foldAndFollow(owner, true);
-            break;
-          case "c":
-            if (owner) {
-              setFold(owner, false);
-              moveCursor(owner);
-            }
-            break;
-          case "O":
-          case "C": {
-            if (!cursor) break;
-            const open = key === "O";
-            scrollRequestRef.current ??= "nearest";
-            setFolds((prev) => {
-              const next = new Map(prev);
-              for (const id of scopeIds(cursor, spine)) {
-                if (owners.branchFolds.has(id) || owners.segmentFolds.has(id)) next.set(id, open);
-              }
-              return next;
-            });
-            break;
-          }
-          case "R":
-          case "M": {
-            const open = key === "R";
-            scrollRequestRef.current ??= "nearest";
-            setFolds(new Map(allOwnerIds.map((id) => [id, open])));
-            if (key === "M") moveCursor(conversation.rootId);
-            break;
-          }
-          case "z":
-            if (cursorId) {
-              document
-                .getElementById(`post-${cursorId}`)
-                ?.scrollIntoView({ block: "center" });
-            }
-            break;
-          default:
-            handled = false;
-        }
-      } else {
-        switch (key) {
-          case "j":
-          case "ArrowDown":
-            moveCursor(visible[Math.min(visIdx + 1, visible.length - 1)]?.post.id);
-            break;
-          case "k":
-          case "ArrowUp":
-            moveCursor(visible[Math.max(visIdx - 1, 0)]?.post.id);
-            break;
-          case "h":
-          case "ArrowLeft": {
-            const parent = cursorId ? parents.get(cursorId) : null;
-            if (parent) moveCursor(parent);
-            break;
-          }
-          case "l":
-          case "ArrowRight": {
-            const target = cursor?.children[0]?.post.id;
-            if (!target) break;
-            if (!visible.some((n) => n.post.id === target)) openAncestors(target);
-            moveCursor(target);
-            break;
-          }
-          case "{":
-          case "}": {
-            const dir = key === "}" ? 1 : -1;
-            let current: string | null = cursorId;
-            while (current !== null) {
-              const parentId = parents.get(current) ?? null;
-              const siblings: TreeNode[] = parentId
-                ? (byId.get(parentId)?.children ?? [])
-                : [];
-              const i = siblings.findIndex((s) => s.post.id === current);
-              const sibling = siblings[i + dir];
-              if (sibling) {
-                moveCursor(sibling.post.id);
-                break;
-              }
-              current = parentId;
-            }
-            break;
-          }
-          case "G":
-            moveCursor(visible[visible.length - 1]?.post.id);
-            break;
-          case "n":
-            jumpUnread(1);
-            break;
-          case "N":
-            jumpUnread(-1);
-            break;
-          case "r": {
-            if (!cursor) break;
-            const folded = !isOpen(cursor.post.id) &&
-              (owners.branchFolds.has(cursor.post.id) || owners.segmentFolds.has(cursor.post.id));
-            onSetRead(folded ? scopeIds(cursor, spine) : [cursor.post.id], true);
-            break;
-          }
-          case "R":
-            if (cursor) onSetRead(scopeIds(cursor, spine), false);
-            break;
-          case "Y":
-            if (cursor) {
-              void navigator.clipboard.writeText(
-                `${location.origin}${appPath(cursor.post.authorHandle, cursor.post.id)}`,
-              );
-            }
-            break;
-          case "Enter": {
-            const owner = cursorId ? ownedBy(cursorId) : null;
-            if (owner) {
-              scrollRequestRef.current ??= "nearest";
-              setFold(owner, !isOpen(owner));
-            }
-            break;
-          }
-          case "g":
-          case "z":
-          case "y":
-            pendingRef.current = key;
-            break;
-          case "?":
-            setHelpOpen((prev) => !prev);
-            break;
-          case "Escape":
-            setHelpOpen(false);
-            break;
-          default:
-            handled = false;
-        }
+      if (isModifierKey(e.key)) return;
+      const { view: current, model, onSetRead: setRead } = latest.current;
+      const { state, commands, handled } = applyKey(
+        { ...current, pending: pendingRef.current },
+        model,
+        normalizeKey(e.key, e.shiftKey),
+      );
+      pendingRef.current = state.pending;
+      if (
+        state.cursorId !== current.cursorId ||
+        state.folds !== current.folds ||
+        state.helpOpen !== current.helpOpen
+      ) {
+        setView({ cursorId: state.cursorId, folds: state.folds, helpOpen: state.helpOpen });
       }
+      for (const command of commands) execute(command, setRead);
       if (handled) e.preventDefault();
     };
 
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  });
+  }, []);
 
   if (!root) return <p className="error">Root post missing from data.</p>;
 
@@ -589,9 +455,14 @@ export function Thread({
     hiddenReplies,
     isOpen,
     setFold,
-    setCursor: setCursorId,
+    setCursor,
     setRead: onSetRead,
   };
+
+  // Refresh and resume share one lock per conversation upstream (see
+  // queries/conversation.ts), so while either is in flight the other's click
+  // would be refused anyway. Only the writer that holds the lock says so.
+  const writing = refreshing || resuming;
 
   return (
     <div>
@@ -610,7 +481,7 @@ export function Thread({
               older replies missing
             </span>
             {" · "}
-            <button className="notice-btn" onClick={onResume} disabled={resuming}>
+            <button className="notice-btn" onClick={onResume} disabled={writing}>
               {resuming ? "loading older…" : "load older replies"}
             </button>
           </>
@@ -624,7 +495,7 @@ export function Thread({
           </>
         )}
         {" · "}
-        <button className="notice-btn" onClick={onRefresh} disabled={refreshing}>
+        <button className="notice-btn" onClick={onRefresh} disabled={writing}>
           {refreshing ? "refreshing…" : "refresh"}
         </button>
         {!refreshing && newCount !== null && (
@@ -634,7 +505,7 @@ export function Thread({
           </span>
         )}
         {" · "}
-        <button className="notice-btn" onClick={() => setHelpOpen((prev) => !prev)}>
+        <button className="notice-btn" onClick={toggleHelp}>
           ? keys
         </button>
       </p>
@@ -658,10 +529,10 @@ export function Thread({
       )}
       {helpOpen && (
         <div className="help-overlay">
-          {HELP.map(([keys, desc]) => (
-            <div key={keys} className="help-row">
-              <span className="help-keys">{keys}</span>
-              <span>{desc}</span>
+          {HELP.map((row) => (
+            <div key={row.keys} className="help-row">
+              <span className="help-keys">{row.keys}</span>
+              <span>{row.desc}</span>
             </div>
           ))}
         </div>
