@@ -1,0 +1,14 @@
+{
+  // src/shared, checked against nothing but ECMAScript.
+  //
+  // No DOM, no Bun, no Workers: these modules ship into all three runtimes, so
+  // the only globals they may touch are the ones types/shared-globals.d.ts
+  // explicitly grants. A `document`, a `process` or a `Bun` in src/shared is a
+  // compile error here — which is the whole job of this project.
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["ESNext"],
+    "types": []
+  },
+  "include": ["src/shared", "types/shared-globals.d.ts"]
+}

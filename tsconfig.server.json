@@ -1,0 +1,16 @@
+{
+  // The server as Bun runs it: `bun src/server/index.ts`, over bun:sqlite.
+  //
+  // src/shared is compiled here rather than referenced, so the Bun runtime is
+  // one of the worlds shared code is proved to build in. The Worker-only files
+  // are excluded — they are checked by tsconfig.worker.json against Workers
+  // types instead, and pulling either in here would type Cloudflare code
+  // against Bun's globals.
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["ESNext"],
+    "types": ["bun"]
+  },
+  "include": ["src/server", "src/shared"],
+  "exclude": ["src/server/worker.ts", "src/server/db/d1.ts"]
+}

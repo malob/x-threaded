@@ -1,5 +1,13 @@
+import type {
+  D1Database,
+  D1DatabaseSession,
+  D1ExecResult,
+  D1PreparedStatement,
+  D1Response,
+  D1Result,
+} from "@cloudflare/workers-types";
 import { Database, type SQLQueryBindings } from "bun:sqlite";
-import { d1Driver, type D1Database, type D1PreparedStatement } from "../src/server/db/d1";
+import { d1Driver } from "../src/server/db/d1";
 import { applyMigrations, loadMigrations, type Migration } from "../src/server/db/migrations";
 
 /**
@@ -10,9 +18,27 @@ import { applyMigrations, loadMigrations, type Migration } from "../src/server/d
  */
 export const D1_MAX_BOUND_PARAMS = 100;
 
-interface RunResult {
-  success: true;
-  meta: { changes: number; last_row_id: number };
+/**
+ * The parts of D1 this fake does not emulate. They are declared so the fake
+ * satisfies the real binding types rather than a local approximation of them —
+ * a driver that starts calling one of these fails loudly here instead of
+ * passing against a hand-rolled interface that never mentioned it.
+ */
+function unsupported(method: string): never {
+  throw new Error(`FakeD1Database: ${method}() is not emulated`);
+}
+
+/** D1 reports far more than bun:sqlite knows; the rest is filled with zeros. */
+function meta(changes: number, lastRowId: number): D1Response["meta"] {
+  return {
+    duration: 0,
+    size_after: 0,
+    rows_read: 0,
+    rows_written: 0,
+    last_row_id: lastRowId,
+    changed_db: changes > 0,
+    changes,
+  };
 }
 
 class FakeD1PreparedStatement implements D1PreparedStatement {
@@ -31,24 +57,33 @@ class FakeD1PreparedStatement implements D1PreparedStatement {
     return new FakeD1PreparedStatement(this.db, this.sql, values as SQLQueryBindings[]);
   }
 
-  async first<T>(): Promise<T | null> {
+  async first<T = unknown>(colName: string): Promise<T | null>;
+  async first<T = Record<string, unknown>>(): Promise<T | null>;
+  async first<T>(colName?: string): Promise<T | null> {
+    if (colName !== undefined) unsupported("first(colName)");
     return this.db.query<T, SQLQueryBindings[]>(this.sql).get(...this.params) ?? null;
   }
 
-  async all<T>(): Promise<{ results: T[] }> {
-    return { results: this.db.query<T, SQLQueryBindings[]>(this.sql).all(...this.params) };
+  async all<T = Record<string, unknown>>(): Promise<D1Result<T>> {
+    const results = this.db.query<T, SQLQueryBindings[]>(this.sql).all(...this.params);
+    return { success: true, meta: meta(0, 0), results };
   }
 
-  async run(): Promise<RunResult> {
-    return this.execute();
+  async run<T = Record<string, unknown>>(): Promise<D1Result<T>> {
+    return this.execute<T>();
+  }
+
+  raw(): never {
+    return unsupported("raw");
   }
 
   /** Sync form, so batch() can drive it inside a bun:sqlite transaction. */
-  execute(): RunResult {
+  execute<T = Record<string, unknown>>(): D1Result<T> {
     const changes = this.db.query<unknown, SQLQueryBindings[]>(this.sql).run(...this.params);
     return {
       success: true,
-      meta: { changes: changes.changes, last_row_id: Number(changes.lastInsertRowid) },
+      meta: meta(changes.changes, Number(changes.lastInsertRowid)),
+      results: [],
     };
   }
 }
@@ -77,14 +112,26 @@ export class FakeD1Database implements D1Database {
     return new FakeD1PreparedStatement(this.db, query);
   }
 
-  async batch(statements: D1PreparedStatement[]): Promise<unknown> {
+  async batch<T = unknown>(statements: D1PreparedStatement[]): Promise<D1Result<T>[]> {
     const prepared = statements.map((statement) => {
       if (!(statement instanceof FakeD1PreparedStatement)) {
         throw new Error("FakeD1Database.batch: statement did not come from this database");
       }
       return statement;
     });
-    const transaction = this.db.transaction(() => prepared.map((s) => s.execute()));
+    const transaction = this.db.transaction(() => prepared.map((s) => s.execute<T>()));
     return transaction();
+  }
+
+  exec(): Promise<D1ExecResult> {
+    return unsupported("exec");
+  }
+
+  withSession(): D1DatabaseSession {
+    return unsupported("withSession");
+  }
+
+  dump(): Promise<ArrayBuffer> {
+    return unsupported("dump");
   }
 }

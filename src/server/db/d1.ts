@@ -1,25 +1,14 @@
+import type { D1Database, D1PreparedStatement } from "@cloudflare/workers-types";
 import { MAX_SQL_PARAMS, type SqlDriver, type SqlStatement } from "./driver";
-
-/**
- * Minimal structural types for the D1 binding — just the surface this driver
- * uses. Declared locally instead of pulling in @cloudflare/workers-types,
- * whose globals collide with Bun's in a single tsconfig.
- */
-export interface D1PreparedStatement {
-  bind(...values: unknown[]): D1PreparedStatement;
-  first<T>(): Promise<T | null>;
-  all<T>(): Promise<{ results: T[] }>;
-  run(): Promise<{ meta: { changes: number } }>;
-}
-
-export interface D1Database {
-  prepare(query: string): D1PreparedStatement;
-  batch(statements: D1PreparedStatement[]): Promise<unknown>;
-}
 
 /**
  * SqlDriver over Cloudflare D1, for the Worker. The schema comes from
  * migrations/ (wrangler d1 migrations apply), never from here.
+ *
+ * The binding types come from @cloudflare/workers-types, imported as a module
+ * rather than pulled in as ambient globals — which is what lets this file be
+ * typechecked from the Worker project (workerd globals) and from the test
+ * project (Bun globals) without the two runtimes' globals ever meeting.
  */
 export function d1Driver(db: D1Database): SqlDriver {
   const prepare = (sql: string, params: unknown[]): D1PreparedStatement => {

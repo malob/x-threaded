@@ -11,13 +11,13 @@ export type FetchHandler = (url: string, init?: RequestInit) => Response | Promi
 
 let handler: FetchHandler | null = null;
 
-function requestUrl(input: RequestInfo | URL): string {
+function requestUrl(input: Request | URL | string): string {
   if (typeof input === "string") return input;
   if (input instanceof URL) return input.toString();
   return input.url;
 }
 
-globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+globalThis.fetch = (async (input: Request | URL | string, init?: RequestInit) => {
   const url = requestUrl(input);
   if (!handler) throw new Error("network tripwire: unexpected fetch to " + url);
   return await handler(url, init);

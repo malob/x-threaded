@@ -1,0 +1,23 @@
+{
+  // Language options only. Deliberately no `lib` and no `types`: every leaf
+  // config must name its own runtime surface, so nothing inherits DOM or Bun
+  // globals by accident. See tsconfig.json for the map of projects.
+  "compilerOptions": {
+    "target": "ESNext",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "jsx": "react-jsx",
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noFallthroughCasesInSwitch": true,
+    "forceConsistentCasingInFileNames": true,
+    "verbatimModuleSyntax": true,
+    "skipLibCheck": true,
+    "noEmit": true,
+    // Nothing is emitted; `composite` is here for the file-list rule it turns
+    // on. In a composite project, pulling in a file the project does not list
+    // is an error (TS6307) — which is what stops src/web from importing
+    // src/server, and src/shared from importing either.
+    "composite": true
+  }
+}

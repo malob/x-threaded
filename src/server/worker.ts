@@ -1,7 +1,8 @@
+import type { D1Database, ExecutionContext } from "@cloudflare/workers-types";
 import { checkAccess } from "./access";
 import { buildApp } from "./app";
 import { resolveMaxPosts } from "./config";
-import { d1Driver, type D1Database } from "./db/d1";
+import { d1Driver } from "./db/d1";
 import { SqlStore } from "./db/store";
 import { XApi } from "./xapi";
 
@@ -24,7 +25,7 @@ interface Env {
  * (run_worker_first).
  */
 export default {
-  async fetch(request: Request, env: Env, ctx: unknown): Promise<Response> {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const denial = await checkAccess(request, {
       policyAud: env.POLICY_AUD,
       teamDomain: env.TEAM_DOMAIN,
@@ -66,7 +67,7 @@ export default {
             : null,
       });
     }
-    return cachedApp.fetch(request, env, ctx as Parameters<typeof cachedApp.fetch>[2]);
+    return cachedApp.fetch(request, env, ctx);
   },
 };
 

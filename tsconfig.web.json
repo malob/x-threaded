@@ -1,0 +1,14 @@
+{
+  // The browser bundle. DOM and nothing else — no Bun, no Workers, no Node.
+  //
+  // The other half of the boundary is `composite` (tsconfig.base.json): this
+  // project lists src/web and src/shared and nothing more, so an import that
+  // reaches into src/server drags an unlisted file into the program and fails
+  // with TS6307 instead of quietly typechecking against the wrong runtime.
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["ESNext", "DOM", "DOM.Iterable"],
+    "types": ["vite/client"]
+  },
+  "include": ["src/web", "src/shared"]
+}

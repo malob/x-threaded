@@ -7,3 +7,5 @@ data/
 .wrangler/
 *.sqlite
 *.sqlite-*
+# tsc -b's incremental state, one per project in tsconfig.json.
+*.tsbuildinfo

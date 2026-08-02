@@ -1,0 +1,16 @@
+{
+  // Both test suites: `bun test` (test/) and `bun run test:d1` (test-d1/).
+  // Bun runs them, so Bun globals and bun:test — but no DOM: the pieces of
+  // src/web the tests exercise are the pure thread model and keymap, and this
+  // project is what keeps them pure.
+  //
+  // src/server/worker.ts is out: nothing under test imports it, and it is the
+  // one file that needs Workers globals.
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["ESNext"],
+    "types": ["bun"]
+  },
+  "include": ["test", "test-d1", "src/server", "src/shared", "src/web/thread"],
+  "exclude": ["src/server/worker.ts"]
+}

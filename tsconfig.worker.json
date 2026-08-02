@@ -1,0 +1,15 @@
+{
+  // The same server as Cloudflare runs it: src/server/worker.ts over D1.
+  //
+  // `types` is the Workers runtime, so `Response`, `Request` and the D1 binding
+  // are the real workerd ones and not Bun's lookalikes. The Bun-only files are
+  // excluded: bun:sqlite and node:fs are not in the deploy bundle (wrangler
+  // bundles from worker.ts) and must not typecheck as if they were.
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["ESNext"],
+    "types": ["@cloudflare/workers-types"]
+  },
+  "include": ["src/server", "src/shared"],
+  "exclude": ["src/server/index.ts", "src/server/db/bun.ts", "src/server/db/migrations.ts"]
+}

@@ -1,18 +1,28 @@
 {
-  "compilerOptions": {
-    "target": "ESNext",
-    "module": "ESNext",
-    "moduleResolution": "bundler",
-    "lib": ["ESNext", "DOM", "DOM.Iterable"],
-    "jsx": "react-jsx",
-    "strict": true,
-    "noUncheckedIndexedAccess": true,
-    "noFallthroughCasesInSwitch": true,
-    "forceConsistentCasingInFileNames": true,
-    "verbatimModuleSyntax": true,
-    "skipLibCheck": true,
-    "noEmit": true,
-    "types": ["bun", "vite/client"]
-  },
-  "include": ["src", "test", "test-d1"]
+  // The solution file: it owns no source of its own, it just names the five
+  // projects `tsc -b` (bun run typecheck) builds. Each one checks its files
+  // against the runtime that actually runs them:
+  //
+  //   tsconfig.shared.json  src/shared            ECMAScript only
+  //   tsconfig.server.json  src/server (Bun)      Bun
+  //   tsconfig.worker.json  src/server (Worker)   workerd
+  //   tsconfig.web.json     src/web               DOM
+  //   tsconfig.test.json    test, test-d1         Bun
+  //
+  // src/shared is compiled by four of them, which is how "builds in every
+  // runtime we ship to" is enforced rather than asserted.
+  //
+  // The compilerOptions below are inherited only so that the transpilers that
+  // look for the nearest tsconfig.json — vite/esbuild, bun, wrangler — keep
+  // finding `jsx`, `target` and `verbatimModuleSyntax`. Nothing is typechecked
+  // through this file; `files: []` is what makes it a solution file.
+  "extends": "./tsconfig.base.json",
+  "files": [],
+  "references": [
+    { "path": "./tsconfig.shared.json" },
+    { "path": "./tsconfig.server.json" },
+    { "path": "./tsconfig.worker.json" },
+    { "path": "./tsconfig.web.json" },
+    { "path": "./tsconfig.test.json" }
+  ]
 }

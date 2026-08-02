@@ -15,8 +15,9 @@
  * deliberately does not match. Run it with `bun run test:d1`.
  */
 import { afterAll } from "bun:test";
+import type { D1Database } from "@cloudflare/workers-types";
 import { getPlatformProxy } from "wrangler";
-import { d1Driver, type D1Database } from "../src/server/db/d1";
+import { d1Driver } from "../src/server/db/d1";
 import { applyMigrations, loadMigrations } from "../src/server/db/migrations";
 import { SqlStore } from "../src/server/db/store";
 import { describeStorageContract } from "../test/storage-contract";

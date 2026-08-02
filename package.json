@@ -11,7 +11,7 @@
     "start": "bun src/server/index.ts",
     "test": "bun test",
     "test:d1": "bun test ./test-d1/storage-contract.d1.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc -b"
   },
   "dependencies": {
     "@tanstack/react-query": "^5.101.4",
@@ -22,6 +22,7 @@
     "valibot": "^1.4.2"
   },
   "devDependencies": {
+    "@cloudflare/workers-types": "^5.20260801.1",
     "@eslint/js": "^10.0.1",
     "@types/bun": "^1.2.0",
     "@types/react": "^19.0.0",
