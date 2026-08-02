@@ -61,18 +61,23 @@ export interface ConversationResponse {
    * read, and "load older replies" is the way out of it.
    */
   truncated: boolean;
-  /** True when served from the local cache without hitting the X API. */
+  /**
+   * True when these posts came out of the local cache rather than a fetch.
+   * It does not mean the request was free: resolving *which* conversation to
+   * serve can cost a lookup for a post we have never seen, so a cached
+   * response can still carry a `cost`. That field, not this one, is what a
+   * billing question should be asked of.
+   */
   fromCache: boolean;
-  /** Present when this response involved API reads. */
+  /** Present when this response involved API reads; absent when nothing billed. */
   cost?: FetchCost;
 }
 
 /**
  * What a request estimates it spent at X, after same-day deduplication.
  *
- * An estimate, not a statement: X deduplicates a post read within a 24h UTC
- * day and documents that as soft, so `billable` is our reading of their rules,
- * not their invoice. The free /2/usage/tweets endpoint is what reconciles it.
+ * An estimate, not a statement: `billable` is our reading of X's dedup rules,
+ * not their invoice (docs/x-api-notes.md N2).
  */
 export interface FetchCost {
   /** Posts read from X, at either rate. */
@@ -140,7 +145,11 @@ export interface SavedEntry {
   source: string;
   addedAt: string;
   rootId: string;
-  /** Whether the full conversation is already cached. */
+  /**
+   * Whether a conversation row exists for it — so opening it renders without
+   * a fetch. Not a promise that the whole tree is here: a partial fetch also
+   * leaves a row, and `ConversationResponse.truncated` is what says so.
+   */
   loaded: boolean;
 }
 
@@ -152,17 +161,28 @@ export interface SavedListResponse {
 /** One of the user's own threads, represented by its root post. */
 export interface OwnThread {
   root: Post;
-  /** How many posts in this thread are the user's own (1 = a lone post). */
+  /**
+   * How long the thread itself is: the root plus its chain of self-replies
+   * (1 = a lone post). Not every post the user has in the conversation —
+   * their replies to other participants are deliberately excluded, or a
+   * two-post thread that sparked a long discussion reads as a 21-post one.
+   * Computed by `spineLength` in src/server/threads.ts.
+   */
   ownPostCount: number;
   /** Timestamp of their most recent post in it, for ordering. */
   latestAt: string;
+  /** Whether a conversation row exists for it; see SavedEntry.loaded. */
   loaded: boolean;
 }
 
 export interface OwnPostsResponse {
   items: OwnThread[];
   quoted: Record<string, Post>;
-  /** The scan filled its quota, so asking for more may yield more. */
+  /**
+   * There may be more threads than were returned — either the scan found more
+   * than it was asked to show, or the timeline still has pages. False only
+   * when the timeline ran out with nothing trimmed.
+   */
   hasMore: boolean;
   /** Owned Reads for the timeline pages, plus any root the scan had to buy. */
   cost: FetchCost;

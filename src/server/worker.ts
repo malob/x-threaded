@@ -20,9 +20,11 @@ interface Env {
 }
 
 /**
- * Cloudflare Workers entry. Static assets and the SPA fallback are handled
- * by the assets config in wrangler.jsonc; only /api/* reaches this handler
- * (run_worker_first).
+ * Cloudflare Workers entry. Static assets and the SPA fallback are handled by
+ * the assets config in wrangler.jsonc, whose `run_worker_first` lists both
+ * prefixes that reach this handler: /api/* and /auth/*. The second is not
+ * optional — the OAuth redirect and callback live there, and letting the SPA
+ * swallow them breaks login.
  */
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {

@@ -10,10 +10,11 @@ export const OWNED_READ_USD = 0.001;
 /**
  * What one X call billed, in the two units X charges in.
  *
- * An estimate, always: X deduplicates a post read within a 24h UTC day and
- * documents that dedup as soft, so nothing here is a figure X will confirm.
- * The free /2/usage/tweets endpoint is what reconciles this ledger against
- * their meter (2026-07-30 review, H1).
+ * An estimate, always: X deduplicates a post read within a UTC calendar day,
+ * and that dedup is observed rather than contractual, so nothing here is a
+ * figure X will confirm (docs/x-api-notes.md N2). The free /2/usage/tweets
+ * endpoint is what reconciles this ledger against their meter (2026-07-30
+ * review, H1).
  */
 export interface Receipt {
   /** Posts read at the lookup/search rate. */

@@ -7,7 +7,9 @@ const AUTHORIZE_URL = "https://x.com/i/oauth2/authorize";
 /**
  * Scopes we ask for during interactive consent. Tokens generated in the
  * developer portal come with a fixed set that excludes bookmark.read, so the
- * bookmark-folder inbox requires going through this flow.
+ * bookmark-folder inbox requires going through this flow — this is the one
+ * copy of that rule; everywhere else points here or at
+ * docs/x-api-notes.md N13.
  */
 export const SCOPES = ["tweet.read", "users.read", "bookmark.read", "offline.access"];
 /** Refresh this long before actual expiry so in-flight requests don't race it. */
@@ -186,7 +188,8 @@ class RefreshError extends OAuthError {
 /**
  * Exchange a refresh token for a new access token. X rotates refresh tokens:
  * the response carries a new one and the old is immediately dead, so the
- * caller must persist the result before using it.
+ * caller must persist the result before using it. The rotation contract and
+ * everything it forces on this file is docs/x-api-notes.md N14.
  *
  * The hard timeout has no accompanying retry on purpose. Retrying a refresh is
  * re-presenting a token that may already have been spent, which is the one
@@ -448,10 +451,11 @@ async function renew(store: Storage, config: OAuthConfig, timings: TokenTimings)
 
 /**
  * A valid user-context access token, refreshing when it's close to expiry.
- * Returns null when the deployment has no user tokens configured — callers
- * fall back to app-only auth or report the feature as unavailable. Throws when
- * the grant is broken: only `/auth/login` fixes that, and pretending otherwise
- * would send the caller off to make a doomed API call.
+ * Returns null when the deployment has no user tokens configured, which
+ * callers report as the feature being unavailable — there is no app-only
+ * fallback, because no user-context endpoint accepts the app-only bearer.
+ * Throws when the grant is broken: only `/auth/login` fixes that, and
+ * pretending otherwise would send the caller off to make a doomed API call.
  */
 export async function getUserAccessToken(
   store: Storage,

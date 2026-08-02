@@ -21,8 +21,8 @@ type Tab = "saved" | "yours";
  * Whether opening this card costs anything, shown so clicking is informed
  * consent — inbox clicks fetch straight away rather than prompting.
  *
- * A loaded conversation is cheap, not free: opening one on a new UTC day
- * refreshes it, and that read bills. So the tag says what we know — the
+ * A loaded conversation is cheap, not free: opening one on a new UTC calendar
+ * day refreshes it, and that read bills. So the tag says what we know — the
  * conversation is here — and stops short of a promise the click can't keep.
  */
 function FetchCost({ loaded, replyCount }: { loaded: boolean; replyCount: number }) {

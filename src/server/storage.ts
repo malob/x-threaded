@@ -26,8 +26,9 @@ export interface ConversationMeta {
   status: ConversationStatus;
   /**
    * When the last *complete full* read finished, or null if there has never
-   * been one. What the refresh fork reads: a same-day full re-read is free
-   * under X's 24h dedup, and only an actual full read may say so.
+   * been one. What the refresh fork reads: a full re-read on the same UTC
+   * calendar day is free under X's dedup, and only an actual full read may
+   * say so.
    */
   fullReadAt: string | null;
 }
@@ -75,9 +76,13 @@ export interface Storage {
   getPosts(conversationId: string): Promise<Post[]>;
   getPostsByIds(ids: string[]): Promise<Post[]>;
   /**
-   * Which of these posts we already read today (UTC). X deduplicates reads
-   * within a UTC day, so those are free to read again — this is how actual
-   * spend is computed rather than guessed.
+   * Which of these posts we already read on the current UTC calendar day. X
+   * deduplicates reads within one, so those should be free to read again —
+   * this is how spend is estimated rather than guessed.
+   *
+   * "Should be": the dedup is observed behaviour, not a rate X will confirm
+   * (docs/x-api-notes.md N2). A billing discrepancy that traces back here is
+   * upstream policy having moved, not an arithmetic bug.
    */
   postIdsReadToday(ids: string[]): Promise<Set<string>>;
   getPost(id: string): Promise<Post | null>;

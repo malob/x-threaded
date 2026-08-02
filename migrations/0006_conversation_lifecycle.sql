@@ -17,7 +17,8 @@
 ALTER TABLE conversations ADD COLUMN status TEXT NOT NULL DEFAULT 'complete';
 
 -- When the last *complete full* read of this conversation finished, which is
--- what decides whether another one is free under X's 24h dedup. Distinct from
+-- what decides whether another one is free under X's same-UTC-calendar-day
+-- dedup. Distinct from
 -- fetched_at ("when we last went to X about this at all"): a since_id refresh
 -- or a resume touches fetched_at and must not make the next refresh think a
 -- full re-read has already been paid for today.

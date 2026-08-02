@@ -26,6 +26,12 @@ const MEDIA_FIELDS = "type,url,preview_image_url,width,height";
 export const SEARCH_PAGE_SIZE = 100;
 /** Smallest page /tweets/search/all accepts; asking for less is a 400. */
 export const MIN_SEARCH_PAGE_SIZE = 10;
+/**
+ * Gap between paginated requests. Full-archive search paces at roughly 1 req/s
+ * on this tier and answers 429 above it, so the extra 100ms is headroom, not
+ * an arbitrary round number — "optimizing" this toward zero buys rate limits
+ * (docs/x-api-notes.md N7).
+ */
 const PAGE_DELAY_MS = 1100;
 /**
  * How far before the root's own timestamp the search window opens. The root
@@ -80,9 +86,9 @@ export interface ConversationPage {
   referenced: Post[];
   /**
    * Referenced posts X shipped with media keys but no media objects — the
-   * endpoint only attaches media to main results. Looking them up again is
-   * how their images resolve, and that is a second response, so the caller
-   * decides whether it is worth another read.
+   * endpoint only attaches media to main results (docs/x-api-notes.md N9).
+   * Looking them up again is how their images resolve, and that is a second
+   * response, so the caller decides whether it is worth another read.
    */
   unresolvedMediaIds: string[];
   /** Absent when this was the last page: the search has nothing more. */
@@ -116,13 +122,13 @@ export interface SearchPageOptions {
  * Where a conversation's search window opens, or undefined when it can't be
  * derived.
  *
- * Without start_time, /tweets/search/all quietly searches only the last 30
- * days and an older conversation comes back missing its history — no error,
- * no truncation flag. The root's ID dates the conversation, so the window is
- * bounded there. A conversation ID that isn't a snowflake can't date anything:
- * send no start_time and let X apply its default rather than fabricate a
- * bound — the search itself will come back empty for an ID this malformed
- * anyway.
+ * Sending start_time at all is what stops /tweets/search/all from silently
+ * searching just the last 30 days and returning an old conversation shorn of
+ * its history, with no error and no truncation flag (docs/x-api-notes.md N6).
+ * The root's ID dates the conversation, so the window is bounded there. A
+ * conversation ID that isn't a snowflake can't date anything: send no
+ * start_time and let X apply its default rather than fabricate a bound — the
+ * search itself will come back empty for an ID this malformed anyway.
  */
 export function conversationStartTime(conversationId: string): string | undefined {
   const conversationMs = snowflakeMs(conversationId);
@@ -140,10 +146,9 @@ export function conversationStartTime(conversationId: string): string | undefine
  * the value gets unwrapped, so a call whose cost goes unreported has to be
  * written to look wrong.
  *
- * The counts are estimates: X deduplicates a post read within a 24h UTC day,
- * calls that dedup soft, and only /2/usage/tweets knows what it really
- * charged. Where two of our calls read the same post, the receipts add — the
- * conservative direction.
+ * The counts are estimates — X's same-day dedup is observed, not contractual
+ * (docs/x-api-notes.md N2). Where two of our calls read the same post the
+ * receipts add, which is the conservative direction.
  */
 export interface Billed<T> {
   readonly value: T;
@@ -176,7 +181,11 @@ export function spentOnFailure(err: unknown): Receipt | null {
   return receipt ?? null;
 }
 
-/** The v2 API HTML-escapes &, <, > in post text; x.com renders them unescaped. */
+/**
+ * Undo the API's HTML escaping, which x.com's own rendering doesn't show
+ * (docs/x-api-notes.md N11). `&amp;` goes last so an escaped `&amp;lt;`
+ * decodes once rather than twice.
+ */
 function unescapeText(text: string): string {
   return text.replaceAll("&lt;", "<").replaceAll("&gt;", ">").replaceAll("&amp;", "&");
 }
@@ -190,6 +199,9 @@ function toPost(
   const author = users.get(tweet.author_id);
   const parent = tweet.referenced_tweets?.find((r) => r.type === "replied_to");
   const quoted = tweet.referenced_tweets?.find((r) => r.type === "quoted");
+  // Past 280 characters `text` is only a preview and `note_tweet` holds the
+  // whole post — entities included, so both have to come from the same one or
+  // links past the cut vanish silently (docs/x-api-notes.md N10).
   const text = tweet.note_tweet?.text ?? tweet.text;
   const urls = tweet.note_tweet?.entities?.urls ?? tweet.entities?.urls;
   const entities: PostEntities | null = urls?.length
@@ -286,6 +298,11 @@ export class XApi {
     }
     const headers = { Authorization: `Bearer ${token ?? this.bearerToken}` };
     let response = await fetch(url, { headers });
+    // Exactly one retry, and a bounded wait. Once, because a call that fails
+    // twice is a condition that won't clear inside a page load, and each
+    // attempt of a *successful* call is money; bounded, because this runs
+    // inside a request holding an open spend meter, and a reset header far in
+    // the future would otherwise park it there until the runtime kills it.
     if (response.status === 429 || response.status >= 500) {
       const resetHeader = response.headers.get("x-rate-limit-reset");
       const waitMs =
@@ -329,6 +346,11 @@ export class XApi {
    * and 22 of those continued a thread whose root was also in the page). So
    * it yields exactly what thread grouping needs, without paying to read
    * every reply the user made inside someone else's conversation.
+   *
+   * X's docs say otherwise, and this repo asserted the docs' version — just
+   * as confidently — until it was measured. Before flipping it back, read
+   * docs/x-api-notes.md N3, which keeps the history so a third flip needs new
+   * numbers rather than new confidence.
    */
   async getOwnPosts(
     accessToken: string,
@@ -376,9 +398,9 @@ export class XApi {
    * Posts saved in one bookmark folder.
    *
    * This endpoint accepts only id/folder_id/max_results/pagination_token —
-   * no field or expansion parameters — so it yields bare post stubs. The IDs
-   * are then hydrated through the lookup endpoint to get authors, entities,
-   * and media.
+   * no field or expansion parameters — so it yields bare post stubs
+   * (docs/x-api-notes.md N8). The IDs are then hydrated through the lookup
+   * endpoint to get authors, entities, and media.
    *
    * `complete` is false when maxPages ran out with the folder still going.
    * Callers reconcile against this list, and a partial one is indistinguishable
@@ -462,9 +484,10 @@ export class XApi {
    * Requested ids that come back without a post are returned in `missing`
    * rather than silently dropped — a bookmark whose author went private is
    * still a bookmark, and callers can only say so when the loss is visible.
-   * Reasons come from the response's partial-error entries (attributed by
-   * resource_id), with absence-from-data as the backstop for anything X
-   * failed to explain.
+   * A partial failure here is an HTTP 200 with entries in `errors[]`, whose
+   * shape varies by variant, so reasons are attributed by id where one is
+   * given and absence-from-data is the backstop for the rest
+   * (docs/x-api-notes.md N12).
    */
   async getPostsByIds(ids: string[]): Promise<Billed<{ posts: Post[]; missing: MissingPost[] }>> {
     const posts: Post[] = [];
@@ -503,6 +526,11 @@ export class XApi {
    * One page of a conversation from full-archive search: one request, one
    * response, no loop. Paging, budgets and what to keep are the caller's;
    * this end only knows the wire.
+   *
+   * No token is passed, deliberately: /tweets/search/all works with the
+   * app-only bearer and rejects user-context tokens, so collapsing this class
+   * down to one token would break conversation fetching entirely
+   * (docs/x-api-notes.md N5).
    *
    * Billed $0.005 per post the page returned, `includes` posts included: we
    * ingest and render those, so we count them. A post the page returns twice —

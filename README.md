@@ -2,88 +2,128 @@
 
 A threaded reader for X/Twitter reply trees. Paste a post URL, get the full
 conversation as a navigable tree — the thing x.com's flattened reply view
-can't do.
+can't do. Keyboard-driven, with a saved queue fed by an X bookmark folder, a
+tab for your own threads, and deep links that mirror x.com's URLs (swap the
+domain on any post URL).
+
+It runs as your own single-user deployment. You bring an X API token and pay X
+per post you read; the app caches every conversation it buys, serves it from
+that cache for free afterwards, and prices anything that would spend before
+you click it. There is no hosted instance and no account system — the
+deployment is yours.
 
 [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/malob/x-threaded)
 
-Deploying your own instance is free (Cloudflare Workers + D1 free tiers, no
-card required); you bring your own X API token (`wrangler secret put
-X_BEARER_TOKEN`) and pay X per post you read. The deploy button activates
-once this repo is public on GitHub.
+## Deploy
 
-Built on the X API's pay-per-use tier ($0.005/post read, deduplicated within a
-24-hour UTC window). A conversation is fetched once via full-archive search on
-its `conversation_id`, cached in SQLite forever, and later refreshed
-incrementally.
+The button above provisions a Worker and a D1 database on the free tiers (no
+card required); it activates once this repo is public on GitHub. Afterwards,
+apply migrations and set your secrets as below.
 
-## Stack
-
-Single TypeScript repo: Bun + Hono server (X API proxy, SQLite cache via
-`bun:sqlite`, serves the built SPA) and a React/Vite frontend.
-
-## Configuration
-
-Every setting is per-deployment; none are committed. `.env.example` is the
-single reference for all of them, with notes on what each unlocks. Only
-`X_BEARER_TOKEN` is required — the rest add features and the app degrades
-cleanly without them.
-
-- **Local**: `cp .env.example .env` and fill it in.
-- **Deployed**: set the same names with `wrangler secret put NAME`. Secrets
-  are used rather than `wrangler.jsonc` vars because vars are committed, so
-  they would follow anyone who forks this repo.
-
-## Running
-
-Two interchangeable server targets share the same app code
-(`src/server/app.ts`) behind an async storage interface: Bun + SQLite file,
-or Cloudflare Workers + D1.
-
-### Bun (local)
-
-```
-bun install
-bun run build          # build the SPA into dist/
-bun run dev:server     # serves on :8788
-```
-
-For frontend work with HMR, also run `bun run dev:web` (Vite on :5173,
-proxying /api and /auth to :8788).
-
-### Cloudflare Workers (local simulation or deployed)
+Manually:
 
 ```
 bun install && bun run build
-npx wrangler d1 migrations apply x-threaded --local
-./scripts/dev-worker.sh          # wrangler dev on :8788, local D1
+wrangler login
+wrangler deploy                                    # auto-provisions D1
+wrangler d1 migrations apply x-threaded --remote
+wrangler secret put X_BEARER_TOKEN                 # and any others you want
 ```
 
-To deploy: `wrangler login`, `wrangler deploy` (auto-provisions the D1
-database), `wrangler d1 migrations apply x-threaded --remote`, then set your
-secrets. Note that `wrangler dev --remote` will not work against a Worker
-behind Cloudflare Access without an Access service token.
+`scripts/push-secrets.sh` pushes the five credential-shaped values
+(`X_BEARER_TOKEN`, the two OAuth ones, `POLICY_AUD`, `TEAM_DOMAIN`) from your
+local `.env` in one go, skipping any that aren't set. If you put the Worker
+behind Cloudflare Access, note that `wrangler dev --remote` won't reach it
+without an Access service token.
 
-### User-context features
+## Configuration
 
-The Your posts tab and bookmark folder sync need OAuth credentials (see
-`.env.example`). Each deployment authorizes itself once at `/auth/login` and
-holds its own token chain — local and production must never share one, since
-refresh tokens are single-use and rotate.
+Every setting is per-deployment and none are committed. `.env.example`
+documents each one and what it unlocks; only `X_BEARER_TOKEN` is required, and
+the app degrades cleanly without the rest.
 
-## Status
+| Variable | What it does |
+|---|---|
+| `X_BEARER_TOKEN` | **Required.** App-only bearer; reads public conversations. |
+| `X_OAUTH_CLIENT_ID` / `X_OAUTH_CLIENT_SECRET` | Enables the Your posts tab and bookmark folder sync. |
+| `POLICY_AUD` / `TEAM_DOMAIN` | Verify Cloudflare Access JWTs, so the API fails closed if Access is turned off. |
+| `MAX_POSTS_PER_FETCH` | Safety cap per conversation load, 10–5000 (default 500 ≈ $2.50 worst case). A malformed value refuses to boot rather than uncapping spend. |
+| `PORT` / `DB_PATH` | Bun server only: listen port, SQLite file. |
+| `WORKER_PORT` | `scripts/dev-worker.sh` only: port for `wrangler dev`. |
 
-- [x] Milestone 1 — fetch pipeline, SQLite cache, crude tree render
-- [x] Milestone 2 (display) — thread spines with inline reply stubs, run
-      flattening with git-graph rails, per-block collapse, entity links,
-      inline media, quote cards (nested one level), metrics row, avatars
-- [x] Milestone 3 — read/unread state, refresh (`since_id`, with free
-      same-day full re-reads for metrics), unread rollups, conversation inbox
-- [x] Milestone 2 (navigation) — vim-idiomatic keyboard layer: cursor,
-      j/k/h/l + arrows, {/} sibling branches, n/N unread traversal
-      (auto-marks read), r/R read state, z-family folds, gx/yy, ? help
-- [x] Deep-link routes mirroring x.com (`/<handle>/status/<id>` — swap the
-      domain on any post URL) with scroll-to-focus and a fetch-consent prompt
-      for uncached conversations
-- [x] Milestone 4 — deployed on Cloudflare Workers + D1 (chosen over
-      Fly.io: free tier, one-click deploy button, D1 auto-provisioning);
-      auth gate via Cloudflare Access on the workers.dev domain
+Locally, `cp .env.example .env` and fill it in — both runtimes read it. When
+deployed, set the same names with `wrangler secret put NAME`; `wrangler.jsonc`
+vars are committed and would follow anyone who forks this repo.
+
+The user-context features need one interactive authorization per deployment at
+`/auth/login`. **Give each deployment its own X app.** X allows one live grant
+per user per client id, so two deployments sharing a client id revoke each
+other's tokens on login — see [`docs/x-api-notes.md`](docs/x-api-notes.md) N15.
+
+## Running locally
+
+Both targets serve the same app on `:8788`.
+
+```
+bun install
+bun run build            # build the SPA into dist/
+
+bun run dev:server       # Bun + SQLite file
+# or
+npx wrangler d1 migrations apply x-threaded --local
+./scripts/dev-worker.sh  # wrangler dev + local D1
+```
+
+For frontend work with HMR, also run `bun run dev:web` (Vite on `:5173`,
+proxying `/api` and `/auth` to `:8788`).
+
+Gates: `bun run lint`, `bun run typecheck`, `bun test`, `bun run test:d1`
+(the storage contract against a real local-workerd D1 binding — slow, so it is
+kept out of the default run), `bun run build`.
+
+## Architecture
+
+One TypeScript repo, two server targets, one set of routes.
+
+- **`src/server/app.ts`** — every API route, as a Hono app with no runtime
+  dependencies. `src/server/index.ts` (Bun) and `src/server/worker.ts`
+  (Workers) are thin entries that build it with the right storage driver.
+- **Storage** — `SqlStore` writes each query exactly once over a four-method
+  `SqlDriver` seam (`src/server/db/`), backed by `bun:sqlite` locally and D1
+  when deployed. The interface is async so both fit behind it.
+- **Schema** — `migrations/` is the only source of it, applied by wrangler
+  when deployed and by `src/server/db/migrations.ts` locally.
+- **X gateway** — `src/server/xapi.ts` is the only layer that knows an
+  endpoint's billing unit; every method returns its value with a cost receipt
+  attached, so a call whose spend goes unreported has to be written to look
+  wrong.
+- **Client** — a React/Vite SPA where TanStack Query owns all server state
+  (`src/web/queries/`), the thread tree is a pure model
+  (`src/web/thread/model.ts`), and the keyboard layer is a reducer over a
+  command table.
+- **Types** — five per-runtime tsconfig projects (server, worker, web, shared,
+  test), so each file is checked against the globals it actually gets.
+
+## Costs
+
+X's pay-per-use tier bills per post read, and the app shows the price of every
+action that spends:
+
+| Action | What it costs |
+|---|---|
+| Fetching a conversation | $0.005 per post, estimated at ~1.5× the root's reply count and shown before you commit |
+| Re-opening a cached one | free to render; the refresh it fires is free too on the same UTC calendar day as the last full read, and $0.005 per post after |
+| Refreshing for new replies | $0.005 per post that arrived since |
+| Resuming a truncated fetch | $0.005 per older post it goes back for |
+| Your posts tab | $0.001 per post (Owned Read), plus $0.005 for any thread root older than the scan window |
+| Bookmark sync | $0.001 per bookmark enumerated, plus $0.005 per post hydrated |
+
+Those are estimates, not invoices: X's same-day deduplication is observed
+rather than contractual, and X's free `/2/usage/tweets` endpoint is what
+reconciles them. Set a spending limit in the X developer console.
+
+## Further reading
+
+[`docs/x-api-notes.md`](docs/x-api-notes.md) — what this app has measured
+about the X API, including several behaviours X's own docs contradict. Read it
+before changing anything that talks to X.

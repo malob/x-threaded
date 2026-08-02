@@ -6,8 +6,9 @@ const SNOWFLAKE_EPOCH_MS = 1288834974657;
 
 /**
  * Inverse of snowflakeMs: a post ID that decodes back to `when`. Fixture IDs
- * have to be snowflake-consistent with createdAt because tree.ts compares the
- * two (attachPlaceholders), and the stores order posts by ID.
+ * have to be snowflake-consistent with createdAt because the thread model
+ * compares the two when placing gaps (`attachGaps` in
+ * src/web/thread/model.ts), and the stores order posts by ID.
  */
 export function snowflakeId(when: string | number): string {
   const ms = typeof when === "number" ? when : Date.parse(when);

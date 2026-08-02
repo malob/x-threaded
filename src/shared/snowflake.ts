@@ -2,8 +2,10 @@
 const SNOWFLAKE_EPOCH_MS = 1288834974657;
 
 /**
- * Creation time encoded in a post ID (snowflake: ms since the X epoch), or
- * null when the ID isn't a snowflake at all.
+ * Creation time decoded from a post ID, as **Unix** epoch milliseconds, or
+ * null when the ID isn't a snowflake at all. The ID itself encodes ms since
+ * the X epoch; the constant below is what converts it, so the result drops
+ * straight into `new Date()`.
  *
  * Shared rather than client-side because the server dates conversations from
  * their root ID too — a post's ID is the only timestamp available before the

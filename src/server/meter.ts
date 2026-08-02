@@ -12,9 +12,9 @@ import type { Billed } from "./xapi";
  *
  * Two sides, because X bills twice for nothing: the client reports what each
  * response returned, and callers that can see the store credit back the posts
- * it had already read today, which X's 24h dedup should make free. The dedup
- * is documented as soft, so this is an estimate on both sides — /2/usage/tweets
- * is the only thing that knows.
+ * it had already read on the same UTC calendar day, which X's dedup should
+ * make free. That dedup is observed rather than contractual, so this is an
+ * estimate on both sides (docs/x-api-notes.md N2).
  */
 export class SpendMeter {
   private charged: Receipt = NO_READS;

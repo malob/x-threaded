@@ -171,10 +171,9 @@ export function buildApp({ store, xapi, maxPosts, oauth = null }: AppDeps): ApiA
   });
 
   /**
-   * Interactive consent. Tokens minted in the developer portal lack
-   * bookmark.read, so this flow is how the app gets a fully-scoped token.
-   * The PKCE verifier and state ride in a short-lived httpOnly cookie
-   * rather than server state.
+   * Interactive consent — the only way to a token with bookmark.read on it
+   * (see `SCOPES` in oauth.ts, and docs/x-api-notes.md N13). The PKCE verifier
+   * and state ride in a short-lived httpOnly cookie rather than server state.
    */
   app.get("/auth/login", async (c) => {
     if (!oauth) return c.json({ error: "OAuth is not configured" } satisfies ApiError, 400);
@@ -266,9 +265,10 @@ export function buildApp({ store, xapi, maxPosts, oauth = null }: AppDeps): ApiA
       await xapi.getBookmarksByFolder(token, userId, folderId),
     );
     // Before the upsert, which overwrites fetched_at: hydrating a post read
-    // earlier today is the part X's same-day dedup covers. The folder pages
-    // themselves are not credited — they enumerate rather than return posts,
-    // and whether that dedups is exactly the soft part of the rule.
+    // earlier on the same UTC calendar day is the part X's dedup covers. The
+    // folder pages themselves are not credited — they enumerate rather than
+    // return posts, and whether that dedups is exactly the soft part of the
+    // rule (docs/x-api-notes.md N2, N8).
     meter.credit(postReads((await store.postIdsReadToday(posts.map((p) => p.id))).size));
     await store.upsertPosts(posts);
 
@@ -314,8 +314,10 @@ export function buildApp({ store, xapi, maxPosts, oauth = null }: AppDeps): ApiA
       const post = byId.get(item.postId);
       return post ? [{ item, post }] : [];
     });
-    // A conversation is "loaded" when we've cached its whole tree. One query
-    // for the page rather than one per row (2026-07-30 review, S3).
+    // "Loaded" is "we hold a conversation row for it", so opening it renders
+    // without a fetch — a partial conversation counts, and says so through
+    // `truncated` when it is opened. One query for the page rather than one
+    // per row (2026-07-30 review, S3).
     const loaded = await store.hasConversations([
       ...new Set(hydrated.map(({ post }) => post.conversationId)),
     ]);
@@ -372,8 +374,8 @@ export function buildApp({ store, xapi, maxPosts, oauth = null }: AppDeps): ApiA
     // Keep scanning until there are enough threads the user actually
     // started. Counting raw conversations would overshoot, because replies
     // into other people's threads get filtered out afterwards.
-    // Re-scanning for a larger target is nearly free: posts already read
-    // today don't bill again (24h dedup), so only new ground costs.
+    // Re-scanning for a larger target is nearly free: posts already read on
+    // the same UTC calendar day don't bill again, so only new ground costs.
     const MAX_SCAN = Math.min(Math.max(target * 30, 300), 900);
     const posts: Post[] = [];
     let paginationToken: string | undefined;
@@ -546,9 +548,9 @@ export function buildApp({ store, xapi, maxPosts, oauth = null }: AppDeps): ApiA
 
     const meter = meterOf(c);
     const before = await store.existingPostIds(rootId);
-    // Post reads deduplicate within a UTC day, so a full re-read on the same
-    // day as the last *full read* is free and refreshes metrics; otherwise
-    // fetch only new posts via since_id.
+    // Post reads deduplicate within a UTC calendar day, so a full re-read on
+    // the same day as the last *full read* is free and refreshes metrics;
+    // otherwise fetch only new posts via since_id.
     //
     // The fork reads full_read_at rather than fetched_at because they answer
     // different questions. X's dedup is keyed on the posts we actually read,

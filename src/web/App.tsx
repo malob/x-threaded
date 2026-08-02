@@ -115,8 +115,13 @@ export function App() {
         const post = cached.posts.find((p) => p.id === postId);
         history.pushState({}, "", appPath(post?.authorHandle, postId));
       }
-      // The inbox reloads itself whenever it mounts, so leaving a conversation
-      // is enough to pick up new read state — no cross-component plumbing.
+      // Then go and see what has been said since. Free on the same UTC
+      // calendar day as the last full read, billable after — which is the
+      // "loaded is cheap, not free" the inbox card warns about.
+      //
+      // Nothing tells the inbox about the read state this generates: it
+      // reloads itself whenever it mounts, so leaving the conversation is
+      // enough, and no cross-component plumbing has to exist.
       writes.refresh(resolved);
     } catch (e) {
       if (epoch !== navigation.current) return;

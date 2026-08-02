@@ -366,6 +366,11 @@ export function buildThread(
    * The spine: the root author replying to their own posts, from the root
    * down. Children are chronological, so a forked self-reply resolves to the
    * earliest; later self-replies render as ordinary replies.
+   *
+   * The inbox counts a spine of its own — `spineLength` in
+   * src/server/threads.ts, over the timeline scan rather than the fetched
+   * conversation — and the two can disagree on exactly the forked case this
+   * line decides. See that function for what diverges.
    */
   const spine: PostNode[] = [root];
   for (let current = root; ; ) {

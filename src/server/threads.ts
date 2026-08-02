@@ -8,6 +8,15 @@ import type { XApiClient } from "./xapi";
  * self-replies. Counting every post the author has in the conversation
  * would fold in their replies to other people — one two-post thread that
  * sparked a long discussion measured 21 that way.
+ *
+ * The renderer walks the same spine independently (`buildThreadModel` in
+ * src/web/thread/model.ts) and the two can disagree, so this number is a
+ * label rather than a promise about what the reader will see. Two known
+ * divergences: on a forked self-reply this keeps the *last* candidate for a
+ * given parent (byParent overwrites) while the renderer takes the *earliest*
+ * child; and this walks only the timeline posts it was handed, so a
+ * self-reply the scan didn't return truncates the chain here but not there.
+ * Change one and check the other.
  */
 export function spineLength(root: Post, ownPosts: Post[]): number {
   const byParent = new Map<string, Post>();
