@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { XApi } from "../src/server/xapi";
-import { snowflakeMs } from "../src/web/tree";
+import { snowflakeMs } from "../src/shared/snowflake";
 import { FakeD1Database, D1_MAX_BOUND_PARAMS } from "./fake-d1";
 import { FakeXApi } from "./fake-xapi";
 import { makePost, snowflakeId } from "./fixtures";

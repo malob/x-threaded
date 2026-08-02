@@ -4,19 +4,11 @@
  * These lock the behavior of the vim bindings as they were when the reducer
  * was extracted from Thread.tsx — including the parts that look like
  * accidents, which are called out where they appear. The model under test is
- * built through the same adapter the view uses (thread/tree-model.ts), so a
- * test agreeing with the reducer but not with the app is not possible.
+ * the one the view builds (thread/model.ts), so a test agreeing with the
+ * reducer but not with the app is not possible.
  */
 import { describe, expect, it } from "bun:test";
 import type { Post } from "../src/shared/types";
-import {
-  buildTree,
-  documentOrder,
-  foldOwnerIds,
-  parentIds,
-  threadSpine,
-  type TreeNode,
-} from "../src/web/tree";
 import { HELP, KEYMAP } from "../src/web/thread/keymap";
 import {
   applyKey,
@@ -27,7 +19,7 @@ import {
   type KeyResult,
   type KeyState,
 } from "../src/web/thread/keys";
-import { keyModelOf } from "../src/web/thread/tree-model";
+import { buildThread } from "../src/web/thread/model";
 import { makePost } from "./fixtures";
 
 const HANDLES: Record<string, string> = { A: "alice", B: "bob", C: "carol", D: "dave" };
@@ -70,27 +62,11 @@ function thread(specs: readonly Spec[], unreadNames: readonly string[] = []): Th
   });
 
   const rootId = ids.get(specs[0]![0])!;
-  const root = buildTree(rootId, posts)!;
-  const spine = threadSpine(root);
-  const owners = foldOwnerIds(root, spine);
-  const parents = parentIds(root);
-  const allOrder = documentOrder(root, spine);
-  const byId = new Map<string, TreeNode>(allOrder.map((node) => [node.post.id, node]));
+  const model = buildThread(rootId, posts)!;
   const unread = new Set(unreadNames.map((name) => ids.get(name)!));
 
-  const modelFor = (state: KeyState): KeyModel => {
-    const open = (id: string): boolean => state.folds.get(id) ?? !owners.segmentFolds.has(id);
-    return keyModelOf({
-      rootId,
-      spine,
-      owners,
-      parents,
-      byId,
-      visible: documentOrder(root, spine, open),
-      allOrder,
-      unread,
-    });
-  };
+  const modelFor = (state: KeyState): KeyModel =>
+    model.keyModel(model.visibleIds(state.folds), unread);
 
   return {
     id: (name) => ids.get(name)!,
