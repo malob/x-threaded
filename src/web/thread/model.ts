@@ -4,7 +4,7 @@
  * `buildThread` reads the posts once and materializes everything the thread
  * view and the keyboard reducer ask of it: the node graph, the thread spine
  * with each segment's reply block, the branch decomposition the renderer draws,
- * fold ownership, scopes, subtree sizes, hidden-reply counts and display text.
+ * fold ownership, subtree extents, hidden-reply counts and display text.
  *
  * The point is that no structural rule is written twice. In particular the
  * spine-replies rule — a segment's replies are its children minus the segment
@@ -123,7 +123,8 @@ export interface ThreadModel {
   /**
    * The ids a post owns for scoped operations: its subtree, except that a
    * spine segment owns only itself and its reply blocks. The segments that
-   * follow are its tree descendants but its visual siblings.
+   * follow are its tree descendants but its visual siblings. Built per call —
+   * the answer is a value, not a shared array.
    */
   scopeIds(id: string): readonly string[];
   /** The narrow read-only view the keyboard reducer consumes. */
@@ -317,10 +318,22 @@ export function buildThread(
   const byId = new Map<string, ThreadNode>();
   const parents = new Map<string, string | null>([[rootId, null]]);
   const children = new Map<string, readonly string[]>();
-  const subtree = new Map<string, readonly string[]>();
   const hiddenReplies = new Map<string, number>();
 
-  const collect = (node: ThreadNode): readonly string[] => {
+  /**
+   * Every node once, in pre-order — which makes each node's subtree a
+   * contiguous run of this array, `[dfsIndex, subtreeEnd)`. Storing the run
+   * instead of the ids keeps the whole structure linear in the post count: a
+   * per-node id array would cost the sum of all subtree sizes, which on a deep
+   * reply chain (the shape this app exists to read) is quadratic. Subtrees are
+   * spelled out only when `scopeIds` is asked for one.
+   */
+  const dfs: string[] = [];
+  /** By pre-order position: the end of that node's run, exclusive. */
+  const subtreeEnd: number[] = [];
+  const dfsIndex = new Map<string, number>();
+
+  const collect = (node: ThreadNode): void => {
     byId.set(node.id, node);
     children.set(
       node.id,
@@ -330,15 +343,24 @@ export function buildThread(
       const hidden = node.post.metrics.replies - node.children.length;
       if (hidden > 0) hiddenReplies.set(node.id, hidden);
     }
-    const ids: string[] = [node.id];
+    const start = dfs.length;
+    dfsIndex.set(node.id, start);
+    dfs.push(node.id);
+    // Reserved now, known only once the descendants below have been placed.
+    subtreeEnd.push(start);
     for (const child of node.children) {
       parents.set(child.id, node.id);
-      for (const id of collect(child)) ids.push(id);
+      collect(child);
     }
-    subtree.set(node.id, ids);
-    return ids;
+    subtreeEnd[start] = dfs.length;
   };
   collect(root);
+
+  /** The run of `dfs` a node owns, as `[start, end)`; empty for a stranger. */
+  const runOf = (id: string): readonly [number, number] => {
+    const start = dfsIndex.get(id);
+    return start === undefined ? [0, 0] : [start, subtreeEnd[start]!];
+  };
 
   /**
    * The spine: the root author replying to their own posts, from the root
@@ -403,13 +425,13 @@ export function buildThread(
   // A segment's scope stops at its own reply blocks; everything else owns its
   // whole subtree. (A one-post spine needs no entry: the root's subtree already
   // is its reply blocks.)
-  const scope = new Map<string, readonly string[]>(subtree);
+  const segmentScopes = new Map<string, readonly string[]>();
   if (layout.kind === "thread") {
     for (const segment of layout.segments) {
-      scope.set(segment.node.id, [
+      segmentScopes.set(
         segment.node.id,
-        ...segment.replies.flatMap((reply) => subtree.get(reply.head.id)!),
-      ]);
+        segment.replies.map((reply) => reply.head.id),
+      );
     }
   }
 
@@ -441,7 +463,24 @@ export function buildThread(
 
   const allOrder = orderWith(() => true);
   const isOpen = (id: string, folds: Folds): boolean => folds.get(id) ?? !segmentFolds.has(id);
-  const scopeIds = (id: string): readonly string[] => scope.get(id) ?? [];
+  /**
+   * Spelled out on demand — these back the scoped keyboard commands (r, R, zO,
+   * zC), which run once per keystroke. Each call returns a fresh array; nothing
+   * mutates or identity-compares what comes back.
+   */
+  const scopeIds = (id: string): readonly string[] => {
+    const replyHeads = segmentScopes.get(id);
+    if (!replyHeads) {
+      const [start, end] = runOf(id);
+      return dfs.slice(start, end);
+    }
+    const ids = [id];
+    for (const head of replyHeads) {
+      const [start, end] = runOf(head);
+      for (let i = start; i < end; i++) ids.push(dfs[i]!);
+    }
+    return ids;
+  };
 
   return {
     rootId,
@@ -457,10 +496,14 @@ export function buildThread(
     allOrder,
     visibleIds: (folds) => orderWith((id) => isOpen(id, folds)),
     isOpen,
-    subtreeSize: (id) => subtree.get(id)?.length ?? 0,
+    subtreeSize: (id) => {
+      const [start, end] = runOf(id);
+      return end - start;
+    },
     unreadCount: (id, unread) => {
+      const [start, end] = runOf(id);
       let count = 0;
-      for (const member of subtree.get(id) ?? []) if (unread.has(member)) count++;
+      for (let i = start; i < end; i++) if (unread.has(dfs[i]!)) count++;
       return count;
     },
     scopeIds,

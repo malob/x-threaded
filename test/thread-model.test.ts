@@ -666,3 +666,70 @@ describe("unread counting", () => {
     expect(t.model.unreadCount("nope", unread)).toBe(0);
   });
 });
+
+/**
+ * A linear reply chain of `n` posts. Only the root is author A, so nobody
+ * replies to themselves: there is no spine, and every post owns its whole
+ * subtree — which on this shape is the entire chain below it.
+ */
+function chain(n: number): { readonly ids: readonly string[]; readonly posts: readonly Post[] } {
+  const ids: string[] = [];
+  const posts: Post[] = [];
+  for (let i = 0; i < n; i++) {
+    const createdAt = at(i);
+    const id = snowflakeId(createdAt);
+    ids.push(id);
+    posts.push(
+      makePost({
+        id,
+        createdAt,
+        authorId: i === 0 ? "A" : "B",
+        authorHandle: i === 0 ? "A" : "B",
+        parentId: i === 0 ? null : ids[i - 1]!,
+      }),
+    );
+  }
+  return { ids, posts };
+}
+
+describe("deep chains", () => {
+  it("scopes every post of a long chain to the chain below it", () => {
+    const { ids, posts } = chain(200);
+    const rootId = ids[0]!;
+    const model = buildThread(rootId, posts);
+    if (!model) throw new Error("chain root missing");
+    const unread = new Set(ids.filter((_, i) => i % 3 === 0));
+
+    expect(model.allOrder).toEqual(ids);
+    expect(model.scopeIds(rootId)).toEqual(ids);
+    expect(model.scopeIds(ids[120]!)).toEqual(ids.slice(120));
+    expect(model.scopeIds(ids[199]!)).toEqual([ids[199]!]);
+
+    // Size, scope and unread count are three readings of one subtree.
+    for (const [i, id] of ids.entries()) {
+      const below = ids.slice(i);
+      expect(model.subtreeSize(id)).toBe(below.length);
+      expect(model.scopeIds(id)).toEqual(below);
+      expect(model.unreadCount(id, unread)).toBe(below.filter((m) => unread.has(m)).length);
+    }
+  });
+
+  /**
+   * A complexity lock, not a benchmark. Subtrees were once stored per node, so
+   * a chain cost the sum of its suffixes — 10,000 posts took ~640ms and ~160MB
+   * retained, against ~13ms and nothing measurable for the one-pass range
+   * representation. The bound sits far from both numbers on purpose: it has to
+   * fail on a quadratic build and pass on any machine running a linear one, so
+   * what it pins is the shape of the curve, not the constant.
+   */
+  it("builds a 10,000-post chain in linear time", () => {
+    const { ids, posts } = chain(10_000);
+    const started = performance.now();
+    const model = buildThread(ids[0]!, posts);
+    const elapsed = performance.now() - started;
+
+    expect(model?.subtreeSize(ids[0]!)).toBe(10_000);
+    expect(model?.allOrder.length).toBe(10_000);
+    expect(elapsed).toBeLessThan(300);
+  });
+});
