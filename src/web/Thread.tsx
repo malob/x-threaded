@@ -1,4 +1,14 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import {
+  createContext,
+  memo,
+  useCallback,
+  useContext,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import type { ConversationResponse, Post } from "../shared/types";
 import { PostView } from "./PostView";
 import { formatUsd } from "../shared/pricing";
@@ -16,20 +26,50 @@ import {
   type ThreadNode,
 } from "./thread/model";
 
-interface Ctx {
-  model: ThreadModel;
-  cursorId: string | null;
-  quoted: Record<string, Post>;
-  unread: Set<string>;
-  isOpen: (id: string) => boolean;
-  setFold: (id: string, open: boolean) => void;
-  setCursor: (id: string) => void;
-  setRead: (ids: string[], read: boolean) => void;
+/**
+ * Everything a card needs that does not change while a conversation is open:
+ * the built model, the posts it quotes, and handlers whose identity is fixed
+ * for the life of the mount. Kept apart from the view state below on purpose —
+ * a context re-renders every consumer when its value changes, so anything that
+ * changes per keystroke living in here would make the memoized cards useless.
+ */
+interface ThreadCtx {
+  readonly model: ThreadModel;
+  readonly quoted: Record<string, Post>;
+  readonly setFold: (id: string, open: boolean) => void;
+  readonly setCursor: (id: string) => void;
+  readonly setRead: (ids: string[], read: boolean) => void;
+}
+
+/** The parts that do change: where the cursor is, what is unread, what is folded. */
+interface ViewCtx {
+  readonly cursorId: string | null;
+  readonly unread: ReadonlySet<string>;
+  readonly isOpen: (id: string) => boolean;
+}
+
+const ThreadContext = createContext<ThreadCtx | null>(null);
+const ViewContext = createContext<ViewCtx | null>(null);
+
+function useThread(): ThreadCtx {
+  const ctx = useContext(ThreadContext);
+  if (!ctx) throw new Error("thread card rendered outside a Thread");
+  return ctx;
+}
+
+function useView(): ViewCtx {
+  const ctx = useContext(ViewContext);
+  if (!ctx) throw new Error("thread card rendered outside a Thread");
+  return ctx;
 }
 
 /** Unread posts in the subtrees of a set of siblings — what a fold hides. */
-function unreadUnder(nodes: readonly ThreadNode[], ctx: Ctx): number {
-  return nodes.reduce((sum, node) => sum + ctx.model.unreadCount(node.id, ctx.unread), 0);
+function unreadUnder(
+  nodes: readonly ThreadNode[],
+  model: ThreadModel,
+  unread: ReadonlySet<string>,
+): number {
+  return nodes.reduce((sum, node) => sum + model.unreadCount(node.id, unread), 0);
 }
 
 function NewBadge({ count }: { count: number }) {
@@ -37,19 +77,25 @@ function NewBadge({ count }: { count: number }) {
   return <span className="new-badge"> · {count} new</span>;
 }
 
-/** A post we never got: its ID is real, so x.com can still resolve it. */
-function GapCard({ node, ctx }: { node: GapNode; ctx: Ctx }) {
+/**
+ * A post we never got: its ID is real, so x.com can still resolve it.
+ *
+ * Memoized, like every card: `node` is stable for the life of the model, so a
+ * gap only re-renders when the cursor arrives at it or leaves it.
+ */
+const GapCard = memo(function GapCard({ node, cursor }: { node: GapNode; cursor: boolean }) {
+  const { setCursor } = useThread();
   return (
     <div
       id={`post-${node.id}`}
-      className={node.id === ctx.cursorId ? "post placeholder-post cursor" : "post placeholder-post"}
+      className={cursor ? "post placeholder-post cursor" : "post placeholder-post"}
       title={
         node.placementInferred
           ? "Position inferred from reply counts"
           : "Replied somewhere in this conversation; exact position unknown"
       }
       onClick={(e) => {
-        if (!(e.target as HTMLElement).closest("a")) ctx.setCursor(node.id);
+        if (!(e.target as HTMLElement).closest("a")) setCursor(node.id);
       }}
     >
       unavailable post (deleted or private) ·{" "}
@@ -58,30 +104,44 @@ function GapCard({ node, ctx }: { node: GapNode; ctx: Ctx }) {
       </a>
     </div>
   );
-}
+});
 
-function RealPostCard({ node, ctx }: { node: PostNode; ctx: Ctx }) {
+/**
+ * The expensive component in the app, and the one the memo boundary exists
+ * for: everything below it — text with entities, media, quote cards, the
+ * clamp measurement — is skipped entirely unless one of these three props
+ * changed. `node` comes from the model, which is built once per conversation.
+ */
+const RealPostCard = memo(function RealPostCard({
+  node,
+  cursor,
+  unread,
+}: {
+  node: PostNode;
+  cursor: boolean;
+  unread: boolean;
+}) {
+  const { model, quoted, setCursor, setRead } = useThread();
   const { post } = node;
-  const isUnread = ctx.unread.has(post.id);
-  const hidden = ctx.model.hiddenReplies.get(post.id) ?? 0;
+  const hidden = model.hiddenReplies.get(post.id) ?? 0;
   return (
     <>
       <PostView
         post={post}
-        quoted={ctx.quoted}
+        quoted={quoted}
         displayText={node.displayText}
         id={`post-${post.id}`}
-        className={post.id === ctx.cursorId ? "post cursor" : "post"}
+        className={cursor ? "post cursor" : "post"}
         onClick={(e) => {
-          if (!(e.target as HTMLElement).closest("a, button")) ctx.setCursor(post.id);
+          if (!(e.target as HTMLElement).closest("a, button")) setCursor(post.id);
         }}
         leading={
-          isUnread ? (
+          unread ? (
             <button
               className="unread-dot"
               title="Mark as read"
               aria-label="Mark as read"
-              onClick={() => ctx.setRead([post.id], true)}
+              onClick={() => setRead([post.id], true)}
             />
           ) : undefined
         }
@@ -96,62 +156,70 @@ function RealPostCard({ node, ctx }: { node: PostNode; ctx: Ctx }) {
       )}
     </>
   );
-}
+});
 
-function PostCard({ node, ctx }: { node: ThreadNode; ctx: Ctx }) {
+/**
+ * Where the view state meets a card. This is the only thing a cursor move
+ * re-renders per post, and it is three lines: it reads the changing context
+ * and turns "where the cursor is" into "is it me", which is a boolean the
+ * memoized card below can compare. Two of those booleans flip per keystroke,
+ * so two cards render and the rest bail out.
+ */
+function PostCard({ node }: { node: ThreadNode }) {
+  const { cursorId, unread } = useView();
   return node.kind === "gap" ? (
-    <GapCard node={node} ctx={ctx} />
+    <GapCard node={node} cursor={node.id === cursorId} />
   ) : (
-    <RealPostCard node={node} ctx={ctx} />
+    <RealPostCard node={node} cursor={node.id === cursorId} unread={unread.has(node.id)} />
   );
 }
 
 /**
  * A branch as the model decomposed it: a run of single-child posts hanging off
  * a connected rail under the head, then the fork that ended the run rendered
- * as one collapsible block. Fold state lives in ctx, keyed by the owning post:
- * the chain's head, the fork's tail.
+ * as one collapsible block. Fold state lives in the view context, keyed by the
+ * owning post: the chain's head, the fork's tail.
  */
-function BranchView({ branch, ctx }: { branch: Branch; ctx: Ctx }) {
+function BranchView({ branch }: { branch: Branch }) {
+  const { model, setFold } = useThread();
+  const { unread, isOpen } = useView();
   const { head, rest, tail, forks } = branch;
-  const branches = forks.length > 0 && (
-    <CollapsibleChildren ownerId={tail.id} branches={forks} ctx={ctx} />
-  );
+  const branches = forks.length > 0 && <CollapsibleChildren ownerId={tail.id} branches={forks} />;
 
   if (rest.length === 0) {
     return (
       <div>
-        <PostCard node={head} ctx={ctx} />
+        <PostCard node={head} />
         {branches}
       </div>
     );
   }
-  if (!ctx.isOpen(head.id)) {
-    const n = ctx.model.subtreeSize(head.id) - 1;
+  if (!isOpen(head.id)) {
+    const n = model.subtreeSize(head.id) - 1;
     return (
       <div>
-        <PostCard node={head} ctx={ctx} />
-        <button className="collapse-stub" onClick={() => ctx.setFold(head.id, true)}>
+        <PostCard node={head} />
+        <button className="collapse-stub" onClick={() => setFold(head.id, true)}>
           ▸ {n} {n === 1 ? "reply" : "replies"} hidden
-          <NewBadge count={unreadUnder(head.children, ctx)} />
+          <NewBadge count={unreadUnder(head.children, model, unread)} />
         </button>
       </div>
     );
   }
   return (
     <div>
-      <PostCard node={head} ctx={ctx} />
+      <PostCard node={head} />
       <div className="run">
         <div className="run-chain">
           <button
             className="run-rail"
             aria-label="Collapse chain"
             title="Collapse chain"
-            onClick={() => ctx.setFold(head.id, false)}
+            onClick={() => setFold(head.id, false)}
           />
           {rest.map((n, i) => (
             <div key={n.id} className={i === rest.length - 1 ? "run-post run-post-last" : "run-post"}>
-              <PostCard node={n} ctx={ctx} />
+              <PostCard node={n} />
             </div>
           ))}
         </div>
@@ -168,18 +236,18 @@ function BranchView({ branch, ctx }: { branch: Branch; ctx: Ctx }) {
 function CollapsibleChildren({
   ownerId,
   branches,
-  ctx,
 }: {
   ownerId: string;
   branches: readonly Branch[];
-  ctx: Ctx;
 }) {
-  if (!ctx.isOpen(ownerId)) {
-    const n = branches.reduce((sum, branch) => sum + ctx.model.subtreeSize(branch.head.id), 0);
+  const { model, setFold } = useThread();
+  const { unread, isOpen } = useView();
+  if (!isOpen(ownerId)) {
+    const n = branches.reduce((sum, branch) => sum + model.subtreeSize(branch.head.id), 0);
     return (
-      <button className="collapse-stub" onClick={() => ctx.setFold(ownerId, true)}>
+      <button className="collapse-stub" onClick={() => setFold(ownerId, true)}>
         ▸ {n} {n === 1 ? "reply" : "replies"} hidden
-        <NewBadge count={unreadUnder(branches.map((branch) => branch.head), ctx)} />
+        <NewBadge count={unreadUnder(branches.map((branch) => branch.head), model, unread)} />
       </button>
     );
   }
@@ -189,32 +257,30 @@ function CollapsibleChildren({
         className="rail"
         aria-label="Collapse replies"
         title="Collapse replies"
-        onClick={() => ctx.setFold(ownerId, false)}
+        onClick={() => setFold(ownerId, false)}
       />
       <div>
         {branches.map((branch) => (
-          <BranchView key={branch.head.id} branch={branch} ctx={ctx} />
+          <BranchView key={branch.head.id} branch={branch} />
         ))}
       </div>
     </div>
   );
 }
 
-function SegmentReplies({ segment, ctx }: { segment: Segment; ctx: Ctx }) {
-  const expanded = ctx.isOpen(segment.node.id);
-  const count = segment.replies.reduce(
-    (sum, reply) => sum + ctx.model.subtreeSize(reply.head.id),
-    0,
-  );
+function SegmentReplies({ segment }: { segment: Segment }) {
+  const { model, setFold } = useThread();
+  const { unread, isOpen } = useView();
+  const expanded = isOpen(segment.node.id);
+  const count = segment.replies.reduce((sum, reply) => sum + model.subtreeSize(reply.head.id), 0);
   return (
     <div>
-      <button
-        className="collapse-stub"
-        onClick={() => ctx.setFold(segment.node.id, !expanded)}
-      >
+      <button className="collapse-stub" onClick={() => setFold(segment.node.id, !expanded)}>
         {expanded ? "▾" : "▸"} {count} {count === 1 ? "reply" : "replies"}
         {!expanded && (
-          <NewBadge count={unreadUnder(segment.replies.map((reply) => reply.head), ctx)} />
+          <NewBadge
+            count={unreadUnder(segment.replies.map((reply) => reply.head), model, unread)}
+          />
         )}
       </button>
       {expanded && (
@@ -224,11 +290,11 @@ function SegmentReplies({ segment, ctx }: { segment: Segment; ctx: Ctx }) {
               className="rail"
               aria-label="Collapse replies"
               title="Collapse replies"
-              onClick={() => ctx.setFold(segment.node.id, false)}
+              onClick={() => setFold(segment.node.id, false)}
             />
             <div>
               {segment.replies.map((reply) => (
-                <BranchView key={reply.head.id} branch={reply} ctx={ctx} />
+                <BranchView key={reply.head.id} branch={reply} />
               ))}
             </div>
           </div>
@@ -344,12 +410,18 @@ export function Thread({
 
   const visible = useMemo(() => model?.visibleIds(folds) ?? [], [model, folds]);
 
-  const setFold = (id: string, open: boolean) => {
+  /**
+   * Stable for the life of the mount — they only ever call the state updater
+   * with a function, so they need nothing from the render that created them.
+   * That is what keeps the context below from changing, and the cards from
+   * re-rendering when it would have.
+   */
+  const setFold = useCallback((id: string, open: boolean) => {
     setView((prev) => ({ ...prev, folds: new Map(prev.folds).set(id, open) }));
-  };
-  const setCursor = (id: string) => {
+  }, []);
+  const setCursor = useCallback((id: string) => {
     setView((prev) => ({ ...prev, cursorId: id }));
-  };
+  }, []);
   const toggleHelp = () => {
     setView((prev) => ({ ...prev, helpOpen: !prev.helpOpen }));
   };
@@ -425,18 +497,32 @@ export function Thread({
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
-  if (!model) return <p className="error">Root post missing from data.</p>;
+  /**
+   * Read through the same ref the keyboard uses, so the handler a card holds
+   * never changes identity even though the prop behind it is a fresh closure
+   * on every render of App.
+   */
+  const setRead = useCallback((ids: string[], read: boolean) => {
+    latest.current.onSetRead(ids, read);
+  }, []);
 
-  const ctx: Ctx = {
-    model,
-    cursorId,
-    quoted: conversation.quoted,
-    unread,
-    isOpen: (id) => model.isOpen(id, folds),
-    setFold,
-    setCursor,
-    setRead: onSetRead,
-  };
+  /**
+   * Two contexts, split by how often they change. The stable half is what
+   * makes `React.memo` on the cards mean anything: if the handlers or the
+   * model moved with the cursor, every card would re-render as a context
+   * consumer no matter what its props said.
+   */
+  const ctx = useMemo(
+    () => model && { model, quoted: conversation.quoted, setFold, setCursor, setRead },
+    [model, conversation.quoted, setFold, setCursor, setRead],
+  );
+  const viewCtx = useMemo(
+    () => model && { cursorId, unread, isOpen: (id: string) => model.isOpen(id, folds) },
+    [model, cursorId, unread, folds],
+  );
+
+  if (!model) return <p className="error">Root post missing from data.</p>;
+  const { layout } = model;
 
   // Refresh and resume share one lock per conversation upstream (see
   // queries/conversation.ts), so while either is in flight the other's click
@@ -444,72 +530,76 @@ export function Thread({
   const writing = refreshing || resuming;
 
   return (
-    <div>
-      <p className="notice">
-        {conversation.posts.length} posts
-        {conversation.cost &&
-          (conversation.cost.billable > 0 ? (
-            <> · cost {formatUsd(conversation.cost.usd, false)}</>
+    <ThreadContext value={ctx}>
+      <ViewContext value={viewCtx}>
+        <div>
+          <p className="notice">
+            {conversation.posts.length} posts
+            {conversation.cost &&
+              (conversation.cost.billable > 0 ? (
+                <> · cost {formatUsd(conversation.cost.usd, false)}</>
+              ) : (
+                <> · free (already read today)</>
+              ))}
+            {conversation.truncated && (
+              <>
+                {" · "}
+                <span title="A fetch stopped before the whole conversation was read">
+                  older replies missing
+                </span>
+                {" · "}
+                <button className="notice-btn" onClick={onResume} disabled={writing}>
+                  {resuming ? "loading older…" : "load older replies"}
+                </button>
+              </>
+            )}
+            {unread.size > 0 && (
+              <>
+                <span className="new-badge"> · {unread.size} unread</span> ·{" "}
+                <button className="notice-btn" onClick={onMarkAllRead}>
+                  mark all read
+                </button>
+              </>
+            )}
+            {" · "}
+            <button className="notice-btn" onClick={onRefresh} disabled={writing}>
+              {refreshing ? "refreshing…" : "refresh"}
+            </button>
+            {!refreshing && newCount !== null && (
+              <span className={newCount > 0 ? "new-badge" : undefined}>
+                {" "}
+                {newCount > 0 ? `+${newCount} new` : "· up to date"}
+              </span>
+            )}
+            {" · "}
+            <button className="notice-btn" onClick={toggleHelp}>
+              ? keys
+            </button>
+          </p>
+          {layout.kind === "thread" ? (
+            <div className="spine">
+              {layout.segments.map((segment) => (
+                <div key={segment.node.id}>
+                  <PostCard node={segment.node} />
+                  {segment.replies.length > 0 && <SegmentReplies segment={segment} />}
+                </div>
+              ))}
+            </div>
           ) : (
-            <> · free (already read today)</>
-          ))}
-        {conversation.truncated && (
-          <>
-            {" · "}
-            <span title="A fetch stopped before the whole conversation was read">
-              older replies missing
-            </span>
-            {" · "}
-            <button className="notice-btn" onClick={onResume} disabled={writing}>
-              {resuming ? "loading older…" : "load older replies"}
-            </button>
-          </>
-        )}
-        {unread.size > 0 && (
-          <>
-            <span className="new-badge"> · {unread.size} unread</span> ·{" "}
-            <button className="notice-btn" onClick={onMarkAllRead}>
-              mark all read
-            </button>
-          </>
-        )}
-        {" · "}
-        <button className="notice-btn" onClick={onRefresh} disabled={writing}>
-          {refreshing ? "refreshing…" : "refresh"}
-        </button>
-        {!refreshing && newCount !== null && (
-          <span className={newCount > 0 ? "new-badge" : undefined}>
-            {" "}
-            {newCount > 0 ? `+${newCount} new` : "· up to date"}
-          </span>
-        )}
-        {" · "}
-        <button className="notice-btn" onClick={toggleHelp}>
-          ? keys
-        </button>
-      </p>
-      {model.layout.kind === "thread" ? (
-        <div className="spine">
-          {model.layout.segments.map((segment) => (
-            <div key={segment.node.id}>
-              <PostCard node={segment.node} ctx={ctx} />
-              {segment.replies.length > 0 && <SegmentReplies segment={segment} ctx={ctx} />}
+            <BranchView branch={layout.branch} />
+          )}
+          {helpOpen && (
+            <div className="help-overlay">
+              {HELP.map((row) => (
+                <div key={row.keys} className="help-row">
+                  <span className="help-keys">{row.keys}</span>
+                  <span>{row.desc}</span>
+                </div>
+              ))}
             </div>
-          ))}
+          )}
         </div>
-      ) : (
-        <BranchView branch={model.layout.branch} ctx={ctx} />
-      )}
-      {helpOpen && (
-        <div className="help-overlay">
-          {HELP.map((row) => (
-            <div key={row.keys} className="help-row">
-              <span className="help-keys">{row.keys}</span>
-              <span>{row.desc}</span>
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
+      </ViewContext>
+    </ThreadContext>
   );
 }

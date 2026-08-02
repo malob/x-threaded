@@ -11,17 +11,59 @@ import { xPostUrl } from "../shared/urls";
 import { PostText } from "./PostText";
 
 /**
+ * One ResizeObserver for every clamped block on the page.
+ *
+ * A big conversation is hundreds of them, and an observer each would be
+ * hundreds of separate observation lists for the browser to walk each frame,
+ * to answer the same question. One observer, one callback per element.
+ */
+const sizeCallbacks = new WeakMap<Element, () => void>();
+let sizeObserver: ResizeObserver | null = null;
+
+function observeSize(el: Element, onResize: () => void): () => void {
+  sizeObserver ??= new ResizeObserver((entries) => {
+    for (const entry of entries) sizeCallbacks.get(entry.target)?.();
+  });
+  sizeCallbacks.set(el, onResize);
+  sizeObserver.observe(el);
+  return () => {
+    sizeCallbacks.delete(el);
+    sizeObserver?.unobserve(el);
+  };
+}
+
+/**
  * Post text clamped to a few lines with a "Show more" toggle, X-style.
  * Clamping is visual (line-clamp) so entity links never get cut mid-token.
+ *
+ * Whether it overflows is a question about a laid-out box, and it is asked
+ * only when the answer can have changed: once for each piece of content, and
+ * again whenever the box is resized — expanding it, collapsing it, or the
+ * window changing width. It used to be asked after every render, because the
+ * effect depended on `children` and that is a fresh element each time; on a
+ * conversation of five hundred posts that was five hundred forced layouts for
+ * every keystroke, all of them to re-confirm what was already on screen.
  */
-function ClampedText({ lines, children }: { lines: number; children: ReactNode }) {
+function ClampedText({
+  lines,
+  contentKey,
+  children,
+}: {
+  lines: number;
+  /** Identifies the text being clamped: new content, new measurement. */
+  contentKey: string;
+  children: ReactNode;
+}) {
   const [expanded, setExpanded] = useState(false);
   const [overflows, setOverflows] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
     const el = ref.current;
-    if (el) setOverflows(el.scrollHeight > el.clientHeight + 1);
-  }, [children]);
+    if (!el) return;
+    const measure = () => setOverflows(el.scrollHeight > el.clientHeight + 1);
+    measure();
+    return observeSize(el, measure);
+  }, [contentKey]);
   return (
     <>
       <div
@@ -183,7 +225,7 @@ function QuoteCard({
           ↗
         </a>
       </div>
-      <ClampedText lines={4}>
+      <ClampedText lines={4} contentKey={post.text}>
         <PostText text={post.text} post={post} />
       </ClampedText>
       <MediaGrid post={post} />
@@ -223,7 +265,7 @@ export function PostView({
         <span className="name">{post.authorName}</span> @{post.authorHandle} ·{" "}
         {formatTime(post.createdAt)}
       </div>
-      <ClampedText lines={6}>
+      <ClampedText lines={6} contentKey={displayText ?? post.text}>
         <PostText text={displayText ?? post.text} post={post} />
       </ClampedText>
       <MediaGrid post={post} />
