@@ -7,8 +7,8 @@
  * the reducer but not with the app is not possible.
  *
  * Where a test pins a decision rather than a mechanism — the cursor is never
- * invisible, Escape always means cancel, the fold map holds only fold
- * decisions — the comment on that test says which decision it is pinning.
+ * invisible, Escape always means cancel, a reveal opens every ancestor —
+ * the comment on that test says which decision it is pinning.
  */
 import { describe, expect, it } from "bun:test";
 import type { Post } from "../src/shared/types";
@@ -672,16 +672,21 @@ describe("help overlay", () => {
 describe("the fold map", () => {
   const t = thread(DEEP, ["d1"]);
 
-  it("writes a decision only where there is a fold to decide", () => {
-    // Decision: every entry in the fold map is a fold decision about a fold
-    // owner. b1 sits on the path to d1 but owns no fold, so opening d1's
-    // ancestry writes root and c1 and says nothing at all about b1.
+  it("writes every ancestor on a reveal, fold owner or not", () => {
+    // Decision (reversed once, deliberately): opening a post's ancestry
+    // writes EVERY ancestor, including b1, which owns no fold in this model.
+    // Ownership is not stable across model rebuilds — a resume can turn a
+    // plain ancestor into a closed-by-default segment fold, and the entry
+    // written now is what keeps the revealed post visible then. An owner-only
+    // version of this rule shipped in 7fa77ae and made deep-linked posts
+    // vanish when a resume changed the topology (Codex review, finding 1).
     const jump = t.press(t.start, "n");
     expect(jump.state.cursorId).toBe(t.id("d1"));
     expect(foldEntries(jump.state)).toEqual(
       (
         [
           [t.id("root"), true],
+          [t.id("b1"), true],
           [t.id("c1"), true],
         ] as [string, boolean][]
       ).sort(),
@@ -692,7 +697,9 @@ describe("the fold map", () => {
     const onC1 = t.press(t.start, "j", "j").state;
     const reopened = t.press(onC1, "z", "a", "l");
     expect(reopened.state.cursorId).toBe(t.id("d1"));
-    expect([...reopened.state.folds.keys()].sort()).toEqual([t.id("root"), t.id("c1")].sort());
+    expect([...reopened.state.folds.keys()].sort()).toEqual(
+      [t.id("root"), t.id("b1"), t.id("c1")].sort(),
+    );
   });
 });
 

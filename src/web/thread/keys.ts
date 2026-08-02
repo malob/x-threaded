@@ -164,15 +164,21 @@ export function applyKey(state: KeyState, model: KeyModel, key: string): KeyResu
   /**
    * Open every fold between a post and the root, so the post is on screen.
    *
-   * The invariant this holds up: every entry in the fold map is a fold
-   * decision about a fold owner. Ancestors that own no fold are not written
-   * down — there is no fold there to have an opinion about.
+   * EVERY ancestor is written, owner of a fold today or not. Ownership is not
+   * stable over the map's lifetime: this model is one snapshot of a
+   * conversation that can gain posts, and a resume that materializes a
+   * missing spine post turns a plain ancestor into a segment fold that
+   * defaults closed. The entry written here is what keeps the revealed post
+   * visible through that transition — an owner-only "hygiene" version of this
+   * loop shipped once and made deep-linked posts vanish on resume (Codex
+   * review of 7fa77ae, finding 1). An entry for a post that never becomes an
+   * owner is never read; that is the cheap side of this trade.
    */
   const openAncestors = (id: string): void => {
     const next = new Map(folds);
     let current = model.parentOf(id);
     while (current !== null) {
-      if (model.isFoldOwner(current)) next.set(current, true);
+      next.set(current, true);
       current = model.parentOf(current);
     }
     folds = next;

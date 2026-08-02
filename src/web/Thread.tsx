@@ -363,19 +363,24 @@ export function Thread({
 
   useEffect(() => {
     // A deep-linked focus post may sit behind closed folds; open its ancestry.
-    // Fold owners only, the same rule the keyboard's openAncestors follows
-    // (thread/keys.ts): every entry in this map is a decision about a fold.
+    // EVERY ancestor is written, fold owner or not, same rule as the
+    // keyboard's openAncestors (thread/keys.ts): ownership is not stable
+    // across model rebuilds — a resume can turn a plain ancestor into a
+    // closed-by-default segment fold, and the entry written now is what keeps
+    // the focus visible then (Codex review of 7fa77ae, finding 1).
     const opened = new Map<string, boolean>();
     if (conversation.focusId) {
-      const owner = (id: string): boolean =>
-        model !== null && (model.branchFolds.has(id) || model.segmentFolds.has(id));
       let current = model?.parents.get(conversation.focusId) ?? null;
       while (current !== null) {
-        if (owner(current)) opened.set(current, true);
+        opened.set(current, true);
         current = model?.parents.get(current) ?? null;
       }
       scrollRequestRef.current = "center";
     }
+    // A navigation also discards any half-typed key sequence: a `z` pressed
+    // before following a link must not turn the first keystroke afterwards
+    // into `za` (Codex review of 7fa77ae, finding 2).
+    pendingRef.current = null;
     // Resetting the view is the whole point of this effect: a different
     // conversation must start from its own folds and cursor. The rule wants
     // that expressed as a remount key, which is the caller's decision to make,
