@@ -44,7 +44,7 @@ describe("FakeXApi", () => {
     xapi.onGetPost = () => post;
     expect(await xapi.getPost(post.id)).toEqual({
       value: post,
-      receipt: { reads: 1, ownedReads: 0 },
+      receipt: { reads: 1, ownedReads: 0, userReads: 0 },
     });
   });
 
@@ -61,7 +61,7 @@ describe("FakeXApi", () => {
 
     const { receipt } = await xapi.getBookmarksByFolder("token", "u1", "folder1");
 
-    expect(receipt).toEqual({ reads: 1, ownedReads: 2 });
+    expect(receipt).toEqual({ reads: 1, ownedReads: 2, userReads: 0 });
   });
 
   it("records and counts every call, canned or not", async () => {

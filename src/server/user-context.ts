@@ -5,8 +5,8 @@ import { XApiError, type XApiClient } from "./xapi";
 
 /**
  * A user-context access token plus the signed-in user's ID. The ID is
- * resolved once via /2/users/me (a billable user read, charged to the
- * request's meter) and cached with the tokens. Throws when user context
+ * resolved once via /2/users/me (a billable User Read at $0.010, charged to
+ * the request's meter) and cached with the tokens. Throws when user context
  * isn't configured.
  *
  * Lives outside oauth.ts because resolving the ID costs money: oauth.ts is

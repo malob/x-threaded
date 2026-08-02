@@ -1,4 +1,11 @@
-import { NO_READS, addReceipts, ownedReads, postReads, type Receipt } from "../src/shared/pricing";
+import {
+  NO_READS,
+  addReceipts,
+  ownedReads,
+  postReads,
+  userReads,
+  type Receipt,
+} from "../src/shared/pricing";
 import type { Post } from "../src/shared/types";
 import type {
   Billed,
@@ -98,7 +105,8 @@ export class FakeXApi implements XApiClient {
   }
 
   getMe(accessToken: string): Promise<Billed<{ id: string; username: string; name: string }>> {
-    return this.record("getMe", this.onGetMe, [accessToken], () => postReads(1));
+    // A User Read, not a post read — the unit the real client bills it in.
+    return this.record("getMe", this.onGetMe, [accessToken], () => userReads(1));
   }
 
   getOwnPosts(

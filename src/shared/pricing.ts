@@ -8,12 +8,21 @@ export const POST_READ_USD = 0.005;
 export const OWNED_READ_USD = 0.001;
 
 /**
- * What one X call billed, in the two units X charges in.
+ * Reading a *user* rather than a post — `/2/users/me` — is a User Read, and X
+ * prices it at twice a post read rather than at the post rate this app once
+ * charged it at.
+ */
+export const USER_READ_USD = 0.01;
+
+/**
+ * What one X call billed, in the three units X charges in.
  *
  * An estimate, always: X deduplicates a post read within a UTC calendar day,
  * and that dedup is observed rather than contractual, so nothing here is a
  * figure X will confirm (docs/x-api-notes.md N2). The free /2/usage/tweets
- * endpoint is what reconciles this ledger against their meter (2026-07-30
+ * endpoint reports daily post-consumption counts — not dollars, and not which
+ * rate applied — so it cross-checks the post counts behind this ledger and
+ * nothing more; the X Developer Console is where the dollars are (2026-07-30
  * review, H1).
  */
 export interface Receipt {
@@ -21,25 +30,44 @@ export interface Receipt {
   readonly reads: number;
   /** Posts read from the signed-in user's own timeline or bookmarks. */
   readonly ownedReads: number;
+  /** User objects read — the identity lookup, not a post at all. */
+  readonly userReads: number;
 }
 
-export const NO_READS: Receipt = { reads: 0, ownedReads: 0 };
+export const NO_READS: Receipt = { reads: 0, ownedReads: 0, userReads: 0 };
 
 export function postReads(count: number): Receipt {
-  return { reads: count, ownedReads: 0 };
+  return { reads: count, ownedReads: 0, userReads: 0 };
 }
 
 export function ownedReads(count: number): Receipt {
-  return { reads: 0, ownedReads: count };
+  return { reads: 0, ownedReads: count, userReads: 0 };
+}
+
+export function userReads(count: number): Receipt {
+  return { reads: 0, ownedReads: 0, userReads: count };
 }
 
 export function addReceipts(a: Receipt, b: Receipt): Receipt {
-  return { reads: a.reads + b.reads, ownedReads: a.ownedReads + b.ownedReads };
+  return {
+    reads: a.reads + b.reads,
+    ownedReads: a.ownedReads + b.ownedReads,
+    userReads: a.userReads + b.userReads,
+  };
+}
+
+/** Reads in a receipt, whatever they cost: what answers "did money move", and how often. */
+export function receiptCount(receipt: Receipt): number {
+  return receipt.reads + receipt.ownedReads + receipt.userReads;
 }
 
 /** The one place reads become dollars. */
 export function receiptUsd(receipt: Receipt): number {
-  return receipt.reads * POST_READ_USD + receipt.ownedReads * OWNED_READ_USD;
+  return (
+    receipt.reads * POST_READ_USD +
+    receipt.ownedReads * OWNED_READ_USD +
+    receipt.userReads * USER_READ_USD
+  );
 }
 
 /**

@@ -80,7 +80,7 @@ export interface ConversationResponse {
  * not their invoice (docs/x-api-notes.md N2).
  */
 export interface FetchCost {
-  /** Posts read from X, at either rate. */
+  /** Reads billed by X: posts at either post rate, plus any User Read. */
   posts: number;
   /** Of those, ones we hadn't already read today — the ones that bill. */
   billable: number;

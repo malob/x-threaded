@@ -28,21 +28,30 @@ someone looked," and when you look again, add the date.
 
 ## Billing
 
-### N1. Post reads bill $0.005; own-timeline and bookmark reads bill $0.001
+### N1. Three units: post reads $0.005, Owned Reads $0.001, User Reads $0.010
 
 *Rates published by X — <https://docs.x.com/x-api/getting-started/pricing>.*
 
-Two units, and the endpoint decides which applies. Lookups
+Three units, and the endpoint decides which applies. Lookups
 (`/2/tweets/:id`, `/2/tweets?ids=`) and full-archive search bill at the post
 rate. Reading the signed-in user's own material — `/2/users/:id/tweets`,
-bookmark folder pages — bills as an **Owned Read** at a fifth of that. The
-rates live in `src/shared/pricing.ts`; the mapping from endpoint to unit lives
-in `src/server/xapi.ts`, which is the only layer that knows it.
+bookmark folder pages — bills as an **Owned Read** at a fifth of that. Reading
+a *user* rather than a post — `/2/users/me`, the identity lookup — is a **User
+Read** at $0.010, twice a post read and the most expensive single call this app
+makes. The rates live in `src/shared/pricing.ts`; the mapping from endpoint to
+unit lives in `src/server/xapi.ts`, which is the only layer that knows it.
 
 A lookup of a post that happens to be the user's own is still a post read: the
 cheaper rate is a property of the endpoint, not of the author. `groupOwnThreads`
 buys roots that fell outside the timeline scan this way, and pays $0.005 for
 them.
+
+The same "the endpoint decides" rule is what the User Read row is doing here.
+Until 2026-08-01 this app charged `/2/users/me` as a post read, because the
+receipt only had two units to charge in and $0.005 was the nearer one — an
+under-report of half the price, in a call every user-context feature pays once.
+A unit the receipt cannot express is a unit the app will misprice, so the
+receipt carries all three.
 
 ### N2. Same-UTC-calendar-day dedup is OBSERVED, not contractual
 
@@ -56,18 +65,26 @@ X documents the dedup as soft. It is not a rate the app can hold them to, and
 no endpoint will confirm a charge before the fact. So **every cost this app
 shows is an estimate**, on both sides of the ledger: `SpendMeter` charges what
 each response returned and credits back the posts the store says were already
-read today (`postIdsReadToday`). The free `/2/usage/tweets` endpoint is the
-only thing that knows what X actually billed, and reconciling against it is
-the honest way to find out whether a discrepancy is our bug or their policy
-moving.
+read today (`postIdsReadToday`). The free `/2/usage/tweets` endpoint reports
+daily consumption *counts* of posts — not dollars, and not which rate a read
+billed at — so it cross-checks the post counts behind the estimate and nothing
+else; the X Developer Console is where the actual spend appears. A count that
+diverges is still the signal worth chasing: it says whether a discrepancy is
+our bug or their policy moving.
 
 Consequences that are load-bearing elsewhere:
 
-- A full re-read of a conversation on the same UTC calendar day as its last
-  *full* read is free and refreshes metrics — hence `conversations.full_read_at`
-  exists separately from `fetched_at` (migration 0006). A `since_id` refresh
-  reads a handful of new posts and must not be allowed to claim a full read
-  was paid for.
+- Re-reading a conversation on the same UTC calendar day as its last *full*
+  read costs nothing for the posts already read — hence
+  `conversations.full_read_at` exists separately from `fetched_at` (migration
+  0006). It is not "free": replies that arrived since were never read before
+  and bill at the post rate, and a `since_id` refresh reads exactly those, so
+  it must not be allowed to claim a full read was paid for.
+- Re-looking-up a referenced post to resolve its media bills again and is
+  deliberately *not* credited against the page that just read it
+  (`conversation-fetch.ts`). Both readings are real requests; whether X's dedup
+  covers the second is the soft part, and the estimate overstates rather than
+  understates.
 - Re-scanning the own-posts timeline for a larger thread target is nearly
   free for the ground already covered.
 - Folder pages enumerate rather than return posts, so whether hydrating an id
@@ -277,8 +294,14 @@ cause.
 
 ## Reconciling
 
-X's own free endpoint `/2/usage/tweets` reports what the project actually
-consumed. It is the check on everything under "Billing" above: if the app's
-estimate and X's meter diverge, the estimate's assumptions — N2's dedup most
-of all — are what to re-measure, and the result belongs in this file with a
-new date.
+X's own free endpoint `/2/usage/tweets` reports the project's daily post
+consumption — a count of posts pulled against the cap, not a dollar figure and
+not a breakdown by rate. So it checks one thing under "Billing" above, but the
+main one: whether the number of posts this app thinks it read matches the
+number X counted. If those diverge, the estimate's assumptions — N2's dedup
+most of all — are what to re-measure, and the result belongs in this file with
+a new date.
+
+For dollars there is no endpoint. The X Developer Console is the only place the
+bill appears, User Reads and Owned Reads included, and it is also where the
+spending limit is set.

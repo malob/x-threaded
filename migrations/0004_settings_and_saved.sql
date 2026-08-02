@@ -8,9 +8,14 @@ CREATE TABLE IF NOT EXISTS settings (
 -- Posts queued for reading, one row per post: pulled from the chosen bookmark
 -- folder ("bookmark") or added by hand in the app ("manual").
 --
--- Shape only. What adds and removes rows is POST /api/bookmarks/sync in
--- src/server/app.ts, and it is the route's comment — not this one — that
--- describes the reconciliation.
+-- Shape only. The two sources are owned by different code, and neither one
+-- touches the other's rows (all in src/server/app.ts):
+--   "bookmark" — POST /api/bookmarks/sync adds and removes them, reconciling
+--                against the folder on X; the route's comment, not this one,
+--                describes that reconciliation.
+--   "manual"   — saveUnlessRepresented() adds them while a conversation
+--                loads, and DELETE /api/saved/:postId removes them (it
+--                refuses on a "bookmark" row, which sync would only restore).
 CREATE TABLE IF NOT EXISTS saved_items (
   post_id TEXT PRIMARY KEY,
   source TEXT NOT NULL,

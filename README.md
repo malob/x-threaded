@@ -24,10 +24,10 @@ Manually:
 
 ```
 bun install && bun run build
-wrangler login
-wrangler deploy                                    # auto-provisions D1
-wrangler d1 migrations apply x-threaded --remote
-wrangler secret put X_BEARER_TOKEN                 # and any others you want
+bunx wrangler login
+bunx wrangler deploy                               # auto-provisions D1
+bunx wrangler d1 migrations apply x-threaded --remote
+bunx wrangler secret put X_BEARER_TOKEN            # and any others you want
 ```
 
 `scripts/push-secrets.sh` pushes the five credential-shaped values
@@ -52,8 +52,9 @@ the app degrades cleanly without the rest.
 | `WORKER_PORT` | `scripts/dev-worker.sh` only: port for `wrangler dev`. |
 
 Locally, `cp .env.example .env` and fill it in — both runtimes read it. When
-deployed, set the same names with `wrangler secret put NAME`; `wrangler.jsonc`
-vars are committed and would follow anyone who forks this repo.
+deployed, set the same names with `bunx wrangler secret put NAME`;
+`wrangler.jsonc` vars are committed and would follow anyone who forks this
+repo.
 
 The user-context features need one interactive authorization per deployment at
 `/auth/login`. **Give each deployment its own X app.** X allows one live grant
@@ -70,7 +71,7 @@ bun run build            # build the SPA into dist/
 
 bun run dev:server       # Bun + SQLite file
 # or
-npx wrangler d1 migrations apply x-threaded --local
+bunx wrangler d1 migrations apply x-threaded --local
 ./scripts/dev-worker.sh  # wrangler dev + local D1
 ```
 
@@ -80,6 +81,11 @@ proxying `/api` and `/auth` to `:8788`).
 Gates: `bun run lint`, `bun run typecheck`, `bun test`, `bun run test:d1`
 (the storage contract against a real local-workerd D1 binding — slow, so it is
 kept out of the default run), `bun run build`.
+
+`typecheck` is `tsc -b --force` on purpose. Incremental `tsc -b` trusts the
+`.tsbuildinfo` files, and a stale one reports success over sources that no
+longer compile — a gate that can pass on broken code is not a gate. The full
+build takes about a second and a half.
 
 ## Architecture
 
@@ -106,21 +112,27 @@ One TypeScript repo, two server targets, one set of routes.
 
 ## Costs
 
-X's pay-per-use tier bills per post read, and the app shows the price of every
-action that spends:
+X's pay-per-use tier bills in three units — $0.005 a post read, $0.001 an
+Owned Read (your own timeline, your bookmark folders), $0.010 a User Read (the
+identity lookup) — and the app shows the price of every action that spends:
 
 | Action | What it costs |
 |---|---|
 | Fetching a conversation | $0.005 per post, estimated at ~1.5× the root's reply count and shown before you commit |
-| Re-opening a cached one | free to render; the refresh it fires is free too on the same UTC calendar day as the last full read, and $0.005 per post after |
+| Re-opening a cached one | free to render; the refresh it fires bills $0.005 for each reply that has arrived since, and nothing for posts already read this UTC calendar day |
 | Refreshing for new replies | $0.005 per post that arrived since |
 | Resuming a truncated fetch | $0.005 per older post it goes back for |
 | Your posts tab | $0.001 per post (Owned Read), plus $0.005 for any thread root older than the scan window |
 | Bookmark sync | $0.001 per bookmark enumerated, plus $0.005 per post hydrated |
+| Connecting your X account | $0.010 once (a User Read on `/2/users/me`), then cached with the grant |
 
-Those are estimates, not invoices: X's same-day deduplication is observed
-rather than contractual, and X's free `/2/usage/tweets` endpoint is what
-reconciles them. Set a spending limit in the X developer console.
+Those are estimates, not invoices. X's same-day deduplication is observed
+rather than contractual, and the app deliberately over-counts in one place —
+re-reading a referenced post to resolve its media is billed even when the same
+post was read minutes earlier — so the estimate leans high rather than low.
+X's free `/2/usage/tweets` endpoint reports daily post-consumption counts, so
+it cross-checks the post counts and not the dollars; the X Developer Console
+is where the bill lives, and where you should set a spending limit.
 
 ## Further reading
 

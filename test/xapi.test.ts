@@ -236,7 +236,7 @@ describe("what the client reports billing", () => {
         pageDelayMs: 0,
       }).searchConversationPage(ROOT_ID, { maxResults: 100 });
       expect(value.posts).toHaveLength(2);
-      expect(receipt).toEqual({ reads: 2, ownedReads: 0 });
+      expect(receipt).toEqual({ reads: 2, ownedReads: 0, userReads: 0 });
     } finally {
       restore();
     }
@@ -251,7 +251,7 @@ describe("what the client reports billing", () => {
         pageDelayMs: 0,
       }).searchConversationPage(ROOT_ID, { maxResults: 100 });
       expect(value.referenced.map((p) => p.id)).toEqual([quoted.id]);
-      expect(receipt).toEqual({ reads: 2, ownedReads: 0 });
+      expect(receipt).toEqual({ reads: 2, ownedReads: 0, userReads: 0 });
     } finally {
       restore();
     }
@@ -267,7 +267,7 @@ describe("what the client reports billing", () => {
       ]);
       expect(value.posts).toHaveLength(1);
       expect(value.missing).toHaveLength(1);
-      expect(receipt).toEqual({ reads: 1, ownedReads: 0 });
+      expect(receipt).toEqual({ reads: 1, ownedReads: 0, userReads: 0 });
     } finally {
       restore();
     }
@@ -279,7 +279,7 @@ describe("what the client reports billing", () => {
     );
     try {
       const { receipt } = await new XApi("bearer").getOwnPosts("user-token", "100");
-      expect(receipt).toEqual({ reads: 0, ownedReads: 1 });
+      expect(receipt).toEqual({ reads: 0, ownedReads: 1, userReads: 0 });
     } finally {
       restore();
     }
@@ -456,7 +456,7 @@ describe("what a dying run carries out", () => {
         snowflakeId(Date.parse(ROOT_AT) + (i + 1) * 1000),
       );
       const error = await new XApi("bearer").getPostsByIds(ids).catch((e: unknown) => e);
-      expect(spentOnFailure(error)).toEqual({ reads: 100, ownedReads: 0 });
+      expect(spentOnFailure(error)).toEqual({ reads: 100, ownedReads: 0, userReads: 0 });
     } finally {
       restore();
     }
@@ -491,7 +491,7 @@ describe("getPostsByIds hydration loss", () => {
       expect(value.posts.map((p) => p.id)).toEqual([here]);
       expect(value.missing).toEqual([{ id: gone, reason: "Authorization Error" }]);
       // Only the post actually returned bills.
-      expect(receipt).toEqual({ reads: 1, ownedReads: 0 });
+      expect(receipt).toEqual({ reads: 1, ownedReads: 0, userReads: 0 });
     } finally {
       restore();
     }
@@ -604,7 +604,7 @@ describe("getBookmarksByFolder completeness", () => {
       expect(result.complete).toBe(true);
       // Two folder pages of stubs, then one lookup hydrating both: the nested
       // call's receipt lands in the scan's, exactly once.
-      expect(receipt).toEqual({ reads: 2, ownedReads: 2 });
+      expect(receipt).toEqual({ reads: 2, ownedReads: 2, userReads: 0 });
     } finally {
       restore();
     }
@@ -624,7 +624,7 @@ describe("getBookmarksByFolder completeness", () => {
       expect(result.missing).toEqual([{ id: folderId(2), reason: "Not Found Error" }]);
       expect(result.complete).toBe(true);
       // Two enumerated stubs, one post actually returned: a missing id bills nothing.
-      expect(receipt).toEqual({ reads: 1, ownedReads: 2 });
+      expect(receipt).toEqual({ reads: 1, ownedReads: 2, userReads: 0 });
     } finally {
       restore();
     }

@@ -13,7 +13,7 @@
         "valibot": "^1.4.2",
       },
       "devDependencies": {
-        "@cloudflare/workers-types": "^5.20260801.1",
+        "@cloudflare/workers-types": "5.20260801.1",
         "@eslint/js": "^10.0.1",
         "@types/bun": "^1.2.0",
         "@types/react": "^19.0.0",

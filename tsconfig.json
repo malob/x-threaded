@@ -12,11 +12,15 @@
   // src/shared is compiled by four of them, which is how "builds in every
   // runtime we ship to" is enforced rather than asserted.
   //
-  // The compilerOptions below are inherited only so that the transpilers that
-  // look for the nearest tsconfig.json — vite/esbuild, bun, wrangler — keep
-  // finding `jsx`, `target` and `verbatimModuleSyntax`. Nothing is typechecked
-  // through this file; `files: []` is what makes it a solution file.
+  // The compilerOptions here are inherited (and `jsx` re-stated) only so that
+  // the transpilers that look for the nearest tsconfig.json — vite/esbuild,
+  // bun, wrangler — keep finding `jsx`, `target` and `verbatimModuleSyntax`.
+  // Nothing is typechecked through this file; `files: []` is what makes it a
+  // solution file, so `jsx` here reaches the bundlers and no project.
   "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "jsx": "react-jsx"
+  },
   "files": [],
   "references": [
     { "path": "./tsconfig.shared.json" },

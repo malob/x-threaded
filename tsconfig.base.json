@@ -1,12 +1,19 @@
 {
-  // Language options only. Deliberately no `lib` and no `types`: every leaf
-  // config must name its own runtime surface, so nothing inherits DOM or Bun
-  // globals by accident. See tsconfig.json for the map of projects.
+  // Language options only. Deliberately no `lib`, no `types` and no `jsx`:
+  // every leaf config must name its own runtime surface, so nothing inherits
+  // DOM or Bun globals by accident. See tsconfig.json for the map of projects.
+  //
+  // `jsx` belongs to that rule too, and it is the one that looks harmless:
+  // setting it here made every project resolve `react/jsx-runtime`, which
+  // drags @types/react — including its global.d.ts, whose empty `Document`,
+  // `Event` and `HTMLElement` declarations are exactly the DOM names
+  // tsconfig.shared.json exists to forbid — into the ECMAScript-only project.
+  // It lives in tsconfig.json (for vite/esbuild) and tsconfig.web.json (the
+  // project that actually compiles TSX) instead.
   "compilerOptions": {
     "target": "ESNext",
     "module": "ESNext",
     "moduleResolution": "bundler",
-    "jsx": "react-jsx",
     "strict": true,
     "noUncheckedIndexedAccess": true,
     "noFallthroughCasesInSwitch": true,

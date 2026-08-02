@@ -18,7 +18,7 @@ import { SpendMeter } from "../src/server/meter";
 import { SELF_ID } from "../src/server/oauth";
 import type { Storage } from "../src/server/storage";
 import { XApiError, type ConversationPage } from "../src/server/xapi";
-import { OWNED_READ_USD, POST_READ_USD } from "../src/shared/pricing";
+import { OWNED_READ_USD, POST_READ_USD, USER_READ_USD } from "../src/shared/pricing";
 import type {
   ApiError,
   FetchCost,
@@ -665,7 +665,7 @@ describe("what a failed request discloses", () => {
     xapi.onSearchConversationPage = () => searchPage([root, quoting]);
     xapi.onGetPostsByIds = () => {
       throw Object.assign(new XApiError("X died mid-lookup", 500), {
-        spentReceipt: { reads: 40, ownedReads: 0 },
+        spentReceipt: { reads: 40, ownedReads: 0, userReads: 0 },
       });
     };
 
@@ -699,7 +699,11 @@ describe("GET /api/bookmarks/folders — first-use identity spend", () => {
 
     const first = (await (await app.request("/api/bookmarks/folders")).json()) as FoldersResponse;
     // Folders are free; the read that resolved who "the user" is was not.
-    expect(first.cost).toEqual({ posts: 1, billable: 1, usd: POST_READ_USD });
+    //
+    // It is a User Read at $0.010, not a post read at $0.005: this expectation
+    // said POST_READ_USD until 2026-08-01, which is to say the test codified
+    // the app's under-charging rather than X's published rate (N1).
+    expect(first.cost).toEqual({ posts: 1, billable: 1, usd: USER_READ_USD });
 
     // Identity now cached: the next call spends nothing and says nothing.
     const second = (await (await app.request("/api/bookmarks/folders")).json()) as FoldersResponse;

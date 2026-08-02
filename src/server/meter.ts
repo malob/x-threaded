@@ -1,4 +1,4 @@
-import { NO_READS, addReceipts, receiptUsd, type Receipt } from "../shared/pricing";
+import { NO_READS, addReceipts, receiptCount, receiptUsd, type Receipt } from "../shared/pricing";
 import type { FetchCost } from "../shared/types";
 import type { Billed } from "./xapi";
 
@@ -46,7 +46,7 @@ export class SpendMeter {
 
   /** Whether any read has been charged — i.e. whether money may have moved. */
   get spent(): boolean {
-    return this.charged.reads + this.charged.ownedReads > 0;
+    return receiptCount(this.charged) > 0;
   }
 
   /** The estimate as the API reports it. */
@@ -57,10 +57,11 @@ export class SpendMeter {
     const net: Receipt = {
       reads: Math.max(0, this.charged.reads - this.credited.reads),
       ownedReads: Math.max(0, this.charged.ownedReads - this.credited.ownedReads),
+      userReads: Math.max(0, this.charged.userReads - this.credited.userReads),
     };
     return {
-      posts: this.charged.reads + this.charged.ownedReads,
-      billable: net.reads + net.ownedReads,
+      posts: receiptCount(this.charged),
+      billable: receiptCount(net),
       usd: receiptUsd(net),
     };
   }

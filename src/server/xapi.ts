@@ -1,5 +1,13 @@
 import * as v from "valibot";
-import { NO_READS, addReceipts, ownedReads, postReads, type Receipt } from "../shared/pricing";
+import {
+  NO_READS,
+  addReceipts,
+  ownedReads,
+  postReads,
+  receiptCount,
+  userReads,
+  type Receipt,
+} from "../shared/pricing";
 import { snowflakeMs } from "../shared/snowflake";
 import type { MediaItem, Post, PostEntities } from "../shared/types";
 import {
@@ -171,7 +179,7 @@ function withSpent(err: unknown, receipt: Receipt): unknown {
   if (!(err instanceof Error)) return err;
   const carrier = err as Error & SpentCarrier;
   const total = addReceipts(carrier.spentReceipt ?? NO_READS, receipt);
-  if (total.reads + total.ownedReads > 0) carrier.spentReceipt = total;
+  if (receiptCount(total) > 0) carrier.spentReceipt = total;
   return err;
 }
 
@@ -328,14 +336,15 @@ export class XApi {
 
   /**
    * The authenticated user (user-context). Confirms the token works, and
-   * bills one user read at the post-read rate.
+   * bills one User Read — $0.010, twice a post read and the priciest single
+   * call this app makes (docs/x-api-notes.md N1).
    */
   async getMe(
     accessToken: string,
   ): Promise<Billed<{ id: string; username: string; name: string }>> {
     const result = await this.get("/users/me", MeResponseSchema, {}, accessToken);
     if (!result.data) throw new XApiError("could not resolve the authenticated user", 401);
-    return { value: result.data, receipt: postReads(1) };
+    return { value: result.data, receipt: userReads(1) };
   }
 
   /**
