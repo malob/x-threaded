@@ -108,6 +108,37 @@
   }
 }
 
+/* THE THEME TOGGLE'S OVERRIDES. Three states: no data-theme = follow the
+   system (the media query above); "dark"/"light" pin one scheme. The dark
+   values exist twice on purpose — attribute selectors cannot join a media
+   query — so EDIT BOTH when a token changes. color-scheme follows, for
+   scrollbars and form controls. */
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #1e1e1c;
+  --text: #e8e6e1;
+  --text-muted: #97958e;
+  --border: #3d3d3a;
+  --accent-bg: #253243;
+  --link: #6ab0f3;
+  --line-hover: #706e66;
+  --accent-quiet: #2e6552;
+  --surface: #272724;
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+  --bg: #ffffff;
+  --text: #1a1a18;
+  --text-muted: #6b6b66;
+  --border: #d9d7d0;
+  --accent-bg: #eef4fb;
+  --link: #1d6fc4;
+  --line-hover: #a8a49a;
+  --accent-quiet: #9ad9c2;
+  --surface: #f4f2ec;
+}
+
 /* ≤34rem: the drawing keeps its grammar and spends less width on it. The
    aliases (--lane, --node-x, --elbow-w) need no re-declaration because they
    are declared on this same element, and var() substitutes per element at
@@ -1129,4 +1160,16 @@ ul.conversations li:hover {
   background: rgba(0, 0, 0, 0.65);
   color: #fff;
   font-size: 12px;
+}
+
+/* The theme toggle: quiet chrome in the header row. */
+.theme-toggle {
+  padding: 8px 10px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.theme-toggle:hover {
+  color: var(--text);
 }

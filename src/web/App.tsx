@@ -15,6 +15,41 @@ import { Thread } from "./Thread";
 import { estimateFetchUsd, formatUsd } from "../shared/pricing";
 import { appPath, parsePostPath, xPostUrl } from "../shared/urls";
 
+type Theme = "system" | "light" | "dark";
+
+/* system → light → dark → system. Persisted; the boot script in index.html
+   re-applies it before first paint. Glyphs: ◐ following the system, ○ pinned
+   light, ● pinned dark. */
+function ThemeToggle() {
+  const [theme, setTheme] = useState<Theme>(() => {
+    const t = localStorage.getItem("theme");
+    return t === "light" || t === "dark" ? t : "system";
+  });
+  useEffect(() => {
+    if (theme === "system") {
+      delete document.documentElement.dataset.theme;
+      localStorage.removeItem("theme");
+    } else {
+      document.documentElement.dataset.theme = theme;
+      localStorage.setItem("theme", theme);
+    }
+  }, [theme]);
+  const next: Record<Theme, Theme> = { system: "light", light: "dark", dark: "system" };
+  const glyph = theme === "system" ? "◐" : theme === "light" ? "○" : "●";
+  const label = `Theme: ${theme} — click for ${next[theme]}`;
+  return (
+    <button
+      type="button"
+      className="theme-toggle"
+      title={label}
+      aria-label={label}
+      onClick={() => setTheme(next[theme])}
+    >
+      {glyph}
+    </button>
+  );
+}
+
 export function App() {
   const queryClient = useQueryClient();
   const [url, setUrl] = useState("");
@@ -222,6 +257,7 @@ export function App() {
             Back
           </button>
         )}
+        <ThemeToggle />
       </form>
 
       {errorMessage && <div className="error">{errorMessage}</div>}
