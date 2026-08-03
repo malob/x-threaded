@@ -340,6 +340,27 @@ export function applyKey(state: KeyState, model: KeyModel, key: string): KeyResu
       // Everything else just went behind a fold; only the root is left to sit on.
       moveCursor(model.rootId);
       break;
+    case "fold-reveal":
+      // vim's zv: open just enough to see the cursor. Opens only, so the
+      // cursor cannot be hidden mid-gesture and never moves.
+      if (cursorId !== null) {
+        requestScroll("nearest");
+        openAncestors(cursorId);
+      }
+      break;
+    case "fold-focus": {
+      // vim's zx as one ATOMIC step: fold everything, then reveal the
+      // cursor's ancestry — the path plus one-line stubs at every level.
+      // Atomic because zM alone re-homes a hidden cursor (the
+      // cursor-never-invisible rule), which would destroy "where I was"
+      // between the two halves of a zM-then-zv macro. Here the end state
+      // has the cursor visible by construction, so it never moves.
+      if (cursorId === null) break;
+      foldAll(false);
+      openAncestors(cursorId);
+      requestScroll("center", true);
+      break;
+    }
     case "center-cursor":
       if (cursorId !== null) {
         commands.push({ kind: "scroll-to-post", postId: cursorId, mode: "center" });
