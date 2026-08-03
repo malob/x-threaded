@@ -1,0 +1,1793 @@
+<!--
+
+  Authored by Claude (Anthropic's Claude Fable 5, via Claude Code);
+  design decisions by Malo Bourgon. See README.md in this directory.
+==============================================================================
+  M — FOLD MARKS  ·  two algebras, two visibilities
+  x-threaded · an EXPLORATION AID, not a grammar change
+==============================================================================
+
+  WHAT THIS PAGE IS
+  -----------------
+  K drew the connectors and ruled where a fold handle lives. This page does
+  not re-rule anything. It exists because the owner's fold-marker sketch —
+  small hollow circles sitting ON the connector lines, ⊖ open, ⊕ closed —
+  implies a question about what a mark FOLDS that the sketch does not settle,
+  and a second question about when a mark is VISIBLE that he asked to see
+  both ways. Both are toggles here. Nothing on the page is a proposal.
+
+  The skin is K's, token for token, including ruling (o): ZERO MOTION. No
+  `transition` is written anywhere in this file, so there is no duration to
+  switch back on by accident.
+
+  WHAT IS NEW, AND ONLY THIS
+  --------------------------
+  · THE MARK. An 11px hollow circle drawn in the structure layer's own ink at
+    the structure layer's own weight, sitting on the line. It is opaque: it
+    masks the stretch of line it stands on, because a ⊖ whose bar is crossed
+    by the vertical it sits on reads as a ⊕. The mark is the whole control —
+    its hit box is a --grab-wide strip along its own stretch of line, per K's
+    (h-amend), so pointing near the line is pointing at the mark.
+  · THE STUB IS THE SAME CIRCLE, and K's bordered count badge is gone. A closed
+    fold is a ⊕ on the line; the count is unboxed prose beside or below it.
+  · ONE CLOSED FORM IN TWO ORIENTATIONS, rulings (s) + (s-amend). Wherever a
+    fold closes, the ⊕ HOLDS THE STATION the ⊖ was standing on — so the control
+    never moves across the toggle — and THE LINE CONTINUES FROM THE ⊕ TO THE
+    GHOST CHIP ALONG ITS OWN DIRECTION, turning only where geometry demands it.
+    A below-avatar fold's line is a vertical drop, so it ╰s into a chip standing
+    a fork-step right, in the seat the first hidden avatar had: (B), (B+), the
+    trunk tail. THE TAKE-OFF'S line is a horizontal arm, so it runs STRAIGHT on
+    under the mid-arm ⊕ into a chip standing where the sub-line was — no second
+    corner, because a horizontal line arriving at a horizontal seat has nothing
+    to turn for. Both read "n replies · k new". The chip is K's `.fold-stub`
+    with its ▸ caret removed: the ⊕ owns the verb, and a caret would be a second
+    open-affordance at one station. Both the ⊕ and the chip reopen — two hands
+    on one control, which is why they light together and never separately.
+      THE OTHER FORM IS THE RETIRED ALGEBRAS'. Where (A) folds a BRANCH and
+    where (C) collapses a NODE, the ⊕ still stands in the position the thing was
+    removed from and the count rides it as a bare "n · k new" badge, because
+    there the mark IS the content's seat. That was (s)'s reading of the take-off
+    too, until (s-amend) overruled it for that one station — see the note below
+    on what has and has not been modernized.
+  · ONE CONTROL IN THREE SHAPES, ruling (s). The mark, the LINE it stands on,
+    and the chip are one fold. Clicking anywhere along a scope's rail folds it
+    in every mode — the line resolves to that scope's own live control and
+    defers to it, so a line can never do something its mark would not, and the
+    preview it shows is that control's own. Which scope a stretch of line
+    belongs to falls out of the same walk: a mid-run bead's drop belongs to the
+    chain head under (B) and to the bead itself under (B+), because that is
+    where the live mark is.
+  · MARKS ARE CONTROLS, LINES ARE DRAWING. Every line on this page is drawn by
+    an inert element (.junction, .tee, the limb elbows) and every mark is a
+    button layered on top. K fused the two; separating them is what lets one
+    drawing carry two different sets of marks.
+
+  THE TWO ALGEBRAS, AND WHERE THEY AGREE
+  --------------------------------------
+  (A) DOWNSTREAM LAW — the owner's sketch. One law: a mark folds everything
+      downstream of itself, the branch head included. Marks therefore sit at
+      DEPARTURES: every branch elbow (leaves included), the take-off's arm,
+      and the trunk below the final segment.
+  (B) CURRENT MODEL — what the app ships. A fold hides what lies BELOW an
+      owner and the owner stays. Marks sit at three sites: a segment's tee, a
+      chain head's line, a fork tail's line. No elbow marks; leaves are not
+      foldable. Its optional third form, (B+) MID-RUN MARKS, puts the same
+      mark below every dialogue bead but the last, so the rest of an exchange
+      can be folded from anywhere in it.
+  (C) COLLAPSE TO BYLINE — the Reddit / HN / LessWrong convention. Folding a
+      NODE hides its body AND its whole subtree into its own identity row:
+      bead and byline stay on the line, the count rides the byline. Leaves are
+      foldable (their body collapses). Marks stand on each node's incoming
+      line. ITS EXCEPTION IS THE INTERESTING PART: a reply BLOCK — the
+      take-off's and the final segment's — has no single head to collapse
+      into, so in (C) those two keep (B)'s hide-below verb and count stub.
+      (C) is the only algebra here that runs two fold verbs at once.
+
+  WHAT (s-amend) MOVED, AND WHAT IT DID NOT. The owner's atlas review put the
+  segment fold's mark at the CENTRE OF THE ARM'S STRAIGHT SPAN — which is where
+  this page always drew it, so the shared station needed no change — and
+  replaced the "╰ + chip" closed form with the direction law above. The
+  take-off's closed form is rebuilt to match in every mode, because it is one
+  station shared by all three algebras and cannot be two things at once.
+  MODES (A) AND (C) OTHERWISE PREDATE THE AMENDMENT and are left as the
+  decision's record: (A)'s branch stubs and (C)'s collapsed bylines keep the
+  departure form, and header decision 3 below (the elbow mark riding the far end
+  of its arm, onto the curve at narrow tokens) describes (A)'s marks only — the
+  ruling that forbids a disc on a departure curve is about the tee, and the tee
+  now has a fork step wide enough to keep it off. Modernizing (A) and (C)
+  further would edit a record of what was rejected.
+
+  THEY AGREE AT TWO STATIONS, which is worth seeing rather than being told:
+  the take-off's arm (both fold the whole reply block, 7 replies · 2 new) and
+  the final segment's line (both fold the whole discussion, 11 replies · 2 new). Every
+  difference between the algebras is inside segment 1's reply block.
+
+  THE FINAL SEGMENT'S MARK IS NOT A CONTRADICTION OF (h). K forbids a handle
+  on the trunk under a MID-thread segment, where the line means "the thread
+  goes on". A final segment has no continuation — under (i-amend) its replies
+  attach directly to that line — so the line under it means only "the
+  discussion", and a mark there folds exactly that. Without it, opening the
+  collapsed final block would leave no control to re-close it.
+
+  WHAT EACH ALGEBRA COSTS, drawn rather than argued: under (A) the Petja ↔
+  DeepFrank run cannot be hidden while its head stays — there is no mark below
+  a chain head, so folding Petja's branch takes Petja's post with it. Under
+  (B) Luke and Clifton carry no mark at all. Both losses are reachable in two
+  clicks; that is the point of the instrument.
+
+  DECISIONS THIS PAGE MADE THAT THE SKETCH DID NOT COVER
+  -----------------------------------------------------
+  1. k = 0 PRINTS NO "new". Luke's leaf fold reads "1", not "1 · 0 new" — the
+     stub states facts and a zero is not one.
+  2. THE MARK MASKS ITS LINE (above). Under (e-settled) this costs nothing:
+     hover brightens the line and the mark brightens with it, so the disc and
+     the ink it interrupts are always the same colour.
+  3. THE ELBOW MARK STANDS AT THE FAR END OF ITS ARM, its right edge on the
+     avatar's 9 o'clock, so it never overlaps the node and never steals its
+     click (ruling n). At the narrow breakpoint the arm is shorter than the
+     departure curve plus the mark, and the mark rides onto the curve.
+  4. SWITCHING ALGEBRA DROPS THE FOLDS ONLY THAT ALGEBRA CAN REOPEN. The two
+     shared stations keep their state across a switch; (A)'s branch folds and
+     (B)'s owner folds are cleared, because a fold with no reachable mark is
+     a trap.
+  5. IN (C) THE COUNT ON A COLLAPSED BYLINE IS THE DOWNSTREAM COUNT — what the
+     fold hides — so a collapsed leaf shows a bare byline and no number. The
+     node's own body is not a post and is not counted.
+  6. IN (C) TRUNK BEADS TAKE NO NODE MARK. The root and the final segment
+     already carry their block's mark, and two marks on one bead would be two
+     verbs at one station. Their reply blocks are the (C) exception anyway.
+==============================================================================
+-->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>x-threaded — Fold Marks (three algebras, two visibilities)</title>
+<style>
+/* ==========================================================================
+   1 · DESIGN TOKENS — K's, verbatim, plus §1c for the mark itself.
+   ========================================================================== */
+
+:root {
+  color-scheme: dark light;
+
+  --canvas:       #171614;
+  --chrome:       #131211;
+  --surface:      #1e1c19;
+  --surface-sunk: #131210;
+  --surface-bed:  #232019;
+  --rule:         #2b2825;
+  --rail:         #322e29;
+
+  --ink:       #e7e2d9;
+  --ink-loud:  #f5f2ec;
+  --ink-quiet: #9a948b;
+  --ink-faint: #7a746c;
+
+  --accent:      #63b9a6;
+  --accent-quiet:#3c5c56;
+
+  --font-read: Charter, "Iowan Old Style", "Source Serif 4", "Source Serif Pro",
+               Georgia, "Times New Roman", serif;
+  --font-ui:   -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI",
+               Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", SFMono-Regular, "Berkeley Mono", Menlo,
+               "Cascadia Mono", "Roboto Mono", monospace;
+
+  --t-nano:  .6875rem;
+  --t-micro: .75rem;
+  --t-meta:  .8125rem;
+  --t-ui:    .875rem;
+  --t-name:  .9375rem;
+  --t-body:  1.0625rem;
+  --t-root:  1.1875rem;
+
+  --lh-read:  1.60;
+  --lh-root:  1.55;
+  --lh-ui:    1.40;
+  --lh-tight: 1.20;
+
+  --sp-1: .25rem;  --sp-2: .5rem;   --sp-3: .75rem;
+  --sp-4: 1rem;    --sp-5: 1.5rem;  --sp-6: 2rem;    --sp-7: 3rem;
+  --sp-sibling: 1.25rem;
+  /* K's run gap is .7rem. THE ONE RHYTHM THIS PAGE CHANGES, and it is changed
+     in EVERY mode so the drawing never moves when the algebra does: under
+     (B+) a mark stands in the run's own line between two beads, and an 11px
+     disc with clearance either side does not fit in 11px of line. The gap is
+     widened once, here, rather than conditionally — a tree that reflows when
+     you switch the toggle would be comparing two drawings, not two mark sets. */
+  --sp-run:     1.25rem;
+
+  /* No motion token. Ruling (o): zero motion in v1. */
+  --r-sm: 6px; --r-md: 10px; --r-lg: 14px;
+
+  /* ---- 1b · THE CONNECTIVE ANATOMY (K, verbatim) ---------------------- */
+  --avatar:   2rem;
+  --lane:     var(--avatar);
+  --lane-gap: .7rem;
+  /* THE FLOOR IS SET BY THE MID-ARM STATION (s-amend), the same as in K: the
+     take-off arm's STRAIGHT span is --fork + --line-w − 2 × --elbow-r, and the
+     ⊖/⊕ disc has to fit inside it without riding the departure curve. 1.95rem
+     gives 13.2px for an 11px disc; the old 1.85rem floor left 0.3px. */
+  --fork:     clamp(1.95rem, 3vw, 2.25rem);
+
+  --line-w:   2px;
+  --elbow-r:  10px;
+
+  --rail-hover: var(--ink-faint);
+  --mark-ink:   var(--rail);
+  --bead-ink:   var(--rule);
+  --av-top:   .25rem;
+  --row-pt:   .6rem;
+  --row-pb:   .7rem;
+
+  --takeoff:      var(--fork);
+  --takeoff-t:    calc(var(--stub-gap) + var(--stub-h) / 2 - var(--line-w) / 2);
+  --takeoff-drop: 2.6rem;
+  --grab:         .8125rem;
+
+  --stub-gap: .5rem;
+  --stub-h:   1.4rem;
+
+  --bed-lead: 2rem;
+  --gutter:   calc(var(--bed-lead) + .15rem);
+
+  --measure:    68ch;
+  --measure-px: 35.5rem;
+  --fork-depth: 3;
+  --pad-x:      clamp(1rem, 4vw, 1.5rem);
+  --page: min(
+            calc(var(--measure-px) + var(--gutter) + var(--lane) + var(--lane-gap)
+                 + var(--fork-depth) * var(--fork) + 2 * var(--pad-x)),
+            calc(100vw - 2rem));
+
+  --head-h:   2.75rem;
+  --ctrl-h:   2.6rem;
+
+  /* ======================================================================
+     1c · THE MARK — the only new geometry on the page.
+     Three numbers: the disc, the stroke inside it, and the fill that lets it
+     mask the line it stands on. The stroke is --line-w, not a value of its
+     own, because the mark is made of the same ink at the same weight as the
+     drawing it sits in; that is what makes it read as part of the line
+     rather than as furniture laid over it.
+     ====================================================================== */
+  --mark-d:    .6875rem;      /* 11px — and, since (s-amend), the number the
+                                 fork's floor is solved against: the disc has to
+                                 fit the take-off arm's straight span */
+  --mark-bar:  .3125rem;      /* 5px — the ⊖ bar, and the ⊕'s second stroke */
+  --mark-fill: var(--canvas); /* opaque: see decision 2 in the header */
+}
+
+/* LIGHT — K's, verbatim. */
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    --canvas:       #faf8f3;
+    --chrome:       #f4f1e9;
+    --surface:      #f3efe6;
+    --surface-sunk: #f1ede3;
+    --surface-bed:  #eceadc;
+    --rule:         #e5dfd3;
+    --rail:         #d3caba;
+    --ink:          #24221e;
+    --ink-loud:     #100f0d;
+    --ink-quiet:    #6b655e;
+    --ink-faint:    #8c867d;
+    --accent:       #1f7a6a;
+    --accent-quiet: #bcd8d1;
+  }
+}
+:root[data-theme="light"] {
+  --canvas:       #faf8f3;
+  --chrome:       #f4f1e9;
+  --surface:      #f3efe6;
+  --surface-sunk: #f1ede3;
+  --surface-bed:  #eceadc;
+  --rule:         #e5dfd3;
+  --rail:         #d3caba;
+  --ink:          #24221e;
+  --ink-loud:     #100f0d;
+  --ink-quiet:    #6b655e;
+  --ink-faint:    #8c867d;
+  --accent:       #1f7a6a;
+  --accent-quiet: #bcd8d1;
+}
+
+/* ==========================================================================
+   2 · BASE  (K, verbatim)
+   ========================================================================== */
+
+*, *::before, *::after { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+
+body {
+  margin: 0;
+  background: var(--canvas);
+  color: var(--ink);
+  font-family: var(--font-ui);
+  font-size: var(--t-ui);
+  line-height: var(--lh-ui);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  font-synthesis: none;
+  hanging-punctuation: first;
+}
+
+::selection { background: var(--accent-quiet); color: var(--ink-loud); }
+
+button, input { font: inherit; color: inherit; background: none; border: 0; margin: 0; padding: 0; }
+button { cursor: pointer; text-align: left; }
+
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: var(--r-sm); }
+
+a { color: inherit; text-decoration: none; }
+
+.mono {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum" 1;
+  letter-spacing: -.01em;
+}
+
+/* ==========================================================================
+   3 · HEADER, BRIEF, AND THE TWO TOGGLES
+   ========================================================================== */
+
+.topbar {
+  position: sticky; top: 0; z-index: 30;
+  min-height: var(--head-h);
+  display: flex; align-items: center; gap: var(--sp-4);
+  padding: .45rem var(--pad-x);
+  background: color-mix(in srgb, var(--chrome) 92%, transparent);
+  backdrop-filter: saturate(140%) blur(14px);
+  -webkit-backdrop-filter: saturate(140%) blur(14px);
+  border-bottom: 1px solid var(--rule);
+}
+.wordmark {
+  flex: none;
+  font-family: var(--font-read);
+  font-size: var(--t-body);
+  letter-spacing: -.005em;
+  color: var(--ink-loud);
+  white-space: nowrap;
+}
+.wordmark .w-x    { font-weight: 700; }
+.wordmark .w-dash { color: var(--ink-faint); margin: 0 .02em; }
+.wordmark .w-word { color: var(--ink-quiet); font-weight: 400; }
+
+.convo {
+  min-width: 0; flex: 1 1 auto;
+  display: flex; align-items: baseline; gap: 0 .42rem;
+  font-size: var(--t-meta);
+  color: var(--ink-quiet);
+  white-space: nowrap; overflow: hidden;
+}
+.convo .who   { color: var(--ink-loud); font-weight: 600; flex: none; }
+.convo .sep   { color: var(--ink-faint); flex: none; }
+.convo .first {
+  font-family: var(--font-read);
+  font-size: var(--t-name);
+  color: var(--ink-quiet);
+  min-width: 0;
+  overflow: hidden; text-overflow: ellipsis;
+}
+.convo .n { font-size: var(--t-micro); color: var(--ink-faint); flex: none; }
+
+.theme {
+  flex: none; margin-left: auto;
+  font-size: var(--t-meta);
+  color: var(--ink-faint);
+  padding: .15rem .1rem;
+}
+.theme:hover { color: var(--ink); }
+
+/* ---- THE BRIEF — the question, stated and not argued ------------------- */
+.brief { max-width: 47rem; margin: 0 auto; padding: var(--sp-5) var(--pad-x) var(--sp-4); }
+.brief h1 {
+  margin: 0 0 var(--sp-2);
+  font-family: var(--font-read);
+  font-size: var(--t-root); font-weight: 600;
+  letter-spacing: -.01em;
+  color: var(--ink-loud);
+}
+.aid {
+  display: inline-block;
+  margin: 0 0 var(--sp-3);
+  padding: .12rem .5rem;
+  font-size: var(--t-nano);
+  letter-spacing: .09em; text-transform: uppercase;
+  color: var(--ink-faint);
+  background: var(--surface);
+  box-shadow: inset 0 0 0 1px var(--rule);
+  border-radius: 999px;
+}
+.brief p {
+  margin: 0 0 var(--sp-3);
+  font-family: var(--font-read);
+  font-size: var(--t-name);
+  line-height: var(--lh-read);
+  color: var(--ink-quiet);
+  text-wrap: pretty;
+}
+.brief p b   { color: var(--ink); font-weight: 600; }
+.brief p em  { color: var(--ink); font-style: italic; }
+.brief .foot {
+  margin: 0;
+  padding-top: var(--sp-3);
+  border-top: 1px solid var(--rule);
+  font-family: var(--font-ui);
+  font-size: var(--t-meta);
+  color: var(--ink-faint);
+}
+.brief .foot .mono { color: var(--ink-quiet); }
+
+/* ---- THE TOGGLES — a small sticky bar, and no motion in it ------------- */
+.controlbar {
+  position: sticky; top: var(--head-h); z-index: 25;
+  display: flex; align-items: center; flex-wrap: wrap; gap: var(--sp-3) var(--sp-5);
+  min-height: var(--ctrl-h);
+  padding: .4rem var(--pad-x);
+  background: color-mix(in srgb, var(--chrome) 94%, transparent);
+  backdrop-filter: saturate(140%) blur(14px);
+  -webkit-backdrop-filter: saturate(140%) blur(14px);
+  border-bottom: 1px solid var(--rule);
+}
+.ctrl { display: flex; align-items: center; gap: var(--sp-2); min-width: 0; }
+.ctrl-lab {
+  flex: none;
+  font-size: var(--t-nano);
+  letter-spacing: .09em; text-transform: uppercase;
+  color: var(--ink-faint);
+}
+.seg {
+  display: flex;
+  padding: 2px;
+  background: var(--surface-sunk);
+  box-shadow: inset 0 0 0 1px var(--rule);
+  border-radius: var(--r-sm);
+}
+.seg-b {
+  padding: .18rem .55rem;
+  font-size: var(--t-meta);
+  color: var(--ink-quiet);
+  border-radius: 4px;
+  white-space: nowrap;
+}
+.seg-b:hover { color: var(--ink); }
+.seg-b[aria-checked="true"] {
+  color: var(--ink-loud);
+  background: var(--surface);
+  box-shadow: inset 0 0 0 1px var(--rule);
+}
+.mode-line {
+  flex: 1 1 14rem; min-width: 0;
+  font-size: var(--t-micro);
+  color: var(--ink-faint);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.mode-line .say-a, .mode-line .say-b, .mode-line .say-c { display: none; }
+body.mode-a .mode-line .say-a { display: inline; }
+body.mode-b .mode-line .say-b { display: inline; }
+body.mode-c .mode-line .say-c { display: inline; }
+.mode-line em { color: var(--ink-quiet); font-style: normal; }
+
+/* ==========================================================================
+   4 · THE COLUMN AND THE TREE  —  K's anatomy, with ONE structural change:
+   lines are drawn by INERT elements and every mark is a button layered over
+   them. K fused handle and drawing; separating them is what lets one drawing
+   carry two different sets of marks.
+   ========================================================================== */
+
+.col { max-width: var(--page); margin: 0 auto; padding: var(--sp-4) var(--pad-x) var(--sp-7); }
+.thread { margin: 0; padding-left: var(--gutter); }
+
+.limb {
+  position: relative;
+  --lead: 0;
+  padding-top: var(--lead);
+  /* THE STATION (see §5). Written once per limb and read by BOTH the open
+     mark and the closed stub, which is the whole point of it. */
+  --own-t: calc(var(--stub-gap) + var(--mark-d) / 2);
+}
+.limb.owns-run { --own-t: calc((var(--sp-run) + var(--av-top)) / 2); }
+.limb.is-fork { --lead: var(--sp-sibling); }
+.limb.is-run  { --lead: var(--sp-run);     }
+.limb.is-run.is-seg { --lead: var(--sp-5); }
+
+.kids { position: relative; }
+.kids.fork { padding-left: var(--fork); }
+.kids.run  { padding-left: 0; }
+
+/* ---- SEGMENT 1 · THE ELBOW (K, verbatim) -------------------------------- */
+.limb.is-fork::before {
+  content: "";
+  position: absolute;
+  left:   calc(var(--lane) / 2 - var(--fork) - var(--line-w) / 2);
+  top:    0;
+  width:  calc(var(--fork) - var(--lane) / 2 + var(--line-w) / 2);
+  height: calc(var(--lead) + var(--av-top) + var(--avatar) / 2 + var(--line-w) / 2);
+  border-left:   var(--line-w) solid var(--mark-ink);
+  border-bottom: var(--line-w) solid var(--mark-ink);
+  border-bottom-left-radius: var(--elbow-r);
+  pointer-events: none;
+}
+/* ---- SEGMENT 2 · THE PASS-THROUGH (┣) ---------------------------------- */
+.limb.is-through::after {
+  content: "";
+  position: absolute;
+  left: calc(var(--lane) / 2 - var(--fork) - var(--line-w) / 2);
+  top: 0; bottom: 0;
+  width: var(--line-w);
+  background: var(--mark-ink);
+  pointer-events: none;
+}
+/* ---- SEGMENT 3 · THE CONTINUATION (run children) ------------------------ */
+.limb.is-run::before {
+  content: "";
+  position: absolute;
+  left: calc(var(--lane) / 2 - var(--line-w) / 2);
+  top: 0;
+  width: var(--line-w);
+  height: calc(var(--lead) + var(--av-top));
+  background: var(--mark-ink);
+  pointer-events: none;
+}
+/* ---- SEGMENT 4 · THE DROP BESIDE A POST'S BODY --------------------------
+   Inert on this page — it is DRAWING, never a control. Every mark is a
+   separate button. It is present on any post with content below it, and it
+   is the STEM a below-avatar mark brightens. */
+.junction {
+  position: absolute;
+  left: calc(50% - var(--grab) / 2);
+  top: calc(var(--av-top) + var(--avatar));
+  bottom: 0;
+  width: var(--grab);
+  z-index: 2;
+  cursor: pointer;
+}
+/* the 2px ink; the box around it is the --grab-wide hit strip that makes a
+   2px line a target in practice as well as in principle (K's (h-amend)). */
+.junction::before {
+  content: "";
+  position: absolute;
+  left: calc(50% - var(--line-w) / 2);
+  top: 0; bottom: 0;
+  width: var(--line-w);
+  background: var(--mark-ink);
+}
+/* THE TRUNK UNDER A MID-THREAD BEAD IS NOT A CONTROL. There the line means
+   "the thread goes on" and nothing foldable hangs from it — K's ruling (h),
+   and the reason the take-off exists at all. Drawn, inert, no cursor. */
+.junction.is-trunk { pointer-events: none; cursor: default; }
+
+/* ---- SEGMENT 5 · THE TAKE-OFF (K, verbatim; the .tee is now inert) ------ */
+.kids.takeoff {
+  padding-left: calc(2 * var(--fork));
+  padding-top: var(--takeoff-drop);
+}
+.kids.takeoff::after {
+  content: "";
+  position: absolute;
+  left: calc(var(--lane) / 2 - var(--line-w) / 2);
+  top: 0; bottom: 0;
+  width: var(--line-w);
+  background: var(--mark-ink);
+  pointer-events: none;
+}
+.tee {
+  position: absolute;
+  left:   calc(var(--lane) / 2 - var(--line-w) / 2);
+  top:    var(--takeoff-t);
+  width:  calc(var(--takeoff) + var(--line-w));
+  height: calc(var(--takeoff-drop) - var(--takeoff-t));
+  pointer-events: none;
+}
+.tee::before {
+  content: "";
+  position: absolute; left: var(--elbow-r); top: 0; right: 0; bottom: 0;
+  border-top:   var(--line-w) solid var(--mark-ink);
+  border-right: var(--line-w) solid var(--mark-ink);
+  border-top-right-radius: var(--elbow-r);
+}
+/* THE DEPARTURE CURVE, ruling (r) — verbatim from K. */
+.tee-arc {
+  position: absolute;
+  left:   0;
+  top:    calc(var(--line-w) - var(--elbow-r));
+  width:  calc(var(--elbow-r) + 2 * var(--line-w));
+  height: var(--elbow-r);
+  border-left:   var(--line-w) solid var(--mark-ink);
+  border-bottom: var(--line-w) solid var(--mark-ink);
+  border-bottom-left-radius: var(--elbow-r);
+}
+.kids.takeoff > .limb.is-first { --lead: var(--sp-3); }
+/* THE SUB-LINE'S HIT STRIP. The arm is the m-tee mark's own strip; the
+   vertical below it is drawn by the branch elbows and has no element to
+   click, so it gets one. It starts at the anchor — above --takeoff-t there is
+   only trunk, which folds nothing. */
+.kids.takeoff > .sub-line {
+  position: absolute;
+  left: calc(var(--takeoff) + var(--lane) / 2 - var(--grab) / 2);
+  width: var(--grab);
+  top: var(--takeoff-t); bottom: 0;
+  cursor: pointer;
+}
+.kids.takeoff.is-collapsed > .sub-line { display: none; }
+
+/* ---- THE ROW, THE NODE (K, verbatim) ----------------------------------- */
+.row {
+  display: grid;
+  grid-template-columns: var(--lane) minmax(0, 1fr);
+  column-gap: var(--lane-gap);
+  border-radius: var(--r-md);
+}
+.lane { grid-column: 1; position: relative; min-height: calc(var(--av-top) + var(--avatar)); }
+.body { grid-column: 2; min-width: 0; padding: var(--row-pt) 0 var(--row-pb); }
+
+.avatar {
+  position: absolute;
+  left: 0; top: var(--av-top);
+  width: var(--avatar); height: var(--avatar);
+  z-index: 1;
+  border-radius: 50%;
+  background: var(--surface);
+  box-shadow: inset 0 0 0 1px var(--bead-ink);
+  color: var(--ink-quiet);
+  font-size: .6875rem; font-weight: 600; letter-spacing: .02em;
+  display: grid; place-items: center;
+  user-select: none;
+}
+.avatar.a1 { background: color-mix(in srgb, var(--ink-faint) 13%, var(--surface)); }
+.avatar.a2 { background: color-mix(in srgb, var(--ink-quiet) 10%, var(--surface)); }
+.avatar.a3 { background: color-mix(in srgb, var(--rail)     55%, var(--surface)); }
+.avatar.a4 { background: color-mix(in srgb, var(--ink-faint)  7%, var(--surface)); }
+.avatar.a5 { background: color-mix(in srgb, var(--ink-quiet) 16%, var(--surface)); }
+.avatar.is-unread {
+  box-shadow: inset 0 0 0 1px var(--bead-ink), 0 0 0 var(--line-w) var(--accent);
+  color: var(--ink);
+}
+
+/* ==========================================================================
+   5 · THE MARK  —  the one new thing.
+   --------------------------------------------------------------------------
+   A hollow disc in the structure layer's ink at the structure layer's weight,
+   standing ON a line. It is OPAQUE and masks the stretch of line it occupies,
+   because a ⊖ whose bar is crossed by the vertical it sits on reads as a ⊕ —
+   the glyph has to survive both orientations, and marks occur on both.
+
+   THE CONTROL IS THE STRIP, NOT THE DISC. Each mark's button is a --grab-wide
+   box laid along its own stretch of line (K's (h-amend) at local scale), and
+   the disc is drawn inside it at --mk-x / --mk-y. Only the mark's OWN stretch
+   is claimed, never the whole scope's vertical: under (A) a child's arm strip
+   and its parent's line would otherwise cross, and two overlapping strips make
+   a fold you cannot aim at.
+
+   THE STATION, AND WHY IT IS ONE NUMBER. A below-avatar mark and the stub that
+   replaces its scope stand at the SAME point on the line: --own-t, declared on
+   the limb and read by both. That is K's --takeoff-t discipline (the take-off's
+   handle position is derived from the collapsed stub's centre so the two cannot
+   drift) generalized to every owner fold. Departure marks — the elbow marks and
+   the take-off's arm mark — get the identity for free, because there the mark
+   already stands in the position the folded branch is removed from.
+   ========================================================================== */
+
+.mark { position: absolute; z-index: 2; padding: 0; background: none; }
+.mk {
+  position: relative;
+  flex: none;
+  width: var(--mark-d); height: var(--mark-d);
+  border-radius: 50%;
+  background: var(--mark-fill);
+  box-shadow: inset 0 0 0 var(--line-w) var(--mark-ink);
+}
+.mark .mk {
+  position: absolute;
+  left: var(--mk-x, 50%); top: var(--mk-y, 50%);
+  transform: translate(-50%, -50%);
+}
+.mk::before, .mk::after {
+  content: "";
+  position: absolute; left: 50%; top: 50%;
+  background: var(--mark-ink);
+}
+.mk::before {                                   /* the ⊖ bar — always drawn */
+  width: var(--mark-bar); height: var(--line-w);
+  margin: calc(var(--line-w) / -2) 0 0 calc(var(--mark-bar) / -2);
+}
+.mk::after {                                    /* the ⊕'s second stroke */
+  width: var(--line-w); height: var(--mark-bar);
+  margin: calc(var(--mark-bar) / -2) 0 0 calc(var(--line-w) / -2);
+  display: none;
+}
+.mk.plus::after { display: block; }
+
+/* --- WHERE EACH KIND OF MARK STANDS -------------------------------------- */
+
+/* (A) THE DEPARTURE MARK, on a branch's own elbow arm, after the curve. Its
+   right edge lands on the child avatar's 9 o'clock, so it never covers the
+   node and never steals its click (ruling n). */
+.limb > .mark.m-elbow,
+.limb > .mark.at-arm {
+  left:   calc(var(--lane) / 2 - var(--fork));
+  width:  calc(var(--fork) - var(--lane) / 2);
+  top:    calc(var(--lead) + var(--av-top) + var(--avatar) / 2 - var(--grab) / 2);
+  height: var(--grab);
+  --mk-x: calc(100% - var(--mark-d) / 2);
+  --mk-y: 50%;
+}
+/* (C) THE NODE MARK stands on the node's INCOMING line, immediately before the
+   node — one rule, two renderings, because a line arrives at a bead from two
+   directions and K's drawing already says which: a fork child is reached
+   along an arm (.at-arm, above — the very station (A) uses, with a different
+   verb on it), a run bead straight down (.at-run, here). Nothing moves when a
+   node collapses, so this station holds both states by construction.
+   Worth seeing: .at-run lands on exactly the point (B+) puts a mid-run mark
+   on. Three algebras, one point on the line, three different verbs. */
+.limb > .mark.at-run {
+  left:   calc(var(--lane) / 2 - var(--grab) / 2);
+  width:  var(--grab);
+  top:    0;
+  height: calc(var(--lead) + var(--av-top));
+  --mk-x: 50%; --mk-y: 50%;
+}
+/* THE TAKE-OFF'S ARM MARK — the one station all three algebras share, and
+   since ruling (s-amend) the station the shipping grammar uses too: MID-ARM,
+   at the CENTRE OF THE ARM'S STRAIGHT SPAN, between the departure curve and the
+   corner. (K used to put it on the corner; this page always drew it mid-arm,
+   and the amendment settled in this page's favour.)
+   THE COORDINATE IS THE BOX'S OWN CENTRE. The arm joins two verticals — the
+   trunk's centre-line at --lane/2 and the sub-line's at --lane/2 + --takeoff —
+   and leaves each on the same --elbow-r curve, so the straight run between the
+   curves is symmetric about the midpoint of those verticals. Span the box from
+   one to the other and its 50% IS that midpoint, at every --fork, with no
+   radius arithmetic and nothing written by hand. The selector never names
+   .is-collapsed, so the open ⊖ and the closed ⊕ are one expression. */
+.kids.takeoff > .mark.m-tee {
+  left:   calc(var(--lane) / 2);
+  width:  var(--takeoff);
+  top:    calc(var(--takeoff-t) + var(--line-w) / 2 - var(--grab) / 2);
+  height: var(--grab);
+  --mk-x: 50%; --mk-y: 50%;
+}
+/* (B) THE OWNER MARK, in the line's own course at the top of the subtree
+   block — below the body's span, not up beside the byline — so that it and
+   the ⊕ that replaces the block occupy one station. Its strip is twice the
+   station, i.e. exactly the line from the block's top to just past the mark. */
+.kids > .mark.m-owner {
+  left:   calc(var(--lane) / 2 - var(--grab) / 2);
+  width:  var(--grab);
+  top:    0;
+  height: calc(2 * var(--own-t));
+  --mk-x: 50%; --mk-y: var(--own-t);
+}
+/* (s) CLICK THE LINE. A fork block's spine is clickable down its whole length,
+   because in a fork block the children are indented one --fork and the lane
+   the spine runs down is empty. The disc does not move with it: --mk-y is the
+   station in absolute terms, not a percentage of the strip.
+   A RUN block gets no such extension — its beads sit ON this lane, and a
+   full-height strip would swallow their avatars, which select (ruling n). The
+   run's line is clickable through each bead's own junction instead. */
+.kids.fork > .mark.m-owner { height: 100%; }
+
+/* --- VISIBILITY, THE SECOND QUESTION -------------------------------------
+   (1) always: every ⊖ rests at line ink and brightens under the pointer.
+   (2) hover/focus: ⊖ is absent until its line is pointed at or tabbed to.
+   ⊕ STUBS ARE EXEMPT FROM BOTH — a closed fold must be discoverable, so the
+   rules below name `.mark`, and a stub is not one. */
+body.vis-hover .mark .mk { opacity: 0; }
+body.vis-hover .mark:hover .mk,
+body.vis-hover .mark:focus-visible .mk,
+body.vis-hover .mark.is-hover .mk { opacity: 1; }
+
+/* the operated mark brightens with its stem */
+.mark:hover .mk, .mark.is-hover .mk, .mark:focus-visible .mk { --mark-ink: var(--rail-hover); }
+
+/* (q) + (q-amend): focus locates, and reveals. The ring goes on the DISC,
+   not on the invisible strip, or a keyboard user would get a 13px-wide
+   rectangle where the drawing has a circle. */
+.mark:focus-visible, .stub:focus-visible { outline: none; }
+.mark:focus-visible .mk, .stub:focus-visible .mk {
+  outline: 2px solid var(--accent-quiet);
+  outline-offset: 2px;
+}
+/* a ghost chip has no disc to ring, so it rings itself — chip-sized either
+   way, which is what (q-junction) asked for. */
+.chip:focus-visible {
+  outline: 2px solid var(--accent-quiet);
+  outline-offset: 2px;
+}
+
+/* --- WHICH MARKS EXIST, PER ALGEBRA --------------------------------------
+   The two marks with no gate — the take-off's arm and the final segment's
+   station — are the two stations all three algebras share. */
+.mark.m-elbow, .mark.m-owner.b-only, .mark.m-run, .mark.m-node { display: none; }
+body.mode-a .mark.m-elbow            { display: block; }
+body.mode-b .mark.m-owner.b-only     { display: block; }
+body.mode-b.runmarks .mark.m-run     { display: block; }
+body.mode-c .mark.m-node             { display: block; }
+
+/* ==========================================================================
+   6 · THE FOLD, IN BOTH ALGEBRAS
+   --------------------------------------------------------------------------
+   Two collapse forms, because the two algebras remove two different things:
+
+   fold-self  (A) the whole limb goes — head included — and the ⊕ stands on
+                  the arm exactly where the branch's own elbow left it.
+   fold-below (B) the subtree block goes and the owner's post stays; the ⊕
+                  stands at --own-t, the station the ⊖ was standing on.
+
+   The take-off's collapse is K's and is shared by both algebras, because both
+   put a mark on that arm and both fold the same unit.
+   ========================================================================== */
+
+.stub {
+  display: inline-flex; align-items: center; gap: .4rem;
+  height: var(--stub-h);
+  font-size: var(--t-micro);
+  color: var(--ink-faint);
+}
+.stub .new { color: var(--ink-quiet); }
+.stub:hover            { color: var(--ink-quiet); }
+.stub:hover .new       { color: var(--ink-loud); }
+.stub:hover .mk        { --mark-ink: var(--rail-hover); }
+
+/* --- (A) THE BRANCH IS REPLACED BY ITS OWN MARK -------------------------- */
+.stub-arm { display: none; }
+body.mode-a .limb.fold-self > .row,
+body.mode-a .limb.fold-self > .kids { display: none; }
+/* and the ⊖ goes with them. It is a direct child of the limb rather than of
+   the row, so nothing above would have removed it, and it would then stand
+   exactly on top of the ⊕ that replaced its branch — one station, two live
+   controls, which is precisely what the station discipline exists to prevent.
+   (Caught by the round-trip harness, not by looking.) */
+body.mode-a .limb.fold-self > .mark { display: none; }
+body.mode-a .limb.fold-self > .stub-arm {
+  display: flex;
+  align-items: center;
+  /* the elbow's arm lands at --lead + --av-top + --avatar/2; this box starts
+     at --lead, so its centre is that same point. One arithmetic, two states. */
+  height: calc(2 * var(--av-top) + var(--avatar));
+  margin-left: calc(-1 * var(--mark-d));
+}
+
+/* --- (B) THE SUBTREE IS REPLACED: MARK AT THE STATION, COUNT AT THE END ---
+   TWO ELEMENTS, TWO JOBS, and that separation is the whole refinement:
+
+     THE MARK IS THE CONTROL and does not move. ⊖ and ⊕ stand on the same
+     point of the owner's line, --own-t, so the toggle is position-stable and
+     the eye never has to re-find the thing it just pressed.
+     THE COUNT IS THE HIDDEN CONTENT'S GHOST. The line continues past the ⊕,
+     ends in a ╰ — the only place a line may end is a corner — and the count
+     stands at that corner, in the seat the first hidden child would have
+     occupied. That is K's stub-placement rule ("the stub stands where the
+     first hidden avatar would have stood") with the badge unbundled from the
+     handle.
+
+   The count therefore stops riding the mark, and its WORDING follows the
+   change: standing alone in the content's seat it is prose and says
+   "3 replies" / "11 replies · 2 new". Where a count still rides its mark — the
+   retired algebras' stubs, (A)'s arms and (C)'s bylines — it is a badge and
+   keeps the app's bare "n · k new". One rule: a badge counts, a ghost speaks.
+   THE TAKE-OFF CHANGED SIDES AT (s-amend): its count is a ghost now, standing
+   in the sub-line's seat and speaking ("7 replies · 2 new") rather than riding
+   the mark. The trunk tail was always a ghost and is unchanged.
+
+   The terminal's y is not chosen. --stub-t is the same arithmetic the drawing
+   already uses for the first child's avatar centre, written once per block
+   kind and read by the corner and the ghost alike. */
+.limb          { --stub-t: calc(var(--sp-sibling) + var(--av-top) + var(--avatar) / 2); }
+.limb.owns-run { --stub-t: calc(var(--sp-run)     + var(--av-top) + var(--avatar) / 2); }
+
+.kids.stub { display: none; }
+.limb.fold-below > .kids:not(.stub) { display: none; }
+.limb.fold-below > .kids.stub {
+  display: block;
+  position: relative;
+  padding: 0;
+  height: calc(var(--stub-t) + var(--stub-h) / 2 + var(--sp-2));
+}
+/* THE OWNER'S LINE, from the block's top down past the station and into the
+   ╰. One box draws all three — vertical, corner, arm — exactly as K's stub
+   does, so the corner radius and the arm's reach need no second opinion. The
+   arm ends at --fork, which is where the hidden child's avatar began. */
+.kids.stub::before {
+  content: "";
+  position: absolute;
+  left:   calc(var(--lane) / 2 - var(--line-w) / 2);
+  top:    0;
+  width:  calc(var(--fork) - var(--lane) / 2 + var(--line-w) / 2);
+  height: calc(var(--stub-t) + var(--line-w) / 2);
+  border-left:   var(--line-w) solid var(--mark-ink);
+  border-bottom: var(--line-w) solid var(--mark-ink);
+  border-bottom-left-radius: var(--elbow-r);
+  pointer-events: none;
+}
+/* THE CONTROL, on the line at the station — same strip, same disc centre as
+   the ⊖ it replaces. The disc is opaque, so it interrupts the line it stands
+   on and the line visibly carries on beneath it to the corner. */
+.kids.stub > .stub.at-station {
+  position: absolute;
+  left:   calc(var(--lane) / 2 - var(--grab) / 2);
+  width:  var(--grab);
+  top:    0;
+  height: calc(2 * var(--own-t));
+  display: block;
+}
+.stub.at-station .mk {
+  position: absolute;
+  left: 50%; top: var(--own-t);
+  transform: translate(-50%, -50%);
+}
+/* THE CHIP, in the seat the content left — K's `.fold-stub` visual, verbatim:
+   mono text on --surface, an inset ring in the structure layer's bead ink,
+   rounded. ONE CHANGE: K's ▸ caret is gone. The ⊕ at the station owns the
+   verb now, and a caret inside the chip would be a second open-affordance for
+   one fold — the exact duplication the station discipline exists to prevent.
+   Both the ⊕ and the chip reopen; they are two hands on one control, not two
+   controls. And, K's own reason restated: ONE text run inside, so the mono
+   cluster keeps its own spacing — flex would eat the space around the
+   separator and the count would read "3 replies ·1 new". */
+/* THE VISUAL is written once, because since (s-amend) two different scopes
+   stand a chip in the hidden content's seat — the below-avatar folds here, and
+   the take-off further down — and one ghost must not become two chips. Only the
+   PLACEMENT is per-scope, and that is exactly what the closed-form law makes
+   per-scope: the line's own direction decides where its end is. */
+.chip {
+  height: var(--stub-h);
+  display: inline-flex; align-items: center;
+  padding: 0 .5rem;
+  font-size: var(--t-micro);
+  color: var(--ink-faint);
+  background: var(--surface);
+  box-shadow: inset 0 0 0 1px var(--bead-ink);
+  border-radius: var(--r-sm);
+  white-space: nowrap;
+}
+.chip .new { color: var(--ink-quiet); }
+/* THE VERTICAL ORIENTATION: the drop ╰s and the chip stands a fork-step right,
+   in the seat the first hidden avatar had. */
+.kids.stub > .chip {
+  position: absolute;
+  left: var(--fork);
+  top:  calc(var(--stub-t) - var(--stub-h) / 2);
+}
+/* pointing at EITHER hand lights the whole closed fold — line, elbow, ⊕ and
+   chip — because they are one fold and must never look like two things. */
+.kids.stub:has(> :is(.stub, .chip):is(:hover, .is-hover, :focus-visible)) > .chip {
+  color: var(--ink-quiet);
+  box-shadow: inset 0 0 0 1px var(--ink-faint);
+}
+.kids.stub:has(> :is(.stub, .chip):is(:hover, .is-hover, :focus-visible)) > .chip .new { color: var(--ink-loud); }
+.kids.stub:has(> .chip:is(:hover, .is-hover, :focus-visible)) > .stub .mk { --mark-ink: var(--rail-hover); }
+
+/* THE TRUNK TAIL TAKES THE SAME COMPOSITE. It was drawn inline — ⊕ on the
+   trunk with the count following on one line — on the reasoning that with no
+   continuing line below there is nothing to carry a terminal. Overruled, and
+   rightly: the ╰ does not need a line to continue past it, it needs a line to
+   END, and the only place a line may end is a corner. So the final segment's
+   block closes exactly like every other below-avatar fold, and there is one
+   closed form to learn instead of two. Nothing here is special-cased.  */
+
+/* --- (C) THE NODE COLLAPSES TO ITS OWN BYLINE ---------------------------
+   The Reddit / HN / LessWrong convention. The bead stays on the line, the
+   identity row stays, the body and the whole subtree go, and the count rides
+   the byline in the stub's ink. There is no separate stub element and nothing
+   moves: the mark holds its station and changes from ⊖ to ⊕ in place.
+
+   THE EXCEPTION IS NOT HIDDEN. A reply BLOCK — the take-off's, and the final
+   segment's — is a set of branches with no single head, so there is no byline
+   for it to collapse into. In (C) those two keep the hide-below verb and the
+   count stub they have in (B). (C) is therefore the only algebra on this page
+   that runs two fold verbs at once, and that is a cost to look at, not a bug
+   to paper over. */
+.byline-count { display: none; color: var(--ink-faint); }
+.byline-count .new { color: var(--ink-quiet); }
+/* the byline is a flex row, so this rides it as one item and sets its own
+   internal gap — a whitespace text node between two spans inside a blockified
+   flex item is not reliable spacing to build a reading on. */
+body.mode-c .limb.fold-node > .row > .body > .post-head > .byline > .byline-count {
+  align-items: baseline; gap: 0 .38rem;
+}
+
+body.mode-c .limb.fold-node > .row > .body > .post-text,
+body.mode-c .limb.fold-node > .row > .body > .metrics,
+body.mode-c .limb.fold-node > .kids { display: none; }
+/* the drop under the avatar would otherwise be a stub of line going nowhere */
+body.mode-c .limb.fold-node > .row > .lane > .junction { display: none; }
+body.mode-c .limb.fold-node > .row > .body > .post-head > .byline > .byline-count { display: flex; }
+/* ⊖ becomes ⊕ where it stands, and a closed fold stays visible even when the
+   visibility toggle says marks are revealed rather than drawn. */
+body.mode-c .limb.fold-node > .mark.m-node .mk::after { display: block; }
+body.mode-c.vis-hover .limb.fold-node > .mark.m-node .mk { opacity: 1; }
+
+/* --- THE TAKE-OFF, COLLAPSED — (s-amend)'s HORIZONTAL ORIENTATION ---------
+   THIS BLOCK USED TO CLOSE THE OTHER WAY. Under (s) the take-off counted as a
+   DEPARTURE fold: the ⊕ moved to the position the branch set was removed from,
+   at the arm's end, and the count rode it as a bare "n · k new" badge, because
+   there the mark WAS the content's seat. (s-amend) overrules that for this one
+   station, and it does so by making the law about the LINE rather than about
+   the kind of fold: the owner's line CONTINUES from the ⊕ to the ghost chip
+   ALONG ITS OWN DIRECTION, turning only where geometry demands (r).
+
+   So the take-off now closes exactly like a below-avatar fold, one orientation
+   over. THE MARK HOLDS ITS STATION — mid-arm, placed by the very rule that
+   places the open ⊖, which is what "never moves across the toggle" means — and
+   the line runs STRAIGHT on under it to the sub-line's own centre-line, where
+   the CHIP stands in the seat the sub-line had. No second corner: a horizontal
+   line arriving at a horizontal seat has nothing to turn for. One closed form
+   in two orientations, and the same two elements doing the same two jobs at
+   every fold site on the page.
+
+   (A)'s branch folds and (C)'s node collapses still use the departure form —
+   the ⊕ standing where the thing was, count riding it. Those algebras are the
+   decision's record and predate this amendment; see the header. */
+.kids.takeoff > .chip { display: none; }
+.kids.takeoff.is-collapsed {
+  padding: 0;
+  height: calc(var(--takeoff-t) + var(--stub-h) / 2 + var(--sp-2));
+}
+.kids.takeoff.is-collapsed > .limb,
+.kids.takeoff.is-collapsed > .tee { display: none; }
+/* THE CHIP, at the end of the straight run — one --sp-1 of air past the arm's
+   terminus, which is the sub-line's own centre-line. */
+.kids.takeoff.is-collapsed > .chip {
+  display: inline-flex;
+  position: absolute;
+  left: calc(var(--lane) / 2 + var(--takeoff) + var(--line-w) / 2 + var(--sp-1));
+  top:  calc(var(--takeoff-t) + var(--line-w) / 2 - var(--stub-h) / 2);
+}
+/* ⊖ BECOMES ⊕ WHERE IT STANDS. The mark is one element in two states, so its
+   glyph cannot be a class in the markup — the block's own state says it. */
+.kids.takeoff.is-collapsed > .mark.m-tee .mk::after { display: block; }
+/* and a closed fold stays discoverable even when the visibility toggle says
+   marks are revealed rather than drawn (the same exemption (C) needs). */
+body.vis-hover .kids.takeoff.is-collapsed > .mark.m-tee .mk { opacity: 1; }
+/* THE DEPARTURE CURVE AND THE ARM, in one box: the bottom border IS the arm and
+   its ink occupies exactly [--takeoff-t, +--line-w], the anchor the open state
+   uses, so the mark standing on it has not moved. The arm reaches the sub-line's
+   centre-line — where the expanded corner ends — rather than stopping --lane/2
+   short of it, because that is where the seat is. */
+.kids.takeoff.is-collapsed::before {
+  content: "";
+  position: absolute;
+  left:   calc(var(--lane) / 2 - var(--line-w) / 2);
+  top:    calc(var(--takeoff-t) + var(--line-w) - var(--elbow-r));
+  width:  calc(var(--takeoff) + var(--line-w));
+  height: var(--elbow-r);
+  border-left:   var(--line-w) solid var(--mark-ink);
+  border-bottom: var(--line-w) solid var(--mark-ink);
+  border-bottom-left-radius: var(--elbow-r);
+  pointer-events: none;
+}
+
+/* ==========================================================================
+   7 · THE PREVIEW  —  ruling (e-settled): THE SCOPE'S OWN LINE BRIGHTENS.
+   --------------------------------------------------------------------------
+   Supersedes K's (e-final) stem + region tint. Hovering a mark — or the strip
+   along its line, which is the same control — brightens the line that would
+   leave the view and nothing else: the departure curve, the arm, the vertical
+   run, and the elbows that attach directly to that run. No region wash (the
+   page declares no --surface-preview at all), no avatar or ring involvement,
+   no prose change, and no brightening of anything a level deeper. Bystander
+   stubs stay at rest; a collapsed fold's OWN stub brightens with its own line,
+   because there the stub IS the line's end. This is Reddit's threadline
+   behaviour, said in K's ink.
+
+   IT IS WRITTEN OUT PER SCOPE KIND, and that is not an accident of laziness:
+   "the scope's own line" is a definite, enumerable set of marks, and there are
+   four scope kinds on this page. An inherited property was tried and is wrong
+   here — brightening flows down a run (a run is ONE vertical) but must stop at
+   a branch, and one inherited value cannot do both. What every rule below has
+   in common is that it names only marks the fold removes, so none of them can
+   claim a line the fold leaves standing.
+   ========================================================================== */
+
+/* the pointed-at state, in one place: pointer, held-open specimen, keyboard */
+/* --- SCOPE 1 · A LIMB'S OWN MARK  (A: fold the branch · C: collapse the node)
+   Lit: the incoming line that reaches this node, the drop under its avatar,
+   the elbows of its direct children, and — if what hangs below is a RUN — the
+   whole run vertical, because a run is one line and the fold takes all of it. */
+.limb.is-fork:has(> .mark:is(:hover, .is-hover, :focus-visible))::before { border-color: var(--rail-hover); }
+.limb.is-run:has(> .mark:is(:hover, .is-hover, :focus-visible))::before  { background: var(--rail-hover); }
+.limb:has(> .mark:is(:hover, .is-hover, :focus-visible)) > .row > .lane > .junction::before { background: var(--rail-hover); }
+.limb:has(> .mark:is(:hover, .is-hover, :focus-visible)) > .kids.fork > .limb::before { border-color: var(--rail-hover); }
+.limb:has(> .mark:is(:hover, .is-hover, :focus-visible)) > .kids.fork > .limb.is-through::after { background: var(--rail-hover); }
+.limb:has(> .mark:is(:hover, .is-hover, :focus-visible)) > .kids.run .limb.is-run::before { background: var(--rail-hover); }
+.limb:has(> .mark:is(:hover, .is-hover, :focus-visible)) > .kids.run .junction::before { background: var(--rail-hover); }
+
+/* --- SCOPE 2 · AN OWNER MARK IN A FORK BLOCK  (B: hide below the owner) -----
+   Lit: the owner's drop (the line entering the block) and the block's own
+   spine — which K draws as the children's elbows and their pass-throughs, so
+   naming those two marks names the whole vertical exactly once. */
+.limb:has(> .kids.fork > .mark:is(:hover, .is-hover, :focus-visible)) > .row > .lane > .junction::before { background: var(--rail-hover); }
+.kids.fork:has(> .mark:is(:hover, .is-hover, :focus-visible)) > .limb::before { border-color: var(--rail-hover); }
+.kids.fork:has(> .mark:is(:hover, .is-hover, :focus-visible)) > .limb.is-through::after { background: var(--rail-hover); }
+
+/* --- SCOPE 3 · AN OWNER MARK IN A RUN BLOCK  (B chain head · B+ mid-run) ----
+   A run's vertical runs through every bead in it, so the descendant selector
+   is the honest one here and the bounded one above is honest there. */
+.limb:has(> .kids.run > .mark:is(:hover, .is-hover, :focus-visible)) > .row > .lane > .junction::before { background: var(--rail-hover); }
+.kids.run:has(> .mark:is(:hover, .is-hover, :focus-visible)) .limb.is-run::before { background: var(--rail-hover); }
+.kids.run:has(> .mark:is(:hover, .is-hover, :focus-visible)) .junction::before { background: var(--rail-hover); }
+
+/* --- SCOPE 4 · THE TAKE-OFF'S ARM  (all three algebras) --------------------
+   Lit: the arm and its departure curve (both drawn by .tee, so one property
+   reaches both) and the sub-line with its branch elbows. NOT the trunk: it is
+   drawn by the block's own ::after and no rule here touches it, which is the
+   whole argument of the take-off, said in ink. */
+.kids.takeoff:has(> .mark.m-tee:is(:hover, .is-hover, :focus-visible)) > .tee { --mark-ink: var(--rail-hover); }
+.kids.takeoff:has(> .mark.m-tee:is(:hover, .is-hover, :focus-visible)) > .limb::before { border-color: var(--rail-hover); }
+.kids.takeoff:has(> .mark.m-tee:is(:hover, .is-hover, :focus-visible)) > .limb.is-through::after { background: var(--rail-hover); }
+
+/* --- A CLOSED FOLD'S OWN LINE ---------------------------------------------
+   Pointing at a ⊕ brightens the line that arrives at it, exactly as pointing
+   at the ⊖ brightened the line that left. Same station, same ink, both ways. */
+.kids.stub:has(> :is(.stub, .chip):is(:hover, .is-hover, :focus-visible))::before { border-color: var(--rail-hover); }
+.limb:has(> .kids.stub > :is(.stub, .chip):is(:hover, .is-hover, :focus-visible)) > .row > .lane > .junction::before { background: var(--rail-hover); }
+.limb.fold-self:has(> .stub-arm:is(:hover, .is-hover, :focus-visible))::before { border-color: var(--rail-hover); }
+/* THE CLOSED TAKE-OFF'S OWN LINE — the curve, the arm and the chip's ring are
+   that fold's line in its other state, so either hand lights all of them. The
+   ⊕ brightens under the shared `.mark` rule above, being made of the same ink. */
+.kids.takeoff.is-collapsed:has(> :is(.mark.m-tee, .chip):is(:hover, .is-hover, :focus-visible))::before { border-color: var(--rail-hover); }
+.kids.takeoff.is-collapsed:has(> :is(.mark.m-tee, .chip):is(:hover, .is-hover, :focus-visible)) > .chip {
+  color: var(--ink-quiet);
+  box-shadow: inset 0 0 0 1px var(--ink-faint);
+}
+.kids.takeoff.is-collapsed:has(> :is(.mark.m-tee, .chip):is(:hover, .is-hover, :focus-visible)) > .chip .new { color: var(--ink-loud); }
+.kids.takeoff.is-collapsed:has(> .chip:is(:hover, .is-hover, :focus-visible)) > .mark.m-tee .mk { --mark-ink: var(--rail-hover); }
+
+/* ==========================================================================
+   8 · WHAT A POST SAYS  (K, verbatim: the voices do not change)
+   ========================================================================== */
+
+.post-head { display: flex; align-items: baseline; gap: 0 var(--sp-4); }
+.byline {
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 .38rem;
+  min-width: 0;
+  font-size: var(--t-meta);
+  color: var(--ink-quiet);
+}
+.byline .name {
+  font-size: var(--t-name); font-weight: 600; letter-spacing: -.005em;
+  color: var(--ink-loud);
+}
+.is-root > .row > .body > .post-head > .byline .name { font-size: 1rem; }
+.byline .sep { color: var(--ink-faint); }
+.byline a:hover { color: var(--ink); text-decoration: underline; text-underline-offset: 2px; }
+
+.post-text {
+  max-width: var(--measure);
+  margin: .28rem 0 0;
+  font-family: var(--font-read);
+  font-size: var(--t-body);
+  line-height: var(--lh-read);
+  color: var(--ink);
+  overflow-wrap: break-word;
+  text-wrap: pretty;
+}
+.is-root > .row > .body > .post-text { font-size: var(--t-root); line-height: var(--lh-root); }
+
+.metrics {
+  display: flex; flex-wrap: wrap; gap: 0 .42rem;
+  margin-top: .45rem;
+  font-size: var(--t-micro);
+  color: var(--ink-faint);
+}
+.metrics .sep { opacity: .6; }
+
+/* THE PROSE ROW, ruling (k): a remainder is said, never drawn. */
+.more-row {
+  margin: .55rem 0 0 calc(var(--fork) + var(--lane) + var(--lane-gap));
+  font-size: var(--t-micro);
+  font-style: italic;
+  color: var(--ink-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ==========================================================================
+   9 · NARROW  (K's tokens, and its alias discipline)
+   ========================================================================== */
+@media (max-width: 34rem) {
+  :root {
+    --avatar:   1.75rem;
+    --lane:     var(--avatar);
+    --bed-lead: 1.5rem;
+    --gutter:   calc(var(--bed-lead) + .15rem);
+    /* SPEC ROW 30 SAID 1.6rem; (s-amend) OVERRULES IT — "the mark centers on
+       the STRAIGHT SPAN specifically, or the narrow fork step grows to fit".
+       At 1.6rem that span is 7.6px, too little for an 11px disc. */
+    --fork:     1.95rem;
+    --takeoff:  var(--fork);
+    --lane-gap: .55rem;
+  }
+  .convo .first { display: none; }
+}
+/* ---- THE THIRD CONTROL — mid-run marks, (B) only, off by default -------- */
+.check { display: none; align-items: center; gap: .45rem; cursor: pointer; }
+body.mode-b .check { display: inline-flex; }
+.check input { position: absolute; width: 1px; height: 1px; opacity: 0; }
+.check .box {
+  position: relative;
+  width: .8125rem; height: .8125rem;
+  border-radius: 3px;
+  background: var(--surface-sunk);
+  box-shadow: inset 0 0 0 1px var(--rule);
+}
+.check:hover .box { box-shadow: inset 0 0 0 1px var(--ink-faint); }
+.check input:checked + .box { background: var(--ink-faint); box-shadow: inset 0 0 0 1px var(--ink-faint); }
+.check input:checked + .box::after {
+  content: "";
+  position: absolute; left: 3px; top: 3px;
+  width: 7px; height: 7px;
+  border-radius: 1px;
+  background: var(--chrome);
+}
+.check input:focus-visible + .box { outline: 2px solid var(--accent-quiet); outline-offset: 2px; }
+.check .lab { font-size: var(--t-meta); color: var(--ink-quiet); }
+.check:hover .lab { color: var(--ink); }
+
+</style>
+</head>
+<body class="mode-a vis-always">
+<header class="topbar">
+  <a class="wordmark" href="#"><span class="w-x">x</span><span class="w-dash">-</span><span class="w-word">threaded</span></a>
+  <div class="convo">
+    <span class="who">Eliezer Yudkowsky</span>
+    <span class="sep">·</span>
+    <span class="first">“First post in thread”</span>
+    <span class="sep">·</span>
+    <span class="n mono">20 posts</span>
+  </div>
+  <button class="theme" id="theme" aria-label="Toggle colour theme">dark</button>
+</header>
+
+<section class="brief">
+  <h1>Fold marks</h1>
+  <div><span class="aid">Exploration aid — not a grammar change</span></div>
+  <p>
+    <b>One law, or three sites.</b> Under the <em>downstream law</em> a mark folds everything
+    downstream of itself, the branch head included, and the marks sit at departures: every
+    elbow, the take-off's arm, and the trunk below the final segment. Under the
+    <em>current model</em> a fold hides what lies below an owner and the owner stays, so marks
+    sit at three sites — a segment's tee, a chain head's line, a fork tail's line. What each
+    gives up: the downstream law loses run-skimming, because there is no mark below a chain
+    head and folding Petja's branch takes Petja's post with it; the current model loses
+    per-branch folding — Luke and Clifton are leaves and carry no mark at all — and loses the
+    uniformity of a single rule. A third sketch sits under the current model as
+    <em>mid-run marks</em>: a mark below every dialogue bead but the last, which buys “fold the
+    rest of this exchange from anywhere” at the cost of a mark between every pair of beads.
+    A third algebra, <em>collapse to byline</em>, is the Reddit / HN / LessWrong convention:
+    folding a node hides its body and its whole subtree into its own identity row, bead and
+    byline intact with the count riding the byline, and leaves fold too. In this mode the tee
+    keeps the hide-below verb — a reply block has no single head to collapse into — which makes
+    it the only mode on this page with two fold verbs at once.
+    Below-avatar marks keep one station for both states — the open handle and the closed stub
+    share an anchor, per K's take-off discipline — while departure marks get that for free,
+    the mark already standing in the position the folded branch is removed from.
+  </p>
+  <p>
+    <b>Always, or on approach.</b> Every ⊖ can rest at line ink and brighten under the pointer,
+    which makes the fold structure part of the drawing and puts a mark at every station whether
+    or not anyone is looking for one; or the marks can be absent until the line they stand on is
+    hovered or focused, which leaves the tree bare and makes a fold something you find rather
+    than something you read. ⊕ stubs stay visible either way, because a closed fold has to be
+    discoverable. Mid-run marks are where this toggle starts to bite: sparse marks tolerate
+    being always visible, and a mark between every pair of beads argues for reveal.
+    Whichever is showing, a fold is <b>one control in three shapes</b>: the mark, the line it
+    stands on — click anywhere along a scope's rail and it folds, in every mode — and the chip
+    that stands in for the content while it is closed.
+  </p>
+  <p class="foot">
+    Not being decided here: the <span class="mono">⊖ / ⊕</span> glyph pair and the stub's
+    <span class="mono">n · k new</span> wording are shared by every combination below — the
+    app's existing stub text in a new seat. The two questions are <em>where marks sit</em> and
+    <em>when they show</em>.
+  </p>
+</section>
+
+<div class="controlbar">
+  <div class="ctrl">
+    <span class="ctrl-lab" id="lab-alg">Fold algebra</span>
+    <div class="seg" role="radiogroup" aria-labelledby="lab-alg">
+      <button class="seg-b" role="radio" aria-checked="true"  data-seg="algebra" data-val="a">Downstream law</button>
+      <button class="seg-b" role="radio" aria-checked="false" data-seg="algebra" data-val="b">Current model</button>
+      <button class="seg-b" role="radio" aria-checked="false" data-seg="algebra" data-val="c">Collapse to byline</button>
+    </div>
+  </div>
+  <label class="check">
+    <input type="checkbox" id="runmarks">
+    <span class="box" aria-hidden="true"></span>
+    <span class="lab">mid-run marks</span>
+  </label>
+  <div class="ctrl">
+    <span class="ctrl-lab" id="lab-vis">Mark visibility</span>
+    <div class="seg" role="radiogroup" aria-labelledby="lab-vis">
+      <button class="seg-b" role="radio" aria-checked="true"  data-seg="vis" data-val="always">Always visible</button>
+      <button class="seg-b" role="radio" aria-checked="false" data-seg="vis" data-val="hover">Reveal on hover/focus</button>
+    </div>
+  </div>
+  <span class="mode-line">
+    <span class="say-a">A mark folds <em>everything downstream of itself</em>, branch head included.</span>
+    <span class="say-b">A mark folds <em>what lies below its owner</em>; the owner post stays.</span>
+    <span class="say-c">A mark collapses <em>a node to its own byline</em> — except the two reply blocks, which keep the hide-below verb.</span>
+  </span>
+</div>
+
+<main class="col">
+<article class="thread">
+
+<!-- ════ TRUNK BEAD 1 — the root, segment 1 ════════════════════════════ -->
+<div class="limb is-root" id="lb-root">
+  <div class="row">
+    <div class="lane">
+      <div class="avatar a1" aria-hidden="true">EY</div>
+      <span class="junction is-trunk" aria-hidden="true"></span>
+    </div>
+    <div class="body">
+      <div class="post-head"><div class="byline">
+        <span class="name">Eliezer Yudkowsky</span>
+        <a href="#">@ESYudkowsky</a><span class="sep">·</span><a href="#">Nov 1, 11:02 AM</a>
+      </div></div>
+      <p class="post-text">First post in thread</p>
+      <div class="metrics mono">
+        <span title="Likes">♥ 893</span><span class="sep">·</span>
+        <span title="Reposts">↻ 124</span><span class="sep">·</span>
+        <span title="Quotes">❝ 52</span><span class="sep">·</span>
+        <span title="Bookmarks">⚑ 282</span><span class="sep">·</span>
+        <span title="Views">303.2k views</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── SEGMENT 1'S REPLY BLOCK, on a take-off (the trunk continues) ── -->
+  <div class="kids takeoff" id="tk1">
+    <span class="sub-line" aria-hidden="true"></span>
+    <span class="tee" aria-hidden="true"><span class="tee-arc"></span></span>
+    <button class="mark m-tee" data-fold="tk1" data-kind="takeoff" data-test="m-tee"
+            aria-label="Fold this segment's reply block — 7 posts, 2 unread" aria-expanded="true"><span class="mk" aria-hidden="true"></span></button>
+    <!-- (s-amend): the ghost CHIP, in the seat the sub-line had. The ⊕ stays
+         on the mark above, mid-arm, where the ⊖ stood. -->
+    <button class="chip" data-fold="tk1" data-kind="takeoff" data-test="s-tee"
+            aria-label="Unfold this segment's reply block — 7 posts, 2 unread" aria-expanded="false"><span class="mono">7 replies · <span class="new">2 new</span></span></button>
+
+    <!-- ┣ LUKE — a leaf. Foldable under (A) only. -->
+    <div class="limb is-fork is-through is-first" id="lb-luke">
+      <button class="mark m-elbow" data-fold="lb-luke" data-kind="self" data-test="m-luke"
+              aria-label="Fold this branch — 1 post" aria-expanded="true"><span class="mk" aria-hidden="true"></span></button>
+      <button class="mark m-node at-arm" data-fold="lb-luke" data-kind="node" data-test="m-luke-c"
+              aria-label="Collapse this post to its byline" aria-expanded="true"><span class="mk" aria-hidden="true"></span></button>
+      <div class="row">
+        <div class="lane"><div class="avatar a4" aria-hidden="true">LR</div></div>
+        <div class="body">
+          <div class="post-head"><div class="byline">
+            <span class="name">Luke Robinson</span>
+            <a href="#">@2dogs2000miles</a><span class="sep">·</span><a href="#">Nov 1, 11:09 AM</a>
+          </div></div>
+          <p class="post-text">Reply to first post in thread</p>
+          <div class="metrics mono"><span title="Likes">♥ 14</span><span class="sep">·</span><span title="Views">2.1k views</span></div>
+        </div>
+      </div>
+      <button class="stub stub-arm" data-fold="lb-luke" data-kind="self" data-test="s-luke"
+              aria-label="Unfold this branch — 1 post" aria-expanded="false"><span class="mk plus" aria-hidden="true"></span><span class="mono">1</span></button>
+    </div>
+
+    <!-- ╰ DEEPFRANK — a fork tail with two children. -->
+    <div class="limb is-fork is-last b-scope" id="lb-df">
+      <button class="mark m-elbow" data-fold="lb-df" data-kind="self" data-test="m-df-a"
+              aria-label="Fold this branch — 6 posts, 2 unread" aria-expanded="true"><span class="mk" aria-hidden="true"></span></button>
+      <button class="mark m-node at-arm" data-fold="lb-df" data-kind="node" data-test="m-df-c"
+              aria-label="Collapse this post to its byline — 5 posts, 2 unread below" aria-expanded="true"><span class="mk" aria-hidden="true"></span></button>
+      <div class="row">
+        <div class="lane">
+          <div class="avatar a5" aria-hidden="true">DF</div>
+          <span class="junction" aria-hidden="true"></span>
+        </div>
+        <div class="body">
+          <div class="post-head"><div class="byline">
+            <span class="name">DeepFrank</span>
+            <a href="#">@FrankTankGaming</a><span class="sep">·</span><a href="#">Nov 1, 11:47 AM</a>
+            <span class="byline-count"><span class="sep">·</span> <span class="mono">5 · <span class="new">2 new</span></span></span>
+          </div></div>
+          <p class="post-text">Second reply to first post in thread</p>
+          <div class="metrics mono"><span title="Likes">♥ 31</span><span class="sep">·</span><span title="Views">4.8k views</span></div>
+        </div>
+      </div>
+
+      <div class="kids fork">
+        <button class="mark m-owner b-only" data-fold="lb-df" data-kind="below" data-test="m-df-b"
+                aria-label="Fold the replies below this post — 5 posts, 2 unread" aria-expanded="true"><span class="mk" aria-hidden="true"></span></button>
+        <!-- ┣ PETJA — the head of a flattened RUN of three more beads.
+                 The run is NESTED in the DOM although it draws flat, because
+                 that is what gives every bead in it a line of its own to carry
+                 a mid-run mark, and gives each mark a scope to fold. -->
+        <div class="limb is-fork is-through owns-run b-scope" id="lb-petja">
+          <button class="mark m-elbow" data-fold="lb-petja" data-kind="self" data-test="m-petja-a"
+                  aria-label="Fold this branch — 4 posts, 1 unread" aria-expanded="true"><span class="mk" aria-hidden="true"></span></button>
+          <button class="mark m-node at-arm" data-fold="lb-petja" data-kind="node" data-test="m-petja-c"
+                  aria-label="Collapse this post to its byline — 3 posts, 1 unread below" aria-expanded="true"><span class="mk" aria-hidden="true"></span></button>
+          <div class="row">
+            <div class="lane">
+              <div class="avatar a2" aria-hidden="true">PY</div>
+              <span class="junction" aria-hidden="true"></span>
+            </div>
+            <div class="body">
+              <div class="post-head"><div class="byline">
+                <span class="name">Petja Ylitalo</span>
+                <a href="#">@petjaylitalo</a><span class="sep">·</span><a href="#">Nov 1, 12:09 PM</a>
+                <span class="byline-count"><span class="sep">·</span> <span class="mono">3 · <span class="new">1 new</span></span></span>
+              </div></div>
+              <p class="post-text">Reply to second reply</p>
+              <div class="metrics mono"><span title="Likes">♥ 6</span><span class="sep">·</span><span title="Views">941 views</span></div>
+            </div>
+          </div>
+
+          <div class="kids run">
+            <button class="mark m-owner b-only" data-fold="lb-petja" data-kind="below" data-test="m-petja-b"
+                    aria-label="Fold the run below this post — 3 posts, 1 unread" aria-expanded="true"><span class="mk" aria-hidden="true"></span></button>
+
+            <div class="limb is-run owns-run b-scope run-scope" id="lb-r1">
+              <button class="mark m-node at-run" data-fold="lb-r1" data-kind="node" data-test="m-r1-c"
+                      aria-label="Collapse this post to its byline — 2 posts, 1 unread below" aria-expanded="true"><span class="mk" aria-hidden="true"></span></button>
+              <div class="row">
+                <div class="lane">
+                  <div class="avatar a5" aria-hidden="true">DF</div>
+                  <span class="junction" aria-hidden="true"></span>
+                </div>
+                <div class="body">
+                  <div class="post-head"><div class="byline">
+                    <span class="name">DeepFrank</span>
+                    <a href="#">@FrankTankGaming</a><span class="sep">·</span><a href="#">Nov 1, 12:15 PM</a>
+                    <span class="byline-count"><span class="sep">·</span> <span class="mono">2 · <span class="new">1 new</span></span></span>
+                  </div></div>
+                  <p class="post-text">Reply to reply to second reply</p>
+                </div>
+              </div>
+              <div class="kids run">
+                <button class="mark m-owner m-run" data-fold="lb-r1" data-kind="below" data-test="m-run1"
+                        aria-label="Fold the rest of this exchange — 2 posts, 1 unread" aria-expanded="true"><span class="mk" aria-hidden="true"></span></button>
+
+                <div class="limb is-run owns-run b-scope run-scope" id="lb-r2">
+                  <button class="mark m-node at-run" data-fold="lb-r2" data-kind="node" data-test="m-r2-c"
+                          aria-label="Collapse this post to its byline — 1 post, 1 unread below" aria-expanded="true"><span class="mk" aria-hidden="true"></span></button>
+                  <div class="row">
+                    <div class="lane">
+                      <div class="avatar a2" aria-hidden="true">PY</div>
+                      <span class="junction" aria-hidden="true"></span>
+                    </div>
+                    <div class="body">
+                      <div class="post-head"><div class="byline">
+                        <span class="name">Petja Ylitalo</span>
+                        <a href="#">@petjaylitalo</a><span class="sep">·</span><a href="#">Nov 1, 12:21 PM</a>
+                        <span class="byline-count"><span class="sep">·</span> <span class="mono">1 · <span class="new">1 new</span></span></span>
+                      </div></div>
+                      <p class="post-text">Reply to reply to reply to second reply</p>
+                    </div>
+                  </div>
+                  <div class="kids run">
+                    <button class="mark m-owner m-run" data-fold="lb-r2" data-kind="below" data-test="m-run2"
+                            aria-label="Fold the rest of this exchange — 1 post, 1 unread" aria-expanded="true"><span class="mk" aria-hidden="true"></span></button>
+
+                    <div class="limb is-run" id="lb-r3">
+                      <button class="mark m-node at-run" data-fold="lb-r3" data-kind="node" data-test="m-r3-c"
+                              aria-label="Collapse this post to its byline" aria-expanded="true"><span class="mk" aria-hidden="true"></span></button>
+                      <div class="row">
+                        <div class="lane"><div class="avatar a5 is-unread" aria-hidden="true" title="Unread">DF</div></div>
+                        <div class="body">
+                          <div class="post-head"><div class="byline">
+                            <span class="name">DeepFrank</span>
+                            <a href="#">@FrankTankGaming</a><span class="sep">·</span><a href="#">Nov 1, 12:23 PM</a>
+                          </div></div>
+                          <p class="post-text">Reply to reply to reply to reply to second reply</p>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                  <div class="kids stub">
+                    <button class="stub at-station" data-fold="lb-r2" data-kind="below" data-test="s-run2"
+                            aria-label="Unfold the rest of this exchange — 1 post, 1 unread" aria-expanded="false"><span class="mk plus" aria-hidden="true"></span></button>
+                    <button class="chip" data-fold="lb-r2" data-kind="below" data-test="c-run2" aria-label="Unfold the rest of this exchange — 1 post, 1 unread" aria-expanded="false"><span class="mono">1 reply · <span class="new">1 new</span></span></button>
+                  </div>
+                </div>
+              </div>
+              <div class="kids stub">
+                <button class="stub at-station" data-fold="lb-r1" data-kind="below" data-test="s-run1"
+                        aria-label="Unfold the rest of this exchange — 2 posts, 1 unread" aria-expanded="false"><span class="mk plus" aria-hidden="true"></span></button>
+                <button class="chip" data-fold="lb-r1" data-kind="below" data-test="c-run1" aria-label="Unfold the rest of this exchange — 2 posts, 1 unread" aria-expanded="false"><span class="mono">2 replies · <span class="new">1 new</span></span></button>
+              </div>
+            </div>
+          </div>
+
+          <div class="kids stub">
+            <button class="stub at-station" data-fold="lb-petja" data-kind="below" data-test="s-petja-b"
+                    aria-label="Unfold the run below this post — 3 posts, 1 unread" aria-expanded="false"><span class="mk plus" aria-hidden="true"></span></button>
+            <button class="chip" data-fold="lb-petja" data-kind="below" data-test="c-petja-b" aria-label="Unfold the run below this post — 3 posts, 1 unread" aria-expanded="false"><span class="mono">3 replies · <span class="new">1 new</span></span></button>
+          </div>
+          <button class="stub stub-arm" data-fold="lb-petja" data-kind="self" data-test="s-petja-a"
+                  aria-label="Unfold this branch — 4 posts, 1 unread" aria-expanded="false"><span class="mk plus" aria-hidden="true"></span><span class="mono">4 · <span class="new">1 new</span></span></button>
+        </div>
+
+        <!-- ╰ CLIFTON — a leaf, unread. Foldable under (A) only. -->
+        <div class="limb is-fork is-last" id="lb-clif">
+          <button class="mark m-elbow" data-fold="lb-clif" data-kind="self" data-test="m-clif"
+                  aria-label="Fold this branch — 1 post, 1 unread" aria-expanded="true"><span class="mk" aria-hidden="true"></span></button>
+          <button class="mark m-node at-arm" data-fold="lb-clif" data-kind="node" data-test="m-clif-c"
+                  aria-label="Collapse this post to its byline" aria-expanded="true"><span class="mk" aria-hidden="true"></span></button>
+          <div class="row">
+            <div class="lane"><div class="avatar a3 is-unread" aria-hidden="true" title="Unread">CC</div></div>
+            <div class="body">
+              <div class="post-head"><div class="byline">
+                <span class="name">Clifton Clowers</span>
+                <a href="#">@fozlolah</a><span class="sep">·</span><a href="#">Nov 1, 12:31 PM</a>
+              </div></div>
+              <p class="post-text">Seconrd reply to second reply</p>
+              <div class="metrics mono"><span title="Likes">♥ 3</span><span class="sep">·</span><span title="Views">612 views</span></div>
+            </div>
+          </div>
+          <button class="stub stub-arm" data-fold="lb-clif" data-kind="self" data-test="s-clif"
+                  aria-label="Unfold this branch — 1 post, 1 unread" aria-expanded="false"><span class="mk plus" aria-hidden="true"></span><span class="mono">1 · <span class="new">1 new</span></span></button>
+        </div>
+      </div>
+
+      <div class="kids stub">
+        <button class="stub at-station" data-fold="lb-df" data-kind="below" data-test="s-df-b"
+                aria-label="Unfold the replies below this post — 5 posts, 2 unread" aria-expanded="false"><span class="mk plus" aria-hidden="true"></span></button>
+        <button class="chip" data-fold="lb-df" data-kind="below" data-test="c-df-b" aria-label="Unfold the replies below this post — 5 posts, 2 unread" aria-expanded="false"><span class="mono">5 replies · <span class="new">2 new</span></span></button>
+      </div>
+      <button class="stub stub-arm" data-fold="lb-df" data-kind="self" data-test="s-df-a"
+              aria-label="Unfold this branch — 6 posts, 2 unread" aria-expanded="false"><span class="mk plus" aria-hidden="true"></span><span class="mono">6 · <span class="new">2 new</span></span></button>
+    </div>
+  </div><!-- /take-off -->
+  <!-- ════ TRUNK BEAD 2 — the FINAL segment. Under (i-amend) it takes no
+       take-off: with no continuation left to protect its replies attach
+       directly to its own line and ╰ ends them. That is also why a mark is
+       allowed on the line beneath it — the line there means "the discussion",
+       not "the thread goes on" — and both algebras put one there.
+       Its block starts COLLAPSED. ════════════════════════════════════════ -->
+  <div class="kids run">
+    <div class="limb is-run is-seg fold-below" id="lb-seg2">
+      <div class="row">
+        <div class="lane">
+          <div class="avatar a1" aria-hidden="true">EY</div>
+          <span class="junction" aria-hidden="true"></span>
+        </div>
+        <div class="body">
+          <div class="post-head"><div class="byline">
+            <span class="name">Eliezer Yudkowsky</span>
+            <a href="#">@ESYudkowsky</a><span class="sep">·</span><a href="#">Nov 1, 11:14 AM</a>
+          </div></div>
+          <p class="post-text">Last post in thread</p>
+          <div class="metrics mono">
+            <span title="Likes">♥ 402</span><span class="sep">·</span>
+            <span title="Reposts">↻ 55</span><span class="sep">·</span>
+            <span title="Bookmarks">⚑ 108</span><span class="sep">·</span>
+            <span title="Views">171.6k views</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="kids fork">
+        <button class="mark m-owner" data-fold="lb-seg2" data-kind="below" data-test="m-seg2"
+                aria-label="Fold this discussion — 11 replies, 2 unread" aria-expanded="true"><span class="mk" aria-hidden="true"></span></button>
+
+        <div class="limb is-fork is-through" id="lb-p1">
+          <button class="mark m-elbow" data-fold="lb-p1" data-kind="self" data-test="m-p1"
+                  aria-label="Fold this branch — 1 post" aria-expanded="true"><span class="mk" aria-hidden="true"></span></button>
+          <button class="mark m-node at-arm" data-fold="lb-p1" data-kind="node" data-test="m-p1-c"
+                  aria-label="Collapse this post to its byline" aria-expanded="true"><span class="mk" aria-hidden="true"></span></button>
+          <div class="row">
+            <div class="lane"><div class="avatar a4" aria-hidden="true">LR</div></div>
+            <div class="body">
+              <div class="post-head"><div class="byline">
+                <span class="name">Luke Robinson</span>
+                <a href="#">@2dogs2000miles</a><span class="sep">·</span><a href="#">Nov 1, 11:22 AM</a>
+              </div></div>
+              <p class="post-text">Reply to last post in thread</p>
+            </div>
+          </div>
+          <button class="stub stub-arm" data-fold="lb-p1" data-kind="self" data-test="s-p1"
+                  aria-label="Unfold this branch — 1 post" aria-expanded="false"><span class="mk plus" aria-hidden="true"></span><span class="mono">1</span></button>
+        </div>
+
+        <div class="limb is-fork is-through" id="lb-p2">
+          <button class="mark m-elbow" data-fold="lb-p2" data-kind="self" data-test="m-p2"
+                  aria-label="Fold this branch — 1 post, 1 unread" aria-expanded="true"><span class="mk" aria-hidden="true"></span></button>
+          <button class="mark m-node at-arm" data-fold="lb-p2" data-kind="node" data-test="m-p2-c"
+                  aria-label="Collapse this post to its byline" aria-expanded="true"><span class="mk" aria-hidden="true"></span></button>
+          <div class="row">
+            <div class="lane"><div class="avatar a2 is-unread" aria-hidden="true" title="Unread">PY</div></div>
+            <div class="body">
+              <div class="post-head"><div class="byline">
+                <span class="name">Petja Ylitalo</span>
+                <a href="#">@petjaylitalo</a><span class="sep">·</span><a href="#">Nov 1, 11:35 AM</a>
+              </div></div>
+              <p class="post-text">Second reply to last post in thread</p>
+            </div>
+          </div>
+          <button class="stub stub-arm" data-fold="lb-p2" data-kind="self" data-test="s-p2"
+                  aria-label="Unfold this branch — 1 post, 1 unread" aria-expanded="false"><span class="mk plus" aria-hidden="true"></span><span class="mono">1 · <span class="new">1 new</span></span></button>
+        </div>
+
+        <div class="limb is-fork is-last" id="lb-p3">
+          <button class="mark m-elbow" data-fold="lb-p3" data-kind="self" data-test="m-p3"
+                  aria-label="Fold this branch — 1 post, 1 unread" aria-expanded="true"><span class="mk" aria-hidden="true"></span></button>
+          <button class="mark m-node at-arm" data-fold="lb-p3" data-kind="node" data-test="m-p3-c"
+                  aria-label="Collapse this post to its byline" aria-expanded="true"><span class="mk" aria-hidden="true"></span></button>
+          <div class="row">
+            <div class="lane"><div class="avatar a3 is-unread" aria-hidden="true" title="Unread">CC</div></div>
+            <div class="body">
+              <div class="post-head"><div class="byline">
+                <span class="name">Clifton Clowers</span>
+                <a href="#">@fozlolah</a><span class="sep">·</span><a href="#">Nov 1, 11:41 AM</a>
+              </div></div>
+              <p class="post-text">Third reply to last post in thread</p>
+            </div>
+          </div>
+          <button class="stub stub-arm" data-fold="lb-p3" data-kind="self" data-test="s-p3"
+                  aria-label="Unfold this branch — 1 post, 1 unread" aria-expanded="false"><span class="mk plus" aria-hidden="true"></span><span class="mono">1 · <span class="new">1 new</span></span></button>
+        </div>
+
+        <!-- the remainder is SAID, never drawn (ruling k) -->
+        <p class="more-row">…8 more</p>
+      </div>
+
+      <div class="kids stub">
+        <button class="stub at-station" data-fold="lb-seg2" data-kind="below" data-test="s-seg2"
+                aria-label="Unfold this discussion — 11 replies, 2 unread" aria-expanded="false"><span class="mk plus" aria-hidden="true"></span></button>
+        <button class="chip" data-fold="lb-seg2" data-kind="below" data-test="c-seg2" aria-label="Unfold this discussion — 11 replies, 2 unread" aria-expanded="false"><span class="mono">11 replies · <span class="new">2 new</span></span></button>
+      </div>
+    </div>
+  </div>
+</div><!-- /root limb -->
+
+</article>
+</main>
+<script>
+/* The whole runtime: a theme toggle, three controls, and a fold that is one
+   class on one element. The tree itself is authored markup — a mockup should
+   not need a program to hold a shape. Nothing here animates: ruling (o). */
+(function () {
+  var root = document.documentElement;
+  var body = document.body;
+
+  /* ---- theme (K's) ---------------------------------------------------- */
+  var btn = document.getElementById("theme");
+  var mq  = window.matchMedia("(prefers-color-scheme: light)");
+  var current = function () { return root.dataset.theme || (mq.matches ? "light" : "dark"); };
+  var label   = function () { btn.textContent = current(); };
+  btn.addEventListener("click", function () {
+    root.dataset.theme = current() === "dark" ? "light" : "dark";
+    label();
+  });
+  mq.addEventListener("change", label);
+  label();
+
+  /* ---- the fold ------------------------------------------------------- */
+  var KIND = { self: "fold-self", below: "fold-below", node: "fold-node", takeoff: "is-collapsed" };
+
+  function setFold(el, kind, folded) {
+    el.classList.toggle(KIND[kind], folded);
+    /* every control aimed at this element with this verb agrees about state —
+       the open mark and the closed stub are two faces of one station. */
+    var sel = '[data-fold="' + el.id + '"][data-kind="' + kind + '"]';
+    Array.prototype.forEach.call(document.querySelectorAll(sel), function (c) {
+      c.setAttribute("aria-expanded", String(!folded));
+    });
+  }
+
+  /* ---- (s) THE LINE IS THE CONTROL, TOO -------------------------------
+     Clicking anywhere along a scope's line does what clicking its mark does.
+     Not "something equivalent" — literally the same: the line RESOLVES to the
+     scope's own live control and defers to it, so the two can never drift,
+     and the preview a line shows is the preview that control shows because it
+     is that control's own `.is-hover`.
+
+     Resolution walks OUTWARD from the line to the nearest limb that has a
+     live control, which reproduces the brightening rules exactly: in (B) a
+     mid-run bead has no control of its own, so its drop belongs to the chain
+     head's scope — and that is precisely the line the chain head's mark
+     brightens. Turn mid-run marks on and the same drop resolves to the bead's
+     own mark instead, because now it has one. Nothing had to say so twice. */
+  var CONTROLS = ":scope > .mark, :scope > .kids > .mark.m-owner," +
+                 ":scope > .kids.stub > .stub, :scope > .stub-arm";
+
+  function liveControl(limb) {
+    var found = limb.querySelectorAll(CONTROLS);
+    for (var i = 0; i < found.length; i++) if (found[i].offsetParent !== null) return found[i];
+    return null;
+  }
+  function controlForLine(line) {
+    if (line.classList.contains("sub-line")) return line.parentElement.querySelector(".mark.m-tee");
+    var limb = line.closest(".limb");
+    while (limb) {
+      var c = liveControl(limb);
+      if (c) return c;
+      limb = limb.parentElement && limb.parentElement.closest(".limb");
+    }
+    return null;
+  }
+  var LINE = ".junction:not(.is-trunk), .sub-line";
+
+  document.addEventListener("click", function (e) {
+    if (!e.target.closest) return;
+    var c = e.target.closest("[data-fold]");
+    if (!c) {
+      var line = e.target.closest(LINE);
+      if (!line) return;
+      c = controlForLine(line);
+      if (!c) return;
+    }
+    var el = document.getElementById(c.dataset.fold);
+    if (!el) return;
+    e.preventDefault();
+    setFold(el, c.dataset.kind, !el.classList.contains(KIND[c.dataset.kind]));
+  });
+
+  /* pointing at a line previews exactly what pressing it would do, by holding
+     open the resolved control's own hover state rather than by any rule of
+     its own. */
+  var held = null;
+  document.addEventListener("mouseover", function (e) {
+    if (!e.target.closest) return;
+    var line = e.target.closest(LINE);
+    var c = line && controlForLine(line);
+    if (c === held) return;
+    if (held) held.classList.remove("is-hover");
+    held = c;
+    if (held) held.classList.add("is-hover");
+  });
+
+  /* ---- the controls ---------------------------------------------------- */
+  /* A fold whose mark does not exist in the new algebra would be a trap: no
+     control on the page could reopen it. So switching algebra drops exactly
+     the folds that algebra cannot reach, and keeps the two stations all three
+     share — the take-off's arm and the final segment's. */
+  function dropUnreachable() {
+    Array.prototype.forEach.call(
+      document.querySelectorAll(".limb.fold-self, .limb.fold-node, .limb.b-scope.fold-below"),
+      function (l) {
+        if (l.classList.contains("fold-self"))  setFold(l, "self",  false);
+        if (l.classList.contains("fold-node"))  setFold(l, "node",  false);
+        if (l.classList.contains("fold-below")) setFold(l, "below", false);
+      }
+    );
+  }
+
+  function seg(name, val) {
+    Array.prototype.forEach.call(document.querySelectorAll('[data-seg="' + name + '"]'), function (b) {
+      b.setAttribute("aria-checked", String(b.dataset.val === val));
+    });
+  }
+
+  function setAlgebra(v) {
+    body.classList.remove("mode-a", "mode-b", "mode-c");
+    body.classList.add("mode-" + v);
+    dropUnreachable();
+    seg("algebra", v);
+  }
+  function setVis(v) {
+    body.classList.toggle("vis-always", v === "always");
+    body.classList.toggle("vis-hover",  v === "hover");
+    seg("vis", v);
+  }
+
+  Array.prototype.forEach.call(document.querySelectorAll("[data-seg]"), function (b) {
+    b.addEventListener("click", function () {
+      if (b.dataset.seg === "algebra") setAlgebra(b.dataset.val); else setVis(b.dataset.val);
+    });
+  });
+
+  var runmarks = document.getElementById("runmarks");
+  runmarks.addEventListener("change", function () {
+    body.classList.toggle("runmarks", runmarks.checked);
+    /* same rule, narrower: turning mid-run marks off strands only the folds
+       those marks made, so only those are dropped. */
+    if (!runmarks.checked) {
+      Array.prototype.forEach.call(document.querySelectorAll(".limb.run-scope.fold-below"),
+        function (l) { setFold(l, "below", false); });
+    }
+  });
+})();
+</script>
+</body>
+</html>
