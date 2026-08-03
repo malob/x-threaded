@@ -7,7 +7,7 @@ import {
   type ReactNode,
 } from "react";
 import type { Post } from "../shared/types";
-import { xPostUrl } from "../shared/urls";
+import { xPostUrl, xProfileUrl } from "../shared/urls";
 import { PostText } from "./PostText";
 
 /**
@@ -102,16 +102,34 @@ function formatCount(n: number): string {
   return scaled.toFixed(1).replace(/\.0$/, "") + suffix;
 }
 
-function MetaCounts({ post }: { post: Post }) {
+/* Metric icons: inline SVG in currentColor, because font glyphs (\u2665 \u21bb
+   \u275d \u2691) render through per-character fallback in the mono stack and come
+   out ragged — and Unicode has no quiet bookmark at all (owner, both). */
+function MetricIcon({ d }: { d: string }) {
+  return (
+    <svg className="mi" viewBox="0 0 24 24" aria-hidden="true">
+      <path d={d} />
+    </svg>
+  );
+}
+const MI = {
+  like: "M12 21C7 16.6 4 13.4 4 9.9 4 7.2 6 5 8.6 5c1.4 0 2.6.7 3.4 1.8C12.8 5.7 14 5 15.4 5 18 5 20 7.2 20 9.9c0 3.5-3 6.7-8 11.1z",
+  repost: "M7 7h8v3l4-4-4-4v3H5v6h2V7zm10 10H9v-3l-4 4 4 4v-3h10v-6h-2v4z",
+  quote: "M6 17h3l2-4V7H5v6h3l-2 4zm8 0h3l2-4V7h-6v6h3l-2 4z",
+  bookmark: "M6 3h12v18l-6-4.4L6 21V3z",
+};
+
+function MetaCounts({ post, footerNote }: { post: Post; footerNote?: ReactNode }) {
   const m = post.metrics;
   const items: { key: string; node: ReactNode }[] = [];
-  if (m.likes > 0) items.push({ key: "likes", node: <>♥ {formatCount(m.likes)}</> });
+  if (m.likes > 0)
+    items.push({ key: "likes", node: <><MetricIcon d={MI.like} /> {formatCount(m.likes)}</> });
   if (m.reposts > 0) {
     items.push({
       key: "reposts",
       node: (
         <a href={`${postUrl(post)}/retweets`} target="_blank" rel="noopener noreferrer">
-          ↻ {formatCount(m.reposts)}
+          <MetricIcon d={MI.repost} /> {formatCount(m.reposts)}
         </a>
       ),
     });
@@ -121,16 +139,20 @@ function MetaCounts({ post }: { post: Post }) {
       key: "quotes",
       node: (
         <a href={`${postUrl(post)}/quotes`} target="_blank" rel="noopener noreferrer">
-          ❝ {formatCount(m.quotes)}
+          <MetricIcon d={MI.quote} /> {formatCount(m.quotes)}
         </a>
       ),
     });
   }
-  if (m.bookmarks > 0) items.push({ key: "bookmarks", node: <>⚑ {formatCount(m.bookmarks)}</> });
+  if (m.bookmarks > 0)
+    items.push({ key: "bookmarks", node: <><MetricIcon d={MI.bookmark} /> {formatCount(m.bookmarks)}</> });
   if (m.impressions > 0) {
     items.push({ key: "views", node: <>{formatCount(m.impressions)} views</> });
   }
-  if (items.length === 0) return null;
+  /* Always rendered, even empty: the counts row is the post's last line and
+     the fold station aligns to its middle — a post without metrics still
+     reserves the line so every mark has its anchor and the rhythm holds
+     (owner ruling). */
   return (
     <div className="post-counts">
       {items.map((item, i) => (
@@ -139,21 +161,69 @@ function MetaCounts({ post }: { post: Post }) {
           {item.node}
         </Fragment>
       ))}
+      {footerNote != null && (
+        <>
+          {items.length > 0 && " · "}
+          {footerNote}
+        </>
+      )}
     </div>
   );
 }
 
-function Avatar({ url, small }: { url: string | null; small?: boolean }) {
-  if (!url) return null;
+/** Up to two initials, as the disc a missing avatar falls back to. */
+function initials(name: string): string {
+  const letters = name
+    .trim()
+    .split(/\s+/)
+    .slice(0, 2)
+    .map((word) => [...word][0] ?? "")
+    .join("");
+  return letters === "" ? "?" : letters.toUpperCase();
+}
+
+/**
+ * The node itself: every post in the thread is a bead on the line, so an
+ * avatar that is missing or fails to load still has to draw something the
+ * same size — hence the initials disc rather than the old `display: none`,
+ * which left a hole where the graph expected a node.
+ *
+ * The failure is state, not a DOM mutation: the old handler hid the element
+ * behind React's back, so a re-render with the same src un-hid a broken image.
+ * Remembering WHICH url broke is what resets it when the post changes.
+ */
+function Avatar({
+  url,
+  name,
+  small,
+  unread,
+}: {
+  url: string | null;
+  name: string;
+  small?: boolean;
+  unread?: boolean;
+}) {
+  const [broken, setBroken] = useState<string | null>(null);
+  const className = [
+    small ? "avatar avatar-small" : "avatar",
+    unread ? "is-unread" : "",
+  ]
+    .join(" ")
+    .trimEnd();
+  if (!url || broken === url) {
+    return (
+      <span className={`${className} avatar-fallback`} aria-hidden="true">
+        {initials(name)}
+      </span>
+    );
+  }
   return (
     <img
-      className={small ? "avatar avatar-small" : "avatar"}
+      className={className}
       src={url}
       alt=""
       loading="lazy"
-      onError={(e) => {
-        e.currentTarget.style.display = "none";
-      }}
+      onError={() => setBroken(url)}
     />
   );
 }
@@ -212,7 +282,7 @@ function QuoteCard({
   return (
     <div className="quote-card">
       <div className="post-meta">
-        <Avatar url={post.authorAvatarUrl} small />
+        <Avatar url={post.authorAvatarUrl} name={post.authorName} small />
         <span className="name">{post.authorName}</span> @{post.authorHandle} ·{" "}
         {formatTime(post.createdAt)}
         <a
@@ -245,7 +315,8 @@ export function PostView({
   id,
   className,
   onClick,
-  leading,
+  unread,
+  footerNote,
 }: {
   post: Post;
   quoted: Record<string, Post>;
@@ -254,23 +325,44 @@ export function PostView({
   id?: string;
   className?: string;
   onClick?: MouseEventHandler<HTMLDivElement>;
-  /** Rendered before the avatar in the header (e.g. an unread dot). */
-  leading?: ReactNode;
+  /** Unread posts wear an accent ring on the node, not a dot in the byline. */
+  unread?: boolean;
+  /** Rendered at the end of the footer line (e.g. the hidden-reply note —
+      it is metadata, so it rides the metadata line; owner ruling). */
+  footerNote?: ReactNode;
 }) {
   return (
     <div id={id} className={className ?? "post"} onClick={onClick}>
-      <div className="post-meta">
-        {leading}
-        <Avatar url={post.authorAvatarUrl} />
-        <span className="name">{post.authorName}</span> @{post.authorHandle} ·{" "}
-        {formatTime(post.createdAt)}
+      {/*
+        Two columns: the LANE, which is the line's own column and holds the
+        node, and the BODY, which holds everything the post says. The lane is
+        why the connector can be drawn with no measurement — a bead's centre is
+        the post's own top padding plus half an avatar, at every depth.
+      */}
+      <div className="post-lane">
+        <Avatar url={post.authorAvatarUrl} name={post.authorName} unread={unread} />
       </div>
-      <ClampedText lines={6} contentKey={displayText ?? post.text}>
-        <PostText text={displayText ?? post.text} post={post} />
-      </ClampedText>
-      <MediaGrid post={post} />
-      {post.quotedPostId && <QuoteCard quotedId={post.quotedPostId} quoted={quoted} depth={1} />}
-      <MetaCounts post={post} />
+      <div className="post-body">
+        <div className="post-meta">
+          <span className="name">{post.authorName}</span>{" "}
+          {post.authorHandle === "unknown" ? (
+            /* The ingestion sentinel for a missing author (xapi.ts): not an
+               identity, so no link — x.com/unknown is somebody else. */
+            <>@{post.authorHandle}</>
+          ) : (
+            <a href={xProfileUrl(post.authorHandle)} target="_blank" rel="noopener noreferrer">
+              @{post.authorHandle}
+            </a>
+          )}{" "}
+          · {formatTime(post.createdAt)}
+        </div>
+        <ClampedText lines={6} contentKey={displayText ?? post.text}>
+          <PostText text={displayText ?? post.text} post={post} />
+        </ClampedText>
+        <MediaGrid post={post} />
+        {post.quotedPostId && <QuoteCard quotedId={post.quotedPostId} quoted={quoted} depth={1} />}
+        <MetaCounts post={post} footerNote={footerNote} />
+      </div>
     </div>
   );
 }

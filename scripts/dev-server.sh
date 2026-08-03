@@ -22,8 +22,6 @@ load_env_file() {
 }
 
 load_env_file .env
-# Legacy fallback: the bearer token used to live in the shared secrets file.
-[[ -n "${X_BEARER_TOKEN:-}" ]] || load_env_file "$HOME/.claude/secrets.env"
 
 if [[ -z "${X_BEARER_TOKEN:-}" && ! -f .env ]]; then
   echo "No config found. Copy .env.example to .env and fill in X_BEARER_TOKEN." >&2

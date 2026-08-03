@@ -66,3 +66,12 @@ export function appPath(handle: string | undefined, postId: string): string {
 export function xPostUrl(handle: string | undefined, postId: string): string {
   return `https://x.com${appPath(handle, postId)}`;
 }
+
+/**
+ * An author's profile on x.com — the app's one profile link, worn by the
+ * @handle in a byline (ruling n: the name is not a link, and neither is the
+ * avatar, which is the node you click to select).
+ */
+export function xProfileUrl(handle: string): string {
+  return `https://x.com/${handle}`;
+}

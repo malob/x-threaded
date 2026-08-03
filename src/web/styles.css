@@ -5,7 +5,92 @@
   --border: #d9d7d0;
   --accent-bg: #eef4fb;
   --link: #1d6fc4;
-  --thread: #8b83e0;
+  /* K's stack verbatim: identical on macOS (ui-monospace = SF Mono wins),
+     better manners on other platforms. */
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-mono:
+    ui-monospace, "SF Mono", SFMono-Regular, "Berkeley Mono", Menlo,
+    "Cascadia Mono", "Roboto Mono", monospace;
+
+  /* ---- THE CONNECTOR'S TWO TOKEN GROUPS (spec row 32) -------------------
+     AT REST: the line's ink, a node's ring, the accent, and the bed (which
+     is `.post.cursor`'s existing background). INTERACTION: the preview ink
+     — neutral, because the accent has exactly three forms and pointing is
+     not one of them — the focus ring, and the ghost chip's surface. */
+  --line-ink: var(--border);
+  --bead-ink: var(--border);
+  --accent: #1d9e75;
+  --line-hover: #a8a49a;
+  --accent-quiet: #9ad9c2;
+  --surface: #f4f2ec;
+
+  /* ---- THE CONNECTIVE ANATOMY ------------------------------------------
+     The whole drawing is derived from five numbers: the avatar, the fork
+     step, the post's own top and left padding (which put the bead where it
+     is), and the line weight. No rule below writes a junction coordinate by
+     hand, so moving one token moves every elbow, station and ghost with it. */
+  --avatar: 2rem; /* 32px — the node itself */
+  --lane: var(--avatar); /* the line's column; the body sits right of it */
+  --lane-gap: 0.55rem; /* tightened from 0.7 — owner: too much air */
+  --row-pt: 6px; /* .post's own padding — the bead's offsets are read from */
+  --row-pb: 6px; /* these, so the drawing and the card cannot disagree */
+  --row-pl: 10px;
+  --node-x: calc(var(--row-pl) + var(--lane) / 2); /* the line's x in a limb */
+  --body-x: calc(var(--row-pl) + var(--lane) + var(--lane-gap));
+
+  /* ONE fork level, and runs cost nothing. ITS FLOOR IS 1.95rem AT EVERY
+     VIEWPORT — one floor, one inequality (s-amend): the tee's mark stands on
+     the arm's STRAIGHT SPAN, which is fork − 2 × elbow radius + line weight,
+     and that has to host the disc. At 1.6rem the span is 7.6px for an ~11px
+     disc; at 1.85rem it clears by 0.3px a side. Shrink the radius or the disc
+     at a breakpoint if width is wanted; never this below the floor.
+     1.95rem — the spec's floor — with the 8px radius and 10px disc:
+     span = 31.2 − 16 + 1 = 16.2px for a 10px disc, ~3.1px of clearance a
+     side. One geometry at every width (owner: the wide layout had too much
+     air). */
+  --fork: 1.95rem;
+  --line-w: 1px; /* every line in the tree, one weight — owner's call, by
+     live comparison against 1.5/2/2.5. Derived anchors land on half-pixels
+     (takeoff-t 18.5): exact on 2x displays; on a 1x display they round
+     per-line, worth a look if one ever matters. */
+  --elbow-r: 8px; /* the corner, rounded */
+  --elbow-w: calc(var(--fork) - var(--lane) / 2 + var(--line-w) / 2);
+  --grab: 13px; /* the invisible strip that makes a 1px line a target */
+
+  /* air above a bead, by what the bead is: a new branch wants some, a
+     continuation wants little, a trunk segment wants most. Padding, never
+     margin — a margin would open a hole in the line. */
+  /* ZERO, the owner's verdict: the posts' own paddings are the whole
+     vertical rhythm, and the fold station rides the counts line instead of
+     renting its own row. 0px, NEVER unitless 0: these feed calc() additions,
+     and calc(0 + 6px) is INVALID CSS — the whole expression dies and every
+     elbow and stub silently falls back to nonsense heights (owner saw the
+     wreckage; the probe found stub height 0). */
+  --fork-lead: 0px;
+  --run-lead: 0px;
+  --seg-lead: 0px;
+  --counts-h: 18px; /* the counts row: 12px type at 1.5 — the station's anchor */
+
+  /* the fold station: the ⊖/⊕ disc that stands ON the line, and the ghost
+     chip that stands where the first hidden node would have. */
+  --mark-d: 10px;
+  --mark-bar: 5px;
+  --mark-fill: var(--bg); /* opaque: the disc masks its own stretch of line */
+  --station-gap: 0.5rem;
+  /* 22px, not 1.4rem: 22.4px made --takeoff-t land at 18.2px, and every
+     mark, bar, and ink band rounded off-grid independently — the ⊕'s
+     vertical bar visibly drifted while the ⊖ hid it (owner caught it live).
+     An integral anchor means nothing has to round. */
+  --chip-h: 22px;
+  /* Where the sub-line's straight run begins: the arm's own y plus the
+     departure curve, and nothing more — the drop to the first reply was a
+     dead stretch of bare line at 2.2rem (owner caught it live). */
+  --takeoff-drop: calc(var(--takeoff-t) + var(--elbow-r));
+  /* where the take-off's arm leaves the trunk. DERIVED from the collapsed
+     chip's centre rather than chosen, because the open handle and the closed
+     ghost have to be two states of one anchor. */
+  --takeoff-t: calc(var(--station-gap) + var(--chip-h) / 2 - var(--line-w) / 2);
+
   color-scheme: light dark;
 }
 
@@ -17,11 +102,35 @@
     --border: #3d3d3a;
     --accent-bg: #253243;
     --link: #6ab0f3;
-    --thread: #7f77dd;
+    --line-hover: #706e66;
+    --accent-quiet: #2e6552;
+    --surface: #272724;
   }
 }
 
-* {
+/* ≤34rem: the drawing keeps its grammar and spends less width on it. The
+   aliases (--lane, --node-x, --elbow-w) need no re-declaration because they
+   are declared on this same element, and var() substitutes per element at
+   computed-value time — an override here reaches them. (A DESCENDANT scope's
+   override would not: custom properties inherit already-substituted, so an
+   alias must be re-declared wherever its input is.)
+
+   Since fork/radius/disc unified at every width, the ONLY thing that
+   narrows is the bead. */
+@media (max-width: 34rem) {
+  :root {
+    --avatar: 1.75rem;
+  }
+}
+
+/* `*` does NOT match pseudo-elements — without the explicit ::before/::after,
+   every border-drawn connector pseudo is content-box, its borders grow the
+   box, and ink lands off the anchor the tokens promise. The closed
+   take-off arm painted exactly that bug: the line moved on toggle while
+   every computed-style probe swore it didn't (owner's eyes caught it). */
+*,
+*::before,
+*::after {
   box-sizing: border-box;
 }
 
@@ -29,7 +138,7 @@ body {
   margin: 0;
   background: var(--bg);
   color: var(--text);
-  font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font: 14px/1.5 var(--font-sans);
 }
 
 main {
@@ -133,7 +242,7 @@ select {
 
 .inbox-meta {
   margin-top: 4px;
-  padding-left: 10px;
+  padding-left: var(--body-x);
   font-size: 12px;
 }
 
@@ -144,15 +253,24 @@ select {
 }
 
 .cost-free {
-  color: #1d9e75;
+  color: var(--accent);
 }
 
 ul.conversations li:hover {
   background: var(--accent-bg);
 }
 
+/* THE ROW: [ lane | body ]. The lane is the line's own column and holds the
+   node; the body holds everything the post says, clear of the lane at every
+   depth. The padding is the same 6px/10px it always was — it is written in
+   tokens because the connector reads it: a bead's centre is this padding plus
+   half an avatar, which is the one coordinate the whole drawing agrees on. */
 .post {
-  padding: 6px 0 6px 10px;
+  display: grid;
+  grid-template-columns: var(--lane) minmax(0, 1fr);
+  column-gap: var(--lane-gap);
+  position: relative;
+  padding: var(--row-pt) 0 var(--row-pb) var(--row-pl);
 }
 
 .post.cursor {
@@ -160,59 +278,112 @@ ul.conversations li:hover {
   border-radius: 6px;
 }
 
+.post-lane {
+  align-self: start;
+}
+
+.post-body {
+  min-width: 0;
+}
+
 .post-meta {
   color: var(--text-muted);
+  /* The byline is half person, half machine: the NAME is a person and stays
+     sans (rule below); the @handle and timestamp are machine strings and
+     speak mono like the rest of the telemetry (owner call). */
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.post-meta .name {
+  font-family: var(--font-sans);
   font-size: 12.5px;
 }
 
+/* THE NODE. Opaque and above the line, so an incoming elbow terminates ON the
+   bead rather than crossing it, and a bead reads as a bead. Its ring is drawn
+   in --bead-ink because it is structure: the avatars are the tree's nodes. */
 .avatar {
-  width: 20px;
-  height: 20px;
+  display: block;
+  position: relative;
+  z-index: 2;
+  width: var(--avatar);
+  height: var(--avatar);
   border-radius: 50%;
-  vertical-align: -5px;
-  margin-right: 5px;
+  background: var(--surface);
+  /* A real border, not an inset shadow: an <img> paints over its own inset
+     shadows, so an all-white profile picture rendered a bead with no rim at
+     all and vanished into the page. Borders sit outside the image's pixels,
+     and border-box keeps the disc at exactly --avatar. */
+  border: 1px solid var(--bead-ink);
+  object-fit: cover;
+}
+
+/* UNREAD — the accent on the node, flush, so the ring is state and never
+   structure. Impossible on a gap by construction (l): there is no post there
+   to have read. */
+.avatar.is-unread {
+  /* 1px border + 1px outer shadow = a 2px accent ring — deliberately
+     HEAVIER than the 1px structure ink now: unread is state, and state may
+     outweigh structure (accent has three forms; this is one of them). */
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+
+/* No avatar, or one that failed to load: the grammar still wants a bead, so
+   initials stand in at the same size. */
+.avatar-fallback {
+  display: grid;
+  place-items: center;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  user-select: none;
 }
 
 .avatar-small {
+  display: inline-block;
   width: 16px;
   height: 16px;
   vertical-align: -4px;
+  margin-right: 5px;
+}
+
+.avatar-small.avatar-fallback {
+  display: inline-grid;
+  font-size: 8px;
+}
+
+/* A POST WE NEVER GOT: the bead itself is the notice. The dashed circle is a
+   LINE, not a ring, so it takes the line's ink with the elbows. */
+.bead-gap {
+  display: block;
+  position: relative;
+  z-index: 2;
+  width: var(--avatar);
+  height: var(--avatar);
+  border-radius: 50%;
+  border: var(--line-w) dashed var(--line-ink);
 }
 
 .post-counts {
   color: var(--text-muted);
+  /* The metadata line is telemetry — what the machine counted — and
+     telemetry speaks mono (owner call, from the mockups' voice rule).
+     Same 12px, so --counts-h and the station anchor are untouched. */
+  font-family: var(--font-mono);
   font-size: 12px;
   margin-top: 3px;
-}
-
-.post-counts a {
-  color: inherit;
-  text-decoration: none;
-}
-
-.post-counts a:hover {
-  color: var(--link);
-  text-decoration: underline;
-}
-
-.unread-dot {
-  width: 9px;
-  height: 9px;
-  padding: 0;
-  border: none;
-  border-radius: 50%;
-  background: #1d9e75;
-  cursor: pointer;
-  margin-right: 6px;
-  vertical-align: 1px;
-}
-
-.unread-dot:hover {
-  background: #5dcaa5;
+  /* The metadata line exists even when empty (owner ruling) — and a
+     whitespace-only div collapses to zero height, which silently un-reserved
+     it for zero-metric posts and let the station crowd the bead. min-height
+     is the reservation. */
+  min-height: var(--counts-h);
 }
 
 .new-badge {
-  color: #1d9e75;
+  color: var(--accent);
   font-weight: 600;
 }
 
@@ -254,7 +425,7 @@ ul.conversations li:hover {
 
 .help-keys {
   min-width: 110px;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-family: var(--font-mono);
   color: var(--text-muted);
 }
 
@@ -288,12 +459,9 @@ ul.conversations li:hover {
   text-decoration: underline;
 }
 
-.placeholder-post {
-  max-width: 620px;
-  margin: 4px 0;
-  padding: 8px 12px;
-  border: 1px dashed var(--border);
-  border-radius: 8px;
+/* The gap's own prose. No box: the dashed bead in the lane already says
+   "missing", and saying it twice would draw uncertainty as structure (k). */
+.placeholder-post .post-body {
   color: var(--text-muted);
   font-size: 13px;
 }
@@ -310,7 +478,7 @@ ul.conversations li:hover {
 .connect-link {
   display: inline-block;
   padding: 4px 12px;
-  border: 1px solid var(--border-strong, var(--border));
+  border: 1px solid var(--border);
   border-radius: 6px;
   background: var(--accent-bg);
   color: var(--link);
@@ -332,157 +500,572 @@ ul.conversations li:hover {
   margin-left: 10px;
 }
 
+/* Deficit counts are prose, not structure (k) — and they ride inside the body
+   column, so the line running past the post has nothing laid across it. */
+/* Inline on the footer line, after the counts (s-footer). */
 .hidden-replies {
-  margin: 0 0 4px;
-  padding-left: 10px;
-  color: var(--text-muted);
-  font-size: 12px;
   font-style: italic;
 }
 
-.children {
-  position: relative;
-  margin-left: 4px;
-  padding-left: 18px;
-  display: flow-root;
+/* Metric icons: sized to the footer's type, filled with its ink. */
+.mi {
+  width: 13.5px;
+  height: 13.5px;
+  fill: currentColor;
+  vertical-align: -2.5px; /* optical seat beside 12px mono digits */
 }
 
-.rail {
-  position: absolute;
-  left: 0;
-  top: 0;
-  bottom: 0;
-  width: 14px;
-  padding: 0;
-  border: none;
-  border-radius: 0;
-  background: transparent;
-  cursor: pointer;
-}
-
-.rail::before {
-  content: "";
-  position: absolute;
-  left: 6px;
-  top: 0;
-  bottom: 0;
-  width: 2px;
-  border-radius: 1px;
-  background: var(--border);
-}
-
-.rail:hover::before {
-  background: #4a8edb;
-}
-
-.collapse-stub {
-  display: block;
-  margin: 2px 0 6px 4px;
-  padding: 2px 6px;
-  border: none;
-  background: none;
-  color: var(--text-muted);
-  font-size: 12.5px;
-  cursor: pointer;
-}
-
-.collapse-stub:hover {
-  color: var(--text);
-}
-
-.post-text a,
-.post-meta a {
+.post-text a {
   color: var(--link);
   text-decoration: none;
 }
 
-.post-text a:hover,
+/* CHROME LINKS (owner: "blue or white, which is it?"): the byline's
+   @handle and the quote's arrow, and the footer's counts, are chrome, not
+   prose — at rest they wear their row's own ink with no decoration. Their
+   hover manners live just below, and differ for a reason each. Prose links
+   (.post-text) keep --link blue: links a person wrote stay links. */
+.post-meta a,
+.post-counts a {
+  color: inherit;
+  text-decoration: none;
+}
+
+.post-text a:hover {
+  text-decoration: underline;
+}
+
+/* Two hover manners, each context's best (owner-driven, three rounds):
+   the BYLINE keeps the stock underline — only text-decoration can skip ink
+   around the @'s loop and the y's tail, and with no icons there is no seam
+   to fake. The COUNTS hover through ink alone — an icon+text anchor cannot
+   carry one underline (text-decoration skips SVGs; a stitched-on segment
+   rounds differently at other zoom levels and jogs — owner caught it), so
+   the counts drop the line rather than fake it. X's own action-hover
+   manner, and quieter. */
+.post-meta a:hover,
+.post-counts a:hover {
+  color: var(--text);
+}
+
 .post-meta a:hover {
   text-decoration: underline;
 }
 
-.run-chain {
+/* ==========================================================================
+   THE CONNECTOR — the avatars are the tree's nodes, and one line runs
+   through them.
+   --------------------------------------------------------------------------
+   A .limb is one post plus everything hanging off it, so its box has exactly
+   the vertical extent of that post's subtree — which is what makes the
+   drawing possible in CSS with no measurement: a sibling's pass-through line
+   is simply `top: 0; bottom: 0` on its own limb. Inside a limb:
+
+     .post           the row: [ lane | body ], the bead at the lane's top
+     .kids.run       the next bead straight below, no elbow
+     .kids.fork      children indented one fork step, each elbowing on
+     .kids.takeoff   a mid-thread segment's reply bundle (i, i-why): the trunk
+                     sprouts one arm, a sub-line drops one fork step right,
+                     the replies elbow off THAT, and the trunk runs clean past
+     .kids.stub      the fold, closed: the ⊕ at the station, the line running
+                     on past it, the ghost chip in the first hidden seat
+
+   Every line below is drawn from one coordinate — bead centre = the limb's
+   own lead + the post's top padding + half an avatar — and no rule writes a
+   junction by hand.
+   ========================================================================== */
+
+.limb {
   position: relative;
+  padding-top: var(--lead, 0);
 }
 
-.run-rail {
-  position: absolute;
-  left: 4px;
-  top: 0;
-  bottom: 0;
-  width: 14px;
-  padding: 0;
-  border: none;
-  border-radius: 0;
-  background: transparent;
-  cursor: pointer;
+.limb.is-fork {
+  --lead: var(--fork-lead);
+}
+
+.limb.is-run {
+  --lead: var(--run-lead);
+}
+
+/* A trunk segment is a continuation too, so it carries `is-run` for the line
+   above its bead — and wants more air than an ordinary one. Same specificity,
+   so this rule's position is what makes it win; keep it below. */
+.limb.is-seg {
+  --lead: var(--seg-lead);
+}
+
+.thread > .limb:first-child {
+  /* 0px, not 0 — this feeds the reach strip's calc(), and unitless zero
+     kills the whole expression (audit F1: the ROOT's reach strip was dead
+     on every branch-layout conversation). NOTE this selector's (0,3,0)
+     beats .limb.is-* (0,2,0) deliberately — the first limb must have no
+     lead regardless of kind. */
+  --lead: 0px;
+}
+
+/* THE WHOLE DRAWING, ENUMERATED. Every line in the tree is one of these
+   pseudo-elements and nothing else draws structure. They paint above a post's
+   own background — so a line passes through the cursor bed at rest ink,
+   needing no rule to say so — and below the beads, so a line stops at a node
+   instead of crossing it. */
+.limb.is-fork::before,
+.limb.is-through::after,
+.limb.is-run::before,
+.limb.drops > .post::after,
+.kids.takeoff::after,
+.kids.stub::before,
+.kids.takeoff.is-collapsed::before,
+.tee {
   z-index: 1;
+  pointer-events: none;
 }
 
-.run-post {
-  position: relative;
-  padding-left: 26px;
-}
-
-.run-post::before {
+/* THE ELBOW (fork children): a box whose LEFT border is the parent's line and
+   whose BOTTOM border is the branch, joined by a real corner. Its right edge
+   lands on the child bead's 9 o'clock and its bottom border's centre on the
+   bead's centre y — identities, not tunings. */
+.limb.is-fork::before {
   content: "";
   position: absolute;
-  left: 10px;
+  left: calc(var(--node-x) - var(--fork) - var(--line-w) / 2);
+  top: 0;
+  width: var(--elbow-w);
+  height: calc(var(--lead) + var(--row-pt) + var(--avatar) / 2 + var(--line-w) / 2);
+  border-left: var(--line-w) solid var(--line-ink);
+  border-bottom: var(--line-w) solid var(--line-ink);
+  border-bottom-left-radius: var(--elbow-r);
+}
+
+/* THE PASS-THROUGH (┣): a single rounded corner would take a bite out of the
+   line exactly where it curves away, so a child that still has siblings below
+   it draws the parent's line straight over its whole subtree and lays the
+   curve on top. Only the last child (╰) is a bare rounded corner. */
+.limb.is-through::after {
+  content: "";
+  position: absolute;
+  left: calc(var(--node-x) - var(--fork) - var(--line-w) / 2);
   top: 0;
   bottom: 0;
-  width: 2px;
-  background: var(--border);
+  width: var(--line-w);
+  background: var(--line-ink);
 }
 
-.run-post.run-post-last::before {
+/* THE CONTINUATION (run children): no elbow, same lane as the parent's bead,
+   straight down into the next bead's 12 o'clock. */
+.limb.is-run::before {
+  content: "";
+  position: absolute;
+  left: calc(var(--node-x) - var(--line-w) / 2);
+  top: 0;
+  height: calc(var(--lead) + var(--row-pt));
+  width: var(--line-w);
+  background: var(--line-ink);
+}
+
+/* THE DROP: from a bead's 6 o'clock to the foot of its own post, where
+   whatever hangs below picks the line up again. */
+.limb.drops > .post::after {
+  content: "";
+  position: absolute;
+  left: calc(var(--node-x) - var(--line-w) / 2);
+  top: calc(var(--row-pt) + var(--avatar));
+  bottom: 0;
+  width: var(--line-w);
+  background: var(--line-ink);
+}
+
+.kids {
+  position: relative;
+  /* THE STATION, written once and read by BOTH states of the fold — the open
+     ⊖ standing in the block and the closed ⊕ standing in the stub that
+     replaces it — so the control cannot move when it is pressed. */
+  /* THE STATION RIDES THE COUNTS LINE (owner ruling): the disc centres on
+     the middle of the owner's last line — the always-present counts row —
+     ABOVE the block's own box, so a fold costs no vertical space at all.
+     Negative: measured up from the kids box top, through the owner's
+     padding-bottom to the counts row's middle. */
+  --own-t: calc(-1 * (var(--row-pb) + var(--counts-h) / 2));
+  /* and the GHOST's seat: the same arithmetic the drawing uses for a first
+     child's bead centre, so the chip's y is not chosen either. */
+  --stub-t: calc(var(--fork-lead) + var(--row-pt) + var(--avatar) / 2);
+}
+
+.kids.fork {
+  padding-left: var(--fork); /* the ONLY place depth is charged */
+}
+
+/* A run's ghost stands where the run's next bead did; its station is the
+   same counts-line anchor as every other fold's now. */
+.kids.run,
+.kids.stub.owns-run {
+  --stub-t: calc(var(--run-lead) + var(--row-pt) + var(--avatar) / 2);
+}
+
+/* ---- THE TAKE-OFF (i, i-why) --------------------------------------------
+   Ordinary forks elbow onto their parent's line one by one, because that line
+   ENDS with them. A trunk segment is different: its line continues past its
+   children to the next segment bead. So its replies bundle onto one arm, and
+   the trunk runs clean and unbroken past the whole block — which is what
+   makes the next segment bead unmistakable without anything having to be
+   read. The sub-line sits one fork step right of the trunk, so every vertical
+   lands on the same lane grid; the replies sit one step right of THAT, which
+   is why they are indented two. A single-branch block bundles the same way:
+   one render path, no special case. */
+.kids.takeoff {
+  padding-left: calc(2 * var(--fork));
+  padding-top: var(--takeoff-drop);
+}
+
+
+.kids.takeoff::after {
+  content: "";
+  position: absolute;
+  left: calc(var(--node-x) - var(--line-w) / 2);
+  top: 0;
+  bottom: 0;
+  width: var(--line-w);
+  background: var(--line-ink);
+}
+
+/* THE TEE: the arm, the corner, and the sub-line's first stretch. The right
+   border's centre lands exactly on the sub-line's x, which is exactly where
+   every reply's elbow reaches back to. It is inert drawing — the CONTROL is
+   the ⊖/⊕ mark laid on the arm. */
+.tee {
+  position: absolute;
+  left: calc(var(--node-x) - var(--line-w) / 2);
+  top: var(--takeoff-t);
+  width: calc(var(--fork) + var(--line-w));
+  height: calc(var(--takeoff-drop) - var(--takeoff-t));
+}
+
+.tee::before {
+  content: "";
+  position: absolute;
+  left: var(--elbow-r);
+  top: 0;
+  right: 0;
+  bottom: 0;
+  border-top: var(--line-w) solid var(--line-ink);
+  border-right: var(--line-w) solid var(--line-ink);
+  border-top-right-radius: var(--elbow-r);
+}
+
+/* (r) DEPARTURES CURVE, THROUGH-LINES STAY STRAIGHT. The arm leaves the trunk
+   on the same radius a child's elbow uses, drawn as an overlay so the trunk's
+   own ink stays straight underneath — the ┣ construction exactly. The box's
+   height equals the radius, so the vertical part has zero length: the curve
+   peels off the trunk and nothing else is drawn on it. */
+.tee-arc {
+  position: absolute;
+  left: 0;
+  top: calc(var(--line-w) - var(--elbow-r));
+  width: calc(var(--elbow-r) + 2 * var(--line-w));
+  height: var(--elbow-r);
+  border-left: var(--line-w) solid var(--line-ink);
+  border-bottom: var(--line-w) solid var(--line-ink);
+  border-bottom-left-radius: var(--elbow-r);
+}
+
+/* ---- THE FOLD MARK (s) --------------------------------------------------
+   Marks are controls, lines are drawing: the junction, the tee and the elbows
+   draw, and every mark is a button laid on top. Separating the two is what
+   lets one drawing carry a control that survives its own state change.
+   The disc rests at line ink and brightens with its line — the fold structure
+   is part of the drawing, not something a hover has to discover — and it is
+   OPAQUE, because a ⊖ whose bar is crossed by the vertical it stands on reads
+   as a ⊕, and marks occur on both orientations. */
+.mark {
+  position: absolute;
+  z-index: 3;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: none;
+  cursor: pointer;
+}
+
+.mk {
+  position: absolute;
+  pointer-events: none; /* the strip is the whole control */
+  left: var(--mk-x, 50%);
+  top: var(--mk-y, 50%);
+  transform: translate(-50%, -50%);
+  width: var(--mark-d);
+  height: var(--mark-d);
+  border-radius: 50%;
+  background: var(--mark-fill);
+  box-shadow: inset 0 0 0 var(--line-w) var(--line-ink);
+}
+
+.mk::before,
+.mk.plus::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  background: var(--line-ink);
+}
+
+.mk::before {
+  width: var(--mark-bar);
+  height: var(--line-w);
+  margin: calc(var(--line-w) / -2) 0 0 calc(var(--mark-bar) / -2);
+}
+
+.mk.plus::after {
+  width: var(--line-w);
+  height: var(--mark-bar);
+  margin: calc(var(--mark-bar) / -2) 0 0 calc(var(--line-w) / -2);
+}
+
+/* THE OWNER'S STATION — below the body's span, above the first child, in the
+   line's own course. One rule names both states, so the open ⊖ and the closed
+   ⊕ cannot drift by construction rather than by care. */
+.kids > .mark {
+  left: calc(var(--node-x) - var(--grab) / 2);
+  width: var(--grab);
+  top: calc(var(--own-t) - var(--grab) / 2);
+  height: var(--grab);
+  --mk-x: 50%;
+  --mk-y: 50%;
+}
+
+/* A GAP owner has no counts line to anchor to, and with zero leads there is
+   no between-card air to borrow either — a below-card station lands on the
+   NEXT post's avatar (owner caught both collisions). So a fold-owning gap's
+   card grows just enough to park the disc under its own dashed bead, inside
+   the card, with a breath of air. */
+.limb:has(> .kids) > .placeholder-post {
+  min-height: calc(var(--row-pt) + var(--avatar) + 4px + var(--mark-d) + var(--row-pb));
+}
+.limb:has(> .placeholder-post) > .kids > .mark {
+  --own-t: calc(-1 * (var(--row-pb) + var(--mark-d) / 2));
+}
+
+/* The disc masks the line it stands on, so its fill is whatever it stands
+   ON — the bed, when the cursor rests on this fold's owner (audit F2: a
+   white puck floated in the blue bed). A take-off's station rides the arm
+   below the card, outside the bed, and keeps --bg. */
+.limb:has(> .post.cursor) > .kids:not(.takeoff) > .mark {
+  --mark-fill: var(--accent-bg);
+}
+
+/* THE TEE'S STATION (s-amend) — the centre of the ARM'S STRAIGHT SPAN. Not
+   the corner, not the trunk (which would claim "fold the thread"), and never
+   the departure curve. The box is the whole arm, so pointing at the arm is
+   pointing at the mark. */
+.kids.takeoff > .mark {
+  /* the straight span runs from the departure curve's tangent to the corner's
+     — one radius in from each end of the arm — so its centre is the arm's own
+     midpoint, and the box is the arm from the trunk's centre to the
+     sub-line's. */
+  left: var(--node-x);
+  width: var(--fork);
+  top: calc(var(--takeoff-t) + var(--line-w) / 2 - var(--grab) / 2);
+  height: var(--grab);
+  --mk-x: 50%;
+  --mk-y: 50%;
+}
+
+/* ---- (h-amend) THE LINE IS THE HANDLE'S EXTENDED BODY -------------------
+   Hover and press anywhere along a scope's own vertical and you have its
+   handle: a --grab-wide invisible strip over the line. --fork always exceeds
+   --grab, so nested scopes stay disambiguated by lane x exactly as they
+   already are structurally, with no rule to say so. */
+.line-grab {
+  position: absolute;
+  z-index: 2;
+  left: calc(var(--node-x) - var(--grab) / 2);
+  top: 0;
+  bottom: 0;
+  width: var(--grab);
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: none;
+  cursor: pointer;
+}
+
+/* A run's line ends at the next bead's 12 o'clock: below that the strip would
+   lie across a node, and clicking a node selects (n). */
+.kids.run > .line-grab {
   bottom: auto;
-  height: 17px;
+  height: calc(var(--run-lead) + var(--row-pt));
 }
 
-.run-post::after {
+/* The rest of the run's line, one strip segment per inter-bead stretch —
+   same geometry as the head's, resolved against each limb's own lead. */
+.limb.is-run > .line-grab:not(.lg-reach) {
+  bottom: auto;
+  height: calc(var(--lead, var(--run-lead)) + var(--row-pt));
+}
+
+/* THE REACH: the drop beside the owner's own body, bead's 6 o'clock to the
+   block below — the stretch the block's strip cannot cover from inside its
+   own box. It runs on to the limb's bottom at this lane's x, which is still
+   the same fold's line, and overlapping the block's strip is harmless: one
+   handler, two hands. */
+.line-grab.lg-reach {
+  top: calc(var(--lead, 0px) + var(--row-pt) + var(--avatar));
+  bottom: 0;
+  height: auto;
+}
+
+/* A take-off's line is the SUB-LINE, and it starts at the arm — above that
+   there is only trunk, which folds nothing. */
+.kids.takeoff > .line-grab {
+  left: calc(var(--node-x) + var(--fork) - var(--grab) / 2);
+  top: var(--takeoff-t);
+}
+
+/* ---- THE FOLD, CLOSED: THE MARK AT THE STATION, THE GHOST AT THE ╰ -------
+   The mark does not move; the ghost is the hidden content's seat. The owner's
+   line CONTINUES from the ⊕ along its own direction, turning only where
+   geometry demands (s-amend): a vertical drop ╰s into a chip standing one
+   fork step right, and a horizontal arm runs straight into a chip standing
+   where the sub-line was. Same law, two orientations. */
+.kids.stub {
+  height: calc(var(--stub-t) + var(--chip-h) / 2 + var(--row-pb));
+}
+
+.kids.stub::before {
   content: "";
   position: absolute;
-  left: 10px;
-  top: 15px;
-  width: 10px;
-  height: 2px;
-  background: var(--border);
+  left: calc(var(--node-x) - var(--line-w) / 2);
+  top: 0;
+  width: var(--elbow-w);
+  height: calc(var(--stub-t) + var(--line-w) / 2);
+  border-left: var(--line-w) solid var(--line-ink);
+  border-bottom: var(--line-w) solid var(--line-ink);
+  border-bottom-left-radius: var(--elbow-r);
 }
 
-.run-post > .post::before {
+.kids.stub > .chip {
+  left: calc(var(--fork) + var(--row-pl));
+  top: calc(var(--stub-t) - var(--chip-h) / 2);
+}
+
+.kids.takeoff.is-collapsed {
+  padding: 0;
+  height: calc(var(--takeoff-t) + var(--chip-h) / 2 + var(--row-pb));
+}
+
+/* Same departure curve, same anchor: only what arrives at the station
+   changed. The box's height is the radius and its BOTTOM border is the arm,
+   so the arm's ink occupies exactly the y the open state's does. */
+.kids.takeoff.is-collapsed::before {
   content: "";
   position: absolute;
-  left: 20px;
-  top: 12px;
-  width: 0;
-  height: 0;
-  border-top: 4px solid transparent;
-  border-bottom: 4px solid transparent;
-  border-left: 5px solid var(--border);
+  left: calc(var(--node-x) - var(--line-w) / 2);
+  top: calc(var(--takeoff-t) + var(--line-w) - var(--elbow-r));
+  width: calc(var(--fork) + var(--line-w));
+  height: var(--elbow-r);
+  border-left: var(--line-w) solid var(--line-ink);
+  border-bottom: var(--line-w) solid var(--line-ink);
+  border-bottom-left-radius: var(--elbow-r);
 }
 
-.run-rail:hover ~ .run-post::before,
-.run-rail:hover ~ .run-post::after {
-  background: #4a8edb;
+.kids.takeoff.is-collapsed > .chip {
+  /* No air: the arm's ink runs INTO the chip's ring (owner call — the line
+     connects; the junction ╰ already does). */
+  left: calc(var(--node-x) + var(--fork) + var(--line-w) / 2);
+  top: calc(var(--takeoff-t) + var(--line-w) / 2 - var(--chip-h) / 2);
 }
 
-.run-rail:hover ~ .run-post > .post::before {
-  border-left-color: #4a8edb;
+/* THE GHOST CHIP: standing alone in the content's seat the count is prose,
+   not a badge on a handle. Caretless — the ⊕ owns the verb, and a caret in
+   here would be a second open-affordance for one fold. */
+.chip {
+  position: absolute;
+  z-index: 3;
+  display: inline-flex;
+  align-items: center;
+  height: var(--chip-h);
+  padding: 0 8px;
+  border: 0;
+  border-radius: 6px;
+  background: var(--surface);
+  box-shadow: inset 0 0 0 1px var(--bead-ink);
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  white-space: nowrap;
+  cursor: pointer;
 }
 
-.run-branches {
-  margin-left: 26px;
+/* ---- (q, s-q) FOCUS LOCATES; IT DOES NOT PREVIEW ------------------------
+   A quiet accent ring on the control itself — chip-sized by construction, so
+   the post-tall lozenge (q-junction) cannot be drawn even by accident. No
+   line brightens: hover asks "which line have I got hold of?", focus answers
+   "where am I, and what can I press?". */
+.mark:focus-visible {
+  outline: none;
 }
 
-.spine {
-  border-left: 3px solid var(--thread);
-  padding-left: 12px;
-  margin-left: 4px;
+.mark:focus-visible .mk,
+.chip:focus-visible {
+  outline: 2px solid var(--accent-quiet);
+  outline-offset: 2px;
 }
 
-.segment-replies {
-  margin-left: 12px;
-  margin-bottom: 6px;
+/* ---- (e-settled) THE LINE, PREVIEWED: FIRST LEVEL, NOTHING ELSE ---------
+   Hovering a fold's mark — or its line, or its ghost, which are one control
+   in three shapes — brightens that scope's OWN line: the departure curve, the
+   arm, the vertical run, and the first-level elbows that are that line's own
+   anatomy. Nothing else changes ink: no region wash, no nested marks, no
+   avatars, no prose. Zero transitions anywhere (o).
+
+   THE MECHANISM, and its one safety property: every declaration lands on a
+   PSEUDO-ELEMENT reached by a CHILD combinator. A custom property set on a
+   scope root inherits to every depth — which is exactly how a "first level
+   only" rule quietly stops being first-level-only the next time somebody
+   nests a block. A pseudo-element has no descendants, so its ink cannot
+   travel. The one real element declared on is the tee, whose only descendant
+   is its own departure curve: one mark drawn in two pieces, not a scope. */
+.kids:has(> :is(.mark, .line-grab, .chip):hover) > .mark .mk,
+.limb:has(> .kids:not(.takeoff) > :is(.mark, .line-grab, .chip):hover) > .post::after,
+.kids.fork:has(> :is(.mark, .line-grab):hover) > .limb::before,
+.kids.fork:has(> :is(.mark, .line-grab):hover) > .limb.is-through::after,
+.kids.run:has(> :is(.mark, .line-grab):hover) > .limb::before,
+.kids.takeoff:has(> :is(.mark, .line-grab):hover) > .tee,
+.kids.takeoff:has(> :is(.mark, .line-grab):hover) > .limb::before,
+.kids.takeoff:has(> :is(.mark, .line-grab):hover) > .limb.is-through::after,
+.kids.takeoff.is-collapsed:has(> :is(.mark, .chip):hover)::before,
+.kids.stub:has(> :is(.mark, .chip):hover)::before,
+/* The run's nested strip segments are the same hand (finding 2): they
+   trigger the same preview, and the run's OWN inter-bead drops brighten
+   with it — but never the tail's drop into its forks, which is the fork
+   scope's line, not the run's. */
+.kids.run:has(> .limb > .line-grab:not(.lg-tail):hover) > .mark .mk,
+.kids.run:has(> .limb > .line-grab:not(.lg-tail):hover) > .limb::before,
+.limb:has(> .kids.run > .limb > .line-grab:not(.lg-tail):hover) > .post::after,
+.kids.run:has(> :is(.mark, .line-grab):hover) > .limb:not(:last-child) > .post::after,
+.kids.run:has(> .limb > .line-grab:not(.lg-tail):hover) > .limb:not(:last-child) > .post::after,
+/* THE REACH strips are the same hands again: a limb's body-side drop lights
+   with the block it feeds — its own drop, the block's first level, the
+   block's mark — and the lg-tail variant belongs to the FORK it feeds, never
+   the run it sits inside. */
+.limb:has(> .lg-reach:hover) > .post::after,
+.limb:has(> .lg-reach:hover) > .kids:not(.takeoff) > .mark .mk,
+.limb:has(> .lg-reach:hover) > .kids.fork > .limb::before,
+.limb:has(> .lg-reach:hover) > .kids.fork > .limb.is-through::after,
+.limb:has(> .lg-reach:hover) > .kids.run > .limb::before,
+.limb:has(> .lg-reach:hover) > .kids.run > .limb:not(:last-child) > .post::after,
+.limb:has(> .lg-reach:hover) > .kids.stub::before {
+  --line-ink: var(--line-hover);
+}
+
+/* A collapsed fold's whole line is its stub: the ╰, the ⊕ standing on it, and
+   the ghost's ring standing where the hidden nodes would have. Pointing at
+   either hand lights all of them, because one fold must never look like two
+   things. */
+.kids.stub:has(> :is(.mark, .chip):hover) > .chip,
+.kids.takeoff.is-collapsed:has(> :is(.mark, .chip):hover) > .chip,
+.limb:has(> .lg-reach:hover) > .kids.stub > .chip {
+  --bead-ink: var(--line-hover);
+  color: var(--text);
 }
 
 .quote-card {

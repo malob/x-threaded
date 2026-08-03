@@ -38,7 +38,13 @@ interface ThreadCtx {
   readonly quoted: Record<string, Post>;
   readonly setFold: (id: string, open: boolean) => void;
   readonly setCursor: (id: string) => void;
-  readonly setRead: (ids: string[], read: boolean) => void;
+  /** Write a fold-owner id here from a control's event handler to move
+      keyboard focus to that fold's mark after the next fold-state commit —
+      the pressed control unmounts when its subtree flips form, and without
+      this the SECOND Enter lands on the document and runs the global
+      fold-toggle instead (Codex delta review, finding 2). A raw ref because
+      the hooks compiler only permits ref writes inside event handlers. */
+  readonly focusFoldRef: { current: string | null };
 }
 
 /** The parts that do change: where the cursor is, what is unread, what is folded. */
@@ -80,6 +86,11 @@ function NewBadge({ count }: { count: number }) {
 /**
  * A post we never got: its ID is real, so x.com can still resolve it.
  *
+ * The bead is the notice (l): a dashed disc stands in the lane where the node
+ * would be, so the line arrives at something and the reader can see what is
+ * missing. It carries no unread ring — there is nothing to read — but the
+ * cursor may rest here (m), which the shared `.post` bed handles for free.
+ *
  * Memoized, like every card: `node` is stable for the life of the model, so a
  * gap only re-renders when the cursor arrives at it or leaves it.
  */
@@ -95,13 +106,18 @@ const GapCard = memo(function GapCard({ node, cursor }: { node: GapNode; cursor:
           : "Replied somewhere in this conversation; exact position unknown"
       }
       onClick={(e) => {
-        if (!(e.target as HTMLElement).closest("a")) setCursor(node.id);
+        if (!(e.target as HTMLElement).closest("a, button")) setCursor(node.id);
       }}
     >
-      unavailable post (deleted or private) ·{" "}
-      <a href={xPostUrl(undefined, node.id)} target="_blank" rel="noopener noreferrer">
-        view on x.com ↗
-      </a>
+      <div className="post-lane">
+        <span className="bead-gap" />
+      </div>
+      <div className="post-body">
+        unavailable post (deleted or private) ·{" "}
+        <a href={xPostUrl(undefined, node.id)} target="_blank" rel="noopener noreferrer">
+          view on x.com ↗
+        </a>
+      </div>
     </div>
   );
 });
@@ -121,40 +137,36 @@ const RealPostCard = memo(function RealPostCard({
   cursor: boolean;
   unread: boolean;
 }) {
-  const { model, quoted, setCursor, setRead } = useThread();
+  const { model, quoted, setCursor } = useThread();
   const { post } = node;
   const hidden = model.hiddenReplies.get(post.id) ?? 0;
   return (
-    <>
-      <PostView
-        post={post}
-        quoted={quoted}
-        displayText={node.displayText}
-        id={`post-${post.id}`}
-        className={cursor ? "post cursor" : "post"}
-        onClick={(e) => {
-          if (!(e.target as HTMLElement).closest("a, button")) setCursor(post.id);
-        }}
-        leading={
-          unread ? (
-            <button
-              className="unread-dot"
-              title="Mark as read"
-              aria-label="Mark as read"
-              onClick={() => setRead([post.id], true)}
-            />
-          ) : undefined
-        }
-      />
-      {hidden > 0 && (
-        <div
-          className="hidden-replies"
-          title="Deleted, from a private account, or not returned by the API"
-        >
-          {hidden} {hidden === 1 ? "reply" : "replies"} not available
-        </div>
-      )}
-    </>
+    <PostView
+      post={post}
+      quoted={quoted}
+      displayText={node.displayText}
+      id={`post-${post.id}`}
+      className={cursor ? "post cursor" : "post"}
+      onClick={(e) => {
+        if (!(e.target as HTMLElement).closest("a, button")) setCursor(post.id);
+      }}
+      unread={unread}
+      /**
+       * The deficit note is prose (k) and it is METADATA, so it rides the end
+       * of the footer line (owner ruling, s-footer) — never a block between
+       * the post and its children, where it would open a hole in the line.
+       */
+      footerNote={
+        hidden > 0 ? (
+          <span
+            className="hidden-replies"
+            title="Deleted, from a private account, or not returned by the API"
+          >
+            {hidden} {hidden === 1 ? "reply" : "replies"} not available
+          </span>
+        ) : undefined
+      }
+    />
   );
 });
 
@@ -175,63 +187,237 @@ function PostCard({ node }: { node: ThreadNode }) {
 }
 
 /**
- * A branch as the model decomposed it: a run of single-child posts hanging off
- * a connected rail under the head, then the fork that ended the run rendered
- * as one collapsible block. Fold state lives in the view context, keyed by the
- * owning post: the chain's head, the fork's tail.
+ * Where a limb sits on the line it hangs from, which is the only thing the
+ * connector needs a component to tell it: a fork child elbows back one fork
+ * step to its parent's line, a fork child with siblings below it also carries
+ * that line down past its own subtree, a run child continues straight, and a
+ * root starts one.
  */
-function BranchView({ branch }: { branch: Branch }) {
+type Place = "root" | "fork" | "through" | "run";
+
+const LIMB: Record<Place, string> = {
+  root: "limb",
+  fork: "limb is-fork",
+  through: "limb is-fork is-through",
+  run: "limb is-run",
+};
+
+/**
+ * `drops` means the line goes on below this post's bead — because a block
+ * hangs there, open or folded. It is the one thing a limb knows that CSS
+ * cannot ask, since the answer is about the post's children, not its box.
+ */
+function limbClass(place: Place, drops: boolean): string {
+  return drops ? `${LIMB[place]} drops` : LIMB[place];
+}
+
+/**
+ * The ⊖/⊕ disc standing ON the owner's line, at the station where the content
+ * it hides attaches (s). It never moves across the toggle: open and closed
+ * derive the same anchor from the same tokens, so pressing it does not make
+ * the eye re-find it.
+ */
+function FoldMark({
+  open,
+  owner,
+  onToggle,
+}: {
+  open: boolean;
+  owner: string;
+  onToggle: () => void;
+}) {
+  const { focusFoldRef } = useThread();
+  const label = open ? "Collapse replies" : "Expand replies";
+  return (
+    <button
+      className="mark"
+      data-fold={owner}
+      aria-expanded={open}
+      aria-label={label}
+      title={label}
+      onClick={() => {
+        focusFoldRef.current = owner;
+        onToggle();
+      }}
+    >
+      <span className={open ? "mk" : "mk plus"} />
+    </button>
+  );
+}
+
+/**
+ * (h-amend) The scope's own line is the handle's extended body: a widened
+ * invisible strip laid along it, because a 2px line is a target only in
+ * principle. It is the mark's control reached by a second hand — same handler,
+ * never a second code path — and it stays out of the tab order, so one fold is
+ * one tab stop. A button because the row's click-to-select guard reads
+ * `closest("a, button")`.
+ */
+function LineGrab({
+  onToggle,
+  reach,
+  tail,
+}: {
+  onToggle: () => void;
+  reach?: boolean;
+  tail?: boolean;
+}) {
+  const cls = tail ? "line-grab lg-reach lg-tail" : reach ? "line-grab lg-reach" : "line-grab";
+  return <button className={cls} tabIndex={-1} aria-hidden="true" onClick={onToggle} />;
+}
+
+/**
+ * The ghost (s): the count standing exactly where the first hidden avatar
+ * would have stood, at the end of the line that continues past the ⊕. No
+ * caret — the mark owns the verb — and no "· k new" when there is none.
+ */
+function GhostChip({
+  n,
+  k,
+  owner,
+  onToggle,
+}: {
+  n: number;
+  k: number;
+  owner: string;
+  onToggle: () => void;
+}) {
+  const { focusFoldRef } = useThread();
+  return (
+    <button
+      className="chip"
+      tabIndex={-1}
+      aria-hidden="true"
+      onClick={() => {
+        focusFoldRef.current = owner;
+        onToggle();
+      }}
+    >
+      {/* One text run inside, so the count keeps its own spacing: as separate
+          flex items the space before the separator is eaten and "3 replies ·
+          1 new" reads "3 replies ·1 new". */}
+      <span>
+        {n} {n === 1 ? "reply" : "replies"}
+        <NewBadge count={k} />
+      </span>
+    </button>
+  );
+}
+
+/**
+ * A folded block: the mark at its station and the ghost beside it, with the
+ * owner's line running from the block's top past the ⊕ and turning into the
+ * chip's seat. `run` picks the station a chain head has — a run's line is
+ * short, so its mark sits in the middle of that shorter stretch.
+ */
+function FoldStub({
+  n,
+  k,
+  owner,
+  run,
+  onToggle,
+}: {
+  n: number;
+  k: number;
+  owner: string;
+  run?: boolean;
+  onToggle: () => void;
+}) {
+  return (
+    <div className={run ? "kids stub owns-run" : "kids stub"}>
+      <FoldMark open={false} owner={owner} onToggle={onToggle} />
+      <GhostChip n={n} k={k} owner={owner} onToggle={onToggle} />
+    </div>
+  );
+}
+
+/**
+ * A branch as the model decomposed it: a run of single-child posts drawn as
+ * beads on one straight line under the head, then the fork that ended the run
+ * rendered as one collapsible block. Fold state lives in the view context,
+ * keyed by the owning post: the chain's head, the fork's tail.
+ *
+ * The forks hang inside the last run post's limb rather than beside the run,
+ * because that is where they hang in the tree — and it is what makes the
+ * drawing come out with no measurement: every line is either a limb's own
+ * elbow or its parent's, and both are written against the same bead centre.
+ */
+function BranchView({ branch, place }: { branch: Branch; place: Place }) {
   const { model, setFold } = useThread();
   const { unread, isOpen } = useView();
   const { head, rest, tail, forks } = branch;
   const branches = forks.length > 0 && <CollapsibleChildren ownerId={tail.id} branches={forks} />;
+  const limb = limbClass(place, rest.length > 0 || forks.length > 0);
+  /* The drop beside the owner's OWN body — bead's 6 o'clock down to where the
+     block begins — is the same handle as the block's line (h-amend), but the
+     block's strip cannot reach above its own box. The reach strip covers it
+     (owner caught the dead stretch live). */
+  const reach = (id: string) => (
+    <LineGrab reach onToggle={() => setFold(id, !isOpen(id))} />
+  );
 
   if (rest.length === 0) {
     return (
-      <div>
+      <div className={limb}>
+        {forks.length > 0 && reach(tail.id)}
         <PostCard node={head} />
         {branches}
       </div>
     );
   }
   if (!isOpen(head.id)) {
-    const n = model.subtreeSize(head.id) - 1;
     return (
-      <div>
+      <div className={limb}>
+        {reach(head.id)}
         <PostCard node={head} />
-        <button className="collapse-stub" onClick={() => setFold(head.id, true)}>
-          ▸ {n} {n === 1 ? "reply" : "replies"} hidden
-          <NewBadge count={unreadUnder(head.children, model, unread)} />
-        </button>
+        <FoldStub
+          run
+          owner={head.id}
+          n={model.subtreeSize(head.id) - 1}
+          k={unreadUnder(head.children, model, unread)}
+          onToggle={() => setFold(head.id, true)}
+        />
       </div>
     );
   }
   return (
-    <div>
+    <div className={limb}>
+      {reach(head.id)}
       <PostCard node={head} />
-      <div className="run">
-        <div className="run-chain">
-          <button
-            className="run-rail"
-            aria-label="Collapse chain"
-            title="Collapse chain"
-            onClick={() => setFold(head.id, false)}
-          />
-          {rest.map((n, i) => (
-            <div key={n.id} className={i === rest.length - 1 ? "run-post run-post-last" : "run-post"}>
-              <PostCard node={n} />
+      <div className="kids run">
+        <FoldMark open owner={head.id} onToggle={() => setFold(head.id, false)} />
+        <LineGrab onToggle={() => setFold(head.id, false)} />
+        {rest.map((node, i) => {
+          const last = i === rest.length - 1;
+          const feedsForks = last && forks.length > 0;
+          return (
+            <div key={node.id} className={limbClass("run", !last || forks.length > 0)}>
+              {/* The run's line is one handle end to end (h-amend): every
+                  inter-bead stretch carries its own strip segment, all hands
+                  of the head's fold (Codex packet review, finding 2) — and
+                  each bead's body-side drop likewise, except the tail's,
+                  whose drop feeds the FORK block and is that fold's hand. */}
+              <LineGrab onToggle={() => setFold(head.id, false)} />
+              {feedsForks ? (
+                <LineGrab reach tail onToggle={() => setFold(tail.id, !isOpen(tail.id))} />
+              ) : (
+                !last && <LineGrab reach onToggle={() => setFold(head.id, false)} />
+              )}
+              <PostCard node={node} />
+              {last && branches}
             </div>
-          ))}
-        </div>
-        {branches && <div className="run-branches">{branches}</div>}
+          );
+        })}
       </div>
     </div>
   );
 }
 
 /**
- * A post's replies as one block behind a single rail: clicking the rail
- * collapses the whole block. Nested reply blocks get their own rails.
+ * A post's replies as one block on a single line: the ⊖ at the station under
+ * the owner's bead folds the whole block, and so does the line itself.
+ * Children elbow off that line, the last one's ╰ ends it. Nested reply blocks
+ * get their own station one fork step right.
  */
 function CollapsibleChildren({
   ownerId,
@@ -242,64 +428,82 @@ function CollapsibleChildren({
 }) {
   const { model, setFold } = useThread();
   const { unread, isOpen } = useView();
-  if (!isOpen(ownerId)) {
-    const n = branches.reduce((sum, branch) => sum + model.subtreeSize(branch.head.id), 0);
+  const open = isOpen(ownerId);
+  const toggle = () => setFold(ownerId, !open);
+  if (!open) {
     return (
-      <button className="collapse-stub" onClick={() => setFold(ownerId, true)}>
-        ▸ {n} {n === 1 ? "reply" : "replies"} hidden
-        <NewBadge count={unreadUnder(branches.map((branch) => branch.head), model, unread)} />
-      </button>
+      <FoldStub
+        owner={ownerId}
+        n={branches.reduce((sum, branch) => sum + model.subtreeSize(branch.head.id), 0)}
+        k={unreadUnder(branches.map((branch) => branch.head), model, unread)}
+        onToggle={toggle}
+      />
     );
   }
   return (
-    <div className="children">
-      <button
-        className="rail"
-        aria-label="Collapse replies"
-        title="Collapse replies"
-        onClick={() => setFold(ownerId, false)}
-      />
-      <div>
-        {branches.map((branch) => (
-          <BranchView key={branch.head.id} branch={branch} />
-        ))}
-      </div>
+    <div className="kids fork">
+      <FoldMark open owner={ownerId} onToggle={toggle} />
+      <LineGrab onToggle={toggle} />
+      {branches.map((branch, i) => (
+        <BranchView
+          key={branch.head.id}
+          branch={branch}
+          place={i < branches.length - 1 ? "through" : "fork"}
+        />
+      ))}
     </div>
   );
 }
 
-function SegmentReplies({ segment }: { segment: Segment }) {
+/**
+ * A spine segment's replies.
+ *
+ * MID-THREAD they bundle onto a take-off (i, i-why): the trunk sprouts one
+ * arm, a sub-line drops from it one fork step right, and the replies elbow off
+ * THAT — so the trunk runs clean and unbroken past the whole block to the next
+ * segment bead, and "thread, or reply?" never has to be read. The station is
+ * the arm, because that is where the foldable content attaches; closed, the
+ * arm runs straight on into the ghost standing where the sub-line was
+ * (s-amend). One render path: a single-branch block bundles too.
+ *
+ * The FINAL segment has no continuation to protect (i-amend), so its replies
+ * attach directly and the last ╰ ends the trunk — which is exactly an ordinary
+ * fork tail's block, and is rendered as one.
+ */
+function SegmentReplies({ segment, final }: { segment: Segment; final: boolean }) {
   const { model, setFold } = useThread();
   const { unread, isOpen } = useView();
-  const expanded = isOpen(segment.node.id);
-  const count = segment.replies.reduce((sum, reply) => sum + model.subtreeSize(reply.head.id), 0);
+  const ownerId = segment.node.id;
+  if (final) return <CollapsibleChildren ownerId={ownerId} branches={segment.replies} />;
+  const open = isOpen(ownerId);
+  const toggle = () => setFold(ownerId, !open);
+  if (!open) {
+    return (
+      <div className="kids takeoff is-collapsed">
+        <FoldMark open={false} owner={ownerId} onToggle={toggle} />
+        <GhostChip
+          n={segment.replies.reduce((sum, reply) => sum + model.subtreeSize(reply.head.id), 0)}
+          k={unreadUnder(segment.replies.map((reply) => reply.head), model, unread)}
+          owner={ownerId}
+          onToggle={toggle}
+        />
+      </div>
+    );
+  }
   return (
-    <div>
-      <button className="collapse-stub" onClick={() => setFold(segment.node.id, !expanded)}>
-        {expanded ? "▾" : "▸"} {count} {count === 1 ? "reply" : "replies"}
-        {!expanded && (
-          <NewBadge
-            count={unreadUnder(segment.replies.map((reply) => reply.head), model, unread)}
-          />
-        )}
-      </button>
-      {expanded && (
-        <div className="segment-replies">
-          <div className="children">
-            <button
-              className="rail"
-              aria-label="Collapse replies"
-              title="Collapse replies"
-              onClick={() => setFold(segment.node.id, false)}
-            />
-            <div>
-              {segment.replies.map((reply) => (
-                <BranchView key={reply.head.id} branch={reply} />
-              ))}
-            </div>
-          </div>
-        </div>
-      )}
+    <div className="kids takeoff">
+      <span className="tee" aria-hidden="true">
+        <span className="tee-arc" />
+      </span>
+      <FoldMark open owner={ownerId} onToggle={toggle} />
+      <LineGrab onToggle={toggle} />
+      {segment.replies.map((reply, i) => (
+        <BranchView
+          key={reply.head.id}
+          branch={reply}
+          place={i < segment.replies.length - 1 ? "through" : "fork"}
+        />
+      ))}
     </div>
   );
 }
@@ -416,6 +620,19 @@ export function Thread({
     });
   }, [model]);
 
+  /* Focus follows the fold: the control the reader pressed unmounts when its
+     subtree flips open/closed, so after the commit, focus lands on the new
+     mark at the same station — before paint, so nothing flashes. preventScroll
+     honors the mouse-never-scrolls discipline. */
+  useLayoutEffect(() => {
+    const id = focusFoldRef.current;
+    if (!id) return;
+    focusFoldRef.current = null;
+    document
+      .querySelector<HTMLButtonElement>(`button.mark[data-fold="${CSS.escape(id)}"]`)
+      ?.focus({ preventScroll: true });
+  }, [folds]);
+
   useEffect(() => {
     const mode = scrollRequestRef.current;
     if (!mode || !cursorId) return;
@@ -508,6 +725,19 @@ export function Thread({
       const typing = target instanceof Element && target.closest("input, textarea, select") !== null;
       if (typing || e.metaKey || e.ctrlKey || e.altKey) return;
       if (isModifierKey(e.key)) return;
+      // A focused control keeps its native activation: Enter on a tabbed-to
+      // fold mark must press THAT mark, and Enter on a tabbed-to link must
+      // FOLLOW it (Codex packet review + delta review) — not run the
+      // cursor's fold-toggle. Space stays button-only: on a link, native
+      // Space scrolls, and that should keep working. Every other key stays
+      // global — focus sitting on a control is no reason for j/k to die.
+      const focused = document.activeElement;
+      if (
+        (e.key === "Enter" &&
+          (focused instanceof HTMLButtonElement || focused instanceof HTMLAnchorElement)) ||
+        (e.key === " " && focused instanceof HTMLButtonElement)
+      )
+        return;
       const { view: current, model, onSetRead: setRead } = latest.current;
       const { state, commands, handled } = applyKey(
         { ...current, pending: pendingRef.current },
@@ -530,14 +760,9 @@ export function Thread({
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
-  /**
-   * Read through the same ref the keyboard uses, so the handler a card holds
-   * never changes identity even though the prop behind it is a fresh closure
-   * on every render of App.
-   */
-  const setRead = useCallback((ids: string[], read: boolean) => {
-    latest.current.onSetRead(ids, read);
-  }, []);
+  /* See ThreadCtx.focusFold. A ref, not state: recording intent must not
+     render anything. */
+  const focusFoldRef = useRef<string | null>(null);
 
   const setFold = useCallback((id: string, open: boolean) => {
     setView((prev) => {
@@ -546,7 +771,7 @@ export function Thread({
       // visible; when it doesn't, the cursor stays where the reader left it,
       // because collapsing an unrelated branch is not a statement about where
       // you are. Scope membership is read through the `latest` ref (declared
-      // above — the same pattern setRead uses; the hooks compiler requires
+      // above; the hooks compiler requires
       // the ref to exist before a callback captures it), so this stays
       // dependency-free and the stable context stays stable. No scroll
       // request either way; mouse actions never move the viewport.
@@ -570,8 +795,8 @@ export function Thread({
    * consumer no matter what its props said.
    */
   const ctx = useMemo(
-    () => model && { model, quoted: conversation.quoted, setFold, setCursor, setRead },
-    [model, conversation.quoted, setFold, setCursor, setRead],
+    () => model && { model, quoted: conversation.quoted, setFold, setCursor, focusFoldRef },
+    [model, conversation.quoted, setFold, setCursor],
   );
   const viewCtx = useMemo(
     () => model && { cursorId, unread, isOpen: (id: string) => model.isOpen(id, folds) },
@@ -634,16 +859,48 @@ export function Thread({
             </button>
           </p>
           {layout.kind === "thread" ? (
-            <div className="spine">
-              {layout.segments.map((segment) => (
-                <div key={segment.node.id}>
-                  <PostCard node={segment.node} />
-                  {segment.replies.length > 0 && <SegmentReplies segment={segment} />}
-                </div>
-              ))}
+            /*
+             * The trunk: one straight line through every segment bead, which
+             * never bends. A segment limb draws the stretch above its own bead
+             * (`is-run`) and, when anything follows, the stretch below it
+             * (`drops`) — and a take-off block draws the trunk running clean
+             * past its whole reply bundle.
+             */
+            <div className="thread">
+              {layout.segments.map((segment, i) => {
+                const final = i === layout.segments.length - 1;
+                const replies = segment.replies.length > 0;
+                return (
+                  <div
+                    key={segment.node.id}
+                    className={[
+                      "limb is-seg",
+                      i > 0 ? " is-run" : "",
+                      replies || !final ? " drops" : "",
+                    ].join("")}
+                  >
+                    {/* Only the FINAL segment's body-side drop is a handle:
+                        the trunk ends there and the drop is its block's line
+                        (i-amend). Beside a mid-thread segment the trunk just
+                        goes on, and the trunk folds nothing (h). */}
+                    {replies && final && (
+                      <LineGrab
+                        reach
+                        onToggle={() =>
+                          setFold(segment.node.id, !model.isOpen(segment.node.id, folds))
+                        }
+                      />
+                    )}
+                    <PostCard node={segment.node} />
+                    {replies && <SegmentReplies segment={segment} final={final} />}
+                  </div>
+                );
+              })}
             </div>
           ) : (
-            <BranchView branch={layout.branch} />
+            <div className="thread">
+              <BranchView branch={layout.branch} place="root" />
+            </div>
           )}
           {helpOpen && (
             <div className="help-overlay">
