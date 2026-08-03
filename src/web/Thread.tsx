@@ -395,6 +395,28 @@ export function Thread({
   }, [conversation.rootId, conversation.focusId]);
 
   useEffect(() => {
+    // A refresh can rebuild the model so the post under the cursor lands
+    // inside a closed-by-default fold — e.g. an adopted orphan that held a
+    // spine seat in the cached model loses it when the genuine continuation
+    // arrives, and drops into the root segment's closed reply block (Codex
+    // review of the adoption fix, finding 1 — the same temporal-ownership
+    // class as 7fa77ae). Same remedy as a deep link: open EVERY ancestor of
+    // the cursor, owner or not, so the cursor is never invisible.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setView((prev) => {
+      if (!model || !prev.cursorId) return prev;
+      if (model.visibleIds(prev.folds).includes(prev.cursorId)) return prev;
+      const folds = new Map(prev.folds);
+      let current = model.parents.get(prev.cursorId) ?? null;
+      while (current !== null) {
+        folds.set(current, true);
+        current = model.parents.get(current) ?? null;
+      }
+      return { ...prev, folds };
+    });
+  }, [model]);
+
+  useEffect(() => {
     const mode = scrollRequestRef.current;
     if (!mode || !cursorId) return;
     scrollRequestRef.current = null;

@@ -224,7 +224,8 @@ function materialize(id: string, context: ReadonlySet<string>, graph: Graph): Th
  *
  * A missing id that isn't a snowflake can be neither dated nor placed, so it
  * gets no gap at all: its replies attach to the root directly rather than
- * hanging under a node with an invented timestamp.
+ * hanging under a node with an invented timestamp — and are recorded in
+ * `adopted`, because landing on the root that way is not a reply to it.
  *
  * This is a heuristic layered on honest structure — to unwind it, keep only
  * the root-attachment fallback.
@@ -235,6 +236,7 @@ function attachGaps(
   childIds: Map<string, string[]>,
   orphans: ReadonlyMap<string, string[]>,
   kidsOf: (id: string) => string[],
+  adopted: Set<string>,
 ): Map<string, Gap> {
   const gaps = new Map<string, Gap>();
   const deficits = new Map<string, number>();
@@ -246,8 +248,11 @@ function attachGaps(
   const missing: { id: string; createdMs: number }[] = [];
   for (const [missingId, children] of orphans) {
     const createdMs = snowflakeMs(missingId);
-    if (createdMs === null) kidsOf(rootId).push(...children);
-    else missing.push({ id: missingId, createdMs });
+    if (createdMs === null) {
+      kidsOf(rootId).push(...children);
+      // Rehomed for lack of anywhere else — they answered the missing post.
+      for (const child of children) adopted.add(child);
+    } else missing.push({ id: missingId, createdMs });
   }
 
   missing.sort((a, b) => a.createdMs - b.createdMs);
@@ -256,6 +261,8 @@ function attachGaps(
       (id) => Date.parse(posts.get(id)!.createdAt) < createdMs,
     );
     const inferred = candidates.length === 1;
+    // Falling back to the root is adoption too, but a gap needs no `adopted`
+    // entry: only posts are ever spine candidates.
     const hostId = inferred ? candidates[0]! : rootId;
     if (inferred) {
       const remaining = deficits.get(candidates[0]!)! - 1;
@@ -291,12 +298,23 @@ export function buildThread(
     return fresh;
   };
 
+  /**
+   * Posts hanging off the root that never claimed to reply to it. X omits the
+   * `replied_to` reference when a post's parent was deleted, so such a post
+   * arrives with no parent at all and the root is simply where it has to go.
+   * That is placement of last resort, not evidence about what it answered, so
+   * the ids are kept apart from the root's genuine children.
+   */
+  const adopted = new Set<string>();
+
   // Link what we hold; a reply whose parent we don't hold waits here for a gap.
   const orphans = new Map<string, string[]>();
   for (const post of byPost.values()) {
     if (post.id === rootId) continue;
-    if (!post.parentId) kidsOf(rootId).push(post.id);
-    else if (byPost.has(post.parentId)) kidsOf(post.parentId).push(post.id);
+    if (!post.parentId) {
+      kidsOf(rootId).push(post.id);
+      adopted.add(post.id);
+    } else if (byPost.has(post.parentId)) kidsOf(post.parentId).push(post.id);
     else {
       const group = orphans.get(post.parentId) ?? [];
       group.push(post.id);
@@ -304,7 +322,7 @@ export function buildThread(
     }
   }
 
-  const gaps = attachGaps(rootId, byPost, childIds, orphans, kidsOf);
+  const gaps = attachGaps(rootId, byPost, childIds, orphans, kidsOf, adopted);
 
   const createdAtOf = (id: string): string => gaps.get(id)?.createdAt ?? byPost.get(id)!.createdAt;
   for (const list of childIds.values()) {
@@ -367,6 +385,13 @@ export function buildThread(
    * down. Children are chronological, so a forked self-reply resolves to the
    * earliest; later self-replies render as ordinary replies.
    *
+   * Adopted posts are not candidates. Hanging off the root is where they
+   * landed for want of anywhere better, not something they said, so it must
+   * not be read as a reply to the root — and an adopted post that predates the
+   * genuine continuation would otherwise win the earliest-first rule and take
+   * the rest of the thread with it (see the regression for conversation
+   * 1366577587732979713 in test/thread-model.test.ts).
+   *
    * The inbox counts a spine of its own — `spineLength` in
    * src/server/threads.ts, over the timeline scan rather than the fetched
    * conversation — and the two can disagree on exactly the forked case this
@@ -376,7 +401,9 @@ export function buildThread(
   for (let current = root; ; ) {
     const next = current.children.find(
       (child): child is PostNode =>
-        child.kind === "post" && child.post.authorId === root.post.authorId,
+        child.kind === "post" &&
+        child.post.authorId === root.post.authorId &&
+        !adopted.has(child.id),
     );
     if (!next) break;
     spine.push(next);

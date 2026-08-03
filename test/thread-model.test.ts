@@ -30,7 +30,11 @@ interface Spec {
   /** Author id; doubles as the handle unless `handle` says otherwise. */
   readonly author?: string;
   readonly handle?: string;
-  /** Parent's name; omit for the root, or name a `missing` spec for an orphan. */
+  /**
+   * Parent's name; omit for the root, or name a `missing` spec for an orphan.
+   * Omitting it on a non-root post means a null parentId — the shape X returns
+   * when the parent was deleted, which buildThread adopts onto the root.
+   */
   readonly parent?: string;
   /** Minutes past the fixture epoch; defaults to the declaration index. */
   readonly minute?: number;
@@ -160,9 +164,9 @@ describe("the spine", () => {
   it("takes the earliest self-reply and leaves later ones as ordinary replies", () => {
     const t = conversation([
       { name: "s1", author: "A", minute: 0 },
-      { name: "s2", author: "A", minute: 2 },
-      { name: "also-mine", author: "A", minute: 3 },
-      { name: "other", author: "B", minute: 4 },
+      { name: "s2", author: "A", parent: "s1", minute: 2 },
+      { name: "also-mine", author: "A", parent: "s1", minute: 3 },
+      { name: "other", author: "B", parent: "s1", minute: 4 },
     ]);
     expect(t.names(t.model.spine.map((n) => n.id))).toEqual(["s1", "s2"]);
     // The later self-reply is inside s1's reply block, not a segment of its own.
@@ -187,6 +191,54 @@ describe("the spine", () => {
     expect(t.names(t.model.spine.map((n) => n.id))).toEqual(["root"]);
     expect(t.model.layout.kind).toBe("branch");
     expect(t.model.segmentFolds.size).toBe(0);
+  });
+
+  /**
+   * Conversation 1366577587732979713 (Eliezer Yudkowsky's 2021-03-01
+   * wealth-tax thread), the incident this rule exists for: X omits the
+   * `replied_to` reference when a post's parent was deleted, so a deep reply
+   * of his arrived with no parent and was adopted onto the root. Being ten
+   * minutes older than the real continuation, it won the earliest-first rule
+   * and the spine followed it off the thread entirely.
+   */
+  it("doesn't let an adopted post win the spine over a genuine reply to the root", () => {
+    const t = conversation([
+      { name: "root", author: "A", minute: 0 },
+      // Parent deleted: the API returned it with no reference at all.
+      { name: "orphan", author: "A", minute: 7 },
+      { name: "s2", author: "A", parent: "root", minute: 17 },
+      { name: "s3", author: "A", parent: "s2", minute: 27 },
+    ]);
+    expect(t.names(t.model.spine.map((n) => n.id))).toEqual(["root", "s2", "s3"]);
+    // Still held, still visible: an ordinary reply block under the root.
+    expect(t.model.parents.get(t.id("orphan"))).toBe(t.id("root"));
+    expect(t.names(threadSegments(t.model)[0]!.replies.map((r) => r.head.id))).toEqual(["orphan"]);
+    expect(t.names(t.model.allOrder)).toEqual(["root", "orphan", "s2", "s3"]);
+  });
+
+  it("stays at the root when the only self-reply below it was adopted", () => {
+    const t = conversation([
+      { name: "root", author: "A", minute: 0 },
+      { name: "orphan", author: "A", minute: 5 },
+    ]);
+    expect(t.names(t.model.spine.map((n) => n.id))).toEqual(["root"]);
+    expect(t.model.layout.kind).toBe("branch");
+    expect(t.names(rootBranch(t.model).rest.map((n) => n.id))).toEqual(["orphan"]);
+    expect(t.names(t.model.allOrder)).toEqual(["root", "orphan"]);
+  });
+
+  it("doesn't follow a self-reply rehomed from an undatable missing parent", () => {
+    // A non-snowflake missing id gets no gap, so its replies land on the root
+    // (see "gives a non-snowflake missing id no gap at all") — placement
+    // again, so the same exclusion applies.
+    const t = conversation([
+      { name: "root", author: "A", replies: 2, minute: 0 },
+      { name: "ghost", missing: true, id: "not-a-snowflake" },
+      { name: "orphan", author: "A", parent: "ghost", minute: 5 },
+      { name: "s2", author: "A", parent: "root", minute: 9 },
+    ]);
+    expect(t.names(t.model.spine.map((n) => n.id))).toEqual(["root", "s2"]);
+    expect(t.model.parents.get(t.id("orphan"))).toBe(t.id("root"));
   });
 
   it("never runs through a gap, which has no author to match", () => {
@@ -255,8 +307,8 @@ describe("segment reply blocks", () => {
   it("keeps a segment's non-spine self-reply in its own reply block", () => {
     const t = conversation([
       { name: "s1", author: "A", minute: 0 },
-      { name: "s2", author: "A", minute: 1 },
-      { name: "aside", author: "A", minute: 2 },
+      { name: "s2", author: "A", parent: "s1", minute: 1 },
+      { name: "aside", author: "A", parent: "s1", minute: 2 },
       { name: "s3", author: "A", parent: "s2", minute: 3 },
     ]);
     const segments = threadSegments(t.model);

@@ -6,7 +6,7 @@ import reactRefresh from "eslint-plugin-react-refresh";
 import globals from "globals";
 
 export default defineConfig(
-  { ignores: ["dist/", "node_modules/", "coverage/"] },
+  { ignores: ["dist/", "node_modules/", "coverage/", ".claude/"] },
 
   js.configs.recommended,
   tseslint.configs.recommended,

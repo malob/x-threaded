@@ -9,3 +9,5 @@ data/
 *.sqlite-*
 # tsc -b's incremental state, one per project in tsconfig.json.
 *.tsbuildinfo
+# Agent worktrees (Claude Code process scaffolding).
+.claude/worktrees/
