@@ -1173,3 +1173,14 @@ ul.conversations li:hover {
 .theme-toggle:hover {
   color: var(--text);
 }
+
+/* STALE-HOVER PARKING (see Thread.tsx): while parked, every preview rule's
+   ink resolves to rest ink, so a stale :hover flag paints nothing. The one
+   non-ink hover effect (the ghost chip's text) is reset alongside. */
+.thread.hover-parked {
+  --line-hover: var(--border);
+}
+
+.thread.hover-parked .kids .chip {
+  color: var(--text-muted);
+}

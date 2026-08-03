@@ -620,6 +620,23 @@ export function Thread({
     });
   }, [model]);
 
+  /* STALE-HOVER PARKING. Browsers keep :hover flags on elements that move
+     under a stationary pointer until the next real pointer event — so after
+     a click-fold, surviving elements can keep painting fragments of the
+     preview ink with the mouse over nothing (owner caught it). On every fold
+     commit the thread parks its hover ink (CSS: .hover-parked resolves the
+     preview ink to rest ink); the first real pointer move unparks, which is
+     also exactly when the browser recomputes hover for real. */
+  const threadRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    const el = threadRef.current;
+    if (!el) return;
+    el.classList.add("hover-parked");
+    const unpark = () => el.classList.remove("hover-parked");
+    window.addEventListener("pointermove", unpark, { once: true });
+    return () => window.removeEventListener("pointermove", unpark);
+  }, [folds]);
+
   /* Focus follows the fold: the control the reader pressed unmounts when its
      subtree flips open/closed, so after the commit, focus lands on the new
      mark at the same station — before paint, so nothing flashes. preventScroll
@@ -866,7 +883,7 @@ export function Thread({
              * (`drops`) — and a take-off block draws the trunk running clean
              * past its whole reply bundle.
              */
-            <div className="thread">
+            <div className="thread" ref={threadRef}>
               {layout.segments.map((segment, i) => {
                 const final = i === layout.segments.length - 1;
                 const replies = segment.replies.length > 0;
@@ -898,7 +915,7 @@ export function Thread({
               })}
             </div>
           ) : (
-            <div className="thread">
+            <div className="thread" ref={threadRef}>
               <BranchView branch={layout.branch} place="root" />
             </div>
           )}
