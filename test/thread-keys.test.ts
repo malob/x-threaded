@@ -703,58 +703,6 @@ describe("the fold map", () => {
   });
 });
 
-describe("reveal and focus (zv / zx)", () => {
-  const t = thread(SPINE);
-
-  it("zv opens every ancestor of a hidden cursor and touches nothing else", () => {
-    // A deep link can land the cursor behind a default-closed segment fold —
-    // exactly what zv exists for.
-    const hidden: KeyState = { ...t.start, cursorId: t.id("y1") };
-    const result = t.press(hidden, "z", "v");
-    expect(result.state.cursorId).toBe(t.id("y1"));
-    expect(foldEntries(result.state)).toEqual(
-      [
-        [t.id("s1"), true],
-        [t.id("x1"), true],
-      ].sort() as [string, boolean][],
-    );
-    expect(t.visible(result.state)).toContain("y1");
-    expect(t.visible(result.state)).not.toContain("x2");
-    expect(result.commands).toEqual([scrollNearest]);
-  });
-
-  it("zx folds everything but the cursor's ancestry, in one atomic step", () => {
-    // Both segment blocks open, cursor deep in the first.
-    const open: KeyState = {
-      ...t.start,
-      cursorId: t.id("y1"),
-      folds: new Map([
-        [t.id("s1"), true],
-        [t.id("s2"), true],
-      ]),
-    };
-    const result = t.press(open, "z", "x");
-    // The killer assertion: zM alone would re-home the cursor to the root;
-    // zx must not, because the end state has the cursor visible.
-    expect(result.state.cursorId).toBe(t.id("y1"));
-    expect(t.visible(result.state)).toEqual(["s1", "x1", "y1", "y2", "s2", "s3"]);
-    expect(foldEntries(result.state)).toEqual(
-      [
-        [t.id("s1"), true],
-        [t.id("x1"), true],
-        [t.id("s2"), false],
-      ].sort() as [string, boolean][],
-    );
-    expect(result.commands).toEqual([scrollNearest, scrollCenter]);
-  });
-
-  it("both are quiet no-ops without a cursor", () => {
-    const bare: KeyState = { ...t.start, cursorId: null };
-    expect(foldEntries(t.press(bare, "z", "v").state)).toEqual([]);
-    expect(foldEntries(t.press(bare, "z", "x").state)).toEqual([]);
-  });
-});
-
 describe("purity", () => {
   it("never writes to the state it was handed", () => {
     const t = thread(FORK);
@@ -799,7 +747,6 @@ describe("the keymap and the help it generates", () => {
       { keys: "za  zo  zc", desc: "toggle / open / close fold" },
       { keys: "zO / zC", desc: "open / close subtree recursively" },
       { keys: "zR / zM", desc: "open / close all folds" },
-      { keys: "zv / zx", desc: "reveal cursor's path / fold all but it" },
       { keys: "enter", desc: "toggle fold" },
       { keys: "gg / G", desc: "first / last post" },
       { keys: "zz", desc: "center current post" },

@@ -35,8 +35,6 @@ export type CommandId =
   | "fold-close-subtree"
   | "fold-open-all"
   | "fold-close-all"
-  | "fold-reveal"
-  | "fold-focus"
   | "center-cursor"
   | "open-on-x"
   | "copy-x-link"
@@ -70,7 +68,6 @@ const HELP_ROWS = [
   { id: "fold-one", desc: "toggle / open / close fold", sep: "  " },
   { id: "fold-subtree", desc: "open / close subtree recursively" },
   { id: "fold-all", desc: "open / close all folds" },
-  { id: "fold-path", desc: "reveal cursor's path / fold all but it" },
   { id: "fold-enter", desc: "toggle fold" },
   { id: "ends", desc: "first / last post" },
   { id: "center", desc: "center current post" },
@@ -133,8 +130,6 @@ export const KEYMAP: readonly Binding[] = [
   { seq: ["z", "C"], command: "fold-close-subtree", help: { row: "fold-subtree", label: "zC" } },
   { seq: ["z", "R"], command: "fold-open-all", help: { row: "fold-all", label: "zR" } },
   { seq: ["z", "M"], command: "fold-close-all", help: { row: "fold-all", label: "zM" } },
-  { seq: ["z", "v"], command: "fold-reveal", help: { row: "fold-path", label: "zv" } },
-  { seq: ["z", "x"], command: "fold-focus", help: { row: "fold-path", label: "zx" } },
 
   // Everything else.
   { seq: ["z", "z"], command: "center-cursor", help: { row: "center", label: "zz" } },
