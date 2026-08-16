@@ -1,6 +1,6 @@
 # x-threaded simplification survey
 
-Scope: all of `/Users/malo/Code/x-threaded/src` at HEAD (~4,340 lines). Nothing was modified.
+Scope: all of `src/` at HEAD (~4,340 lines). Nothing was modified.
 
 ## 1. Top-line: the three highest-leverage simplifications
 

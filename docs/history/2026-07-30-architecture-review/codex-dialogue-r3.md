@@ -12,7 +12,7 @@
 
    That preserves the useful case-(a) recovery while bounding the uncertain replay risk.
 
-   **Point 2 — Agree completely.** Centralize `parsePostId` and URL/path construction in `shared/urls.ts`; make [`snowflakeMs`](/Users/malo/Code/x-threaded/src/web/tree.ts:22) total—preferably returning `number | null` so callers must choose an explicit fallback. This removes the duplicated server/client regexes at [`server/urls.ts:7-23`](/Users/malo/Code/x-threaded/src/server/urls.ts:7) and [`App.tsx:20-27`](/Users/malo/Code/x-threaded/src/web/App.tsx:20), while eliminating the `BigInt()` render-time throw. Branding adds little residual value today: it would prevent theoretical `PostId`/`UserId` mixups, but no observed defect justifies propagating brands through every model and repository signature. Reconsider only if such mixups occur or multi-user boundaries expand.
+   **Point 2 — Agree completely.** Centralize `parsePostId` and URL/path construction in `shared/urls.ts`; make `snowflakeMs` (`src/web/tree.ts:22`) total—preferably returning `number | null` so callers must choose an explicit fallback. This removes the duplicated server/client regexes at `server/urls.ts:7-23` and `App.tsx:20-27`, while eliminating the `BigInt()` render-time throw. Branding adds little residual value today: it would prevent theoretical `PostId`/`UserId` mixups, but no observed defect justifies propagating brands through every model and repository signature. Reconsider only if such mixups occur or multi-user boundaries expand.
 
 2. **Residual reservation — NON-BLOCKING**
 

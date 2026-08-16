@@ -1,5 +1,11 @@
 # x-threaded architecture review — 2026-07-30
 
+> **Historical.** This reviews commit `ed8ea1a`. The roadmap below shipped in
+> full (stages 0–7), so the code it describes no longer exists in this shape
+> and its `file:line` references are stale by design — several of the files are
+> gone entirely. Kept for the reasoning, not the conclusions; see
+> [`../README.md`](../README.md).
+
 A full top-to-bottom review of the codebase at HEAD (`ed8ea1a`), framed as: *if a strong
 senior TypeScript developer built this exact feature set from scratch today, how would
 they architect it — and where does the current code diverge?* Constraint: the platform
