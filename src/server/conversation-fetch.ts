@@ -44,6 +44,16 @@ export interface ConversationFetchOptions {
    * charged for them itself.
    */
   known?: Post[];
+  /**
+   * The caller already persisted posts into this conversation during this
+   * same request — a bought lookup, stored the moment it landed so a retry
+   * can't be billed for it again. That store write happened before the run
+   * opened the row, so a "write-less" death is a lie here: the failure
+   * restore must not fire, or a lookup that arrived out of the since_id
+   * chain gets sealed under a `complete` label and every later refresh
+   * steps over the gap beneath it (Codex review of b1543e6, finding 1).
+   */
+  callerPersisted?: boolean;
 }
 
 export interface ConversationRun {
@@ -79,7 +89,7 @@ export async function runConversationFetch(
   const prior = await store.getConversationMeta(rootId);
   await store.openConversation(rootId, new Date().toISOString());
 
-  const written = { posts: false };
+  const written = { posts: opts.callerPersisted === true };
   try {
     return await fetchAndClose(store, xapi, meter, rootId, opts, prior, written);
   } catch (error) {
@@ -89,6 +99,14 @@ export async function runConversationFetch(
     // read and offer to sell back history that isn't missing. A run that DID
     // write stays partial: what it holds really is unfinished business until
     // a later run closes it.
+    //
+    // NOT concurrency-safe: `prior` is this run's snapshot, so with two
+    // overlapping runs on one conversation a write-less death here can lay
+    // its stale snapshot over the other run's newer lifecycle state (Codex
+    // review of b1543e6, finding 4). Guarding the restore can't fix that —
+    // nothing in the row identifies which run last touched it. The
+    // per-conversation run lease (ship-day list) is the real answer, and
+    // this restore should become lease-holder-only when it lands.
     if (!written.posts && prior !== null) {
       try {
         await store.upsertConversation({ rootId, ...prior });

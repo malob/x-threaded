@@ -518,6 +518,9 @@ export function buildApp({ store, xapi, maxPosts, oauth = null }: AppDeps): ApiA
     const { root } = await runConversationFetch(store, xapi, meter, rootId, {
       maxPosts,
       known: [requested],
+      // The bought lookup above was stored before the run opened the row, so
+      // the run must count it as this request's write (see the option's doc).
+      callerPersisted: !stored,
     });
 
     // A conversation you just pulled up is one you're about to read; unread is

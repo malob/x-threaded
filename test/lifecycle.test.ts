@@ -17,6 +17,7 @@ import type {
   RefreshResponse,
 } from "../src/shared/types";
 import { POST_READ_USD } from "../src/shared/pricing";
+import { XApiError } from "../src/server/xapi";
 import { makePost } from "./fixtures";
 import {
   fetchConversationRequest,
@@ -472,9 +473,10 @@ describe("what a run that dies restores", () => {
     servePages(xapi, [searchPage([root, replyTo(root)])]);
     await fetchConversationRequest(app, root.id);
 
+    const landed = replyTo(root);
     let served = 0;
     xapi.onSearchConversationPage = () => {
-      if (served++ === 0) return searchPage([replyTo(root)], { nextToken: "page2" });
+      if (served++ === 0) return searchPage([landed], { nextToken: "page2" });
       throw new Error("X died on page 2");
     };
     const failed = await app.request(`/api/conversations/${root.id}/refresh`, {
@@ -482,9 +484,58 @@ describe("what a run that dies restores", () => {
     });
     expect(failed.ok).toBe(false);
 
-    // Page one landed in the store, so this run's data really is unfinished
-    // business — partial stands until a later run closes it.
+    // Page one landed in the store — durably, not just as a flag the run
+    // kept for itself — so this run's data really is unfinished business,
+    // and partial stands until a later run closes it.
+    expect(await store.getPost(landed.id)).not.toBeNull();
     expect(await store.getConversationMeta(root.id)).toMatchObject({ status: "partial" });
+  });
+
+  it("counts the bought lookup a forced paste stored before the run", async () => {
+    const { app, store, xapi } = await makeTestApp();
+    const root = makePost();
+    xapi.onGetPost = () => root;
+    servePages(xapi, [searchPage([root, replyTo(root)])]);
+    await fetchConversationRequest(app, root.id);
+    expect(await store.getConversationMeta(root.id)).toMatchObject({ status: "complete" });
+
+    // A forced paste of a reply we've never seen: the route buys the lookup
+    // and stores it BEFORE the run opens the row. When the run then dies on
+    // its first page, the row must stay partial — that reply arrived outside
+    // the since_id chain, and restoring `complete` over it would seal a gap
+    // no ordinary refresh can ever see past.
+    const stray = replyTo(root);
+    xapi.onGetPost = () => stray;
+    xapi.onSearchConversationPage = () => {
+      throw new Error("X died before page one");
+    };
+    const failed = await fetchConversationRequest(app, stray.id, { force: true });
+    expect(failed.ok).toBe(false);
+
+    expect(await store.getPost(stray.id)).not.toBeNull();
+    expect(await store.getConversationMeta(root.id)).toMatchObject({ status: "partial" });
+  });
+
+  it("reports the fetch's own error even when the restore write fails too", async () => {
+    const { app, store, xapi } = await makeTestApp();
+    const root = makePost();
+    xapi.onGetPost = () => root;
+    servePages(xapi, [searchPage([root, replyTo(root)])]);
+    await fetchConversationRequest(app, root.id);
+
+    // The run dies with X's own status AND the restore write fails on top.
+    // The 401 is the error with something to say (it carries the login
+    // link); a store failure during cleanup must not replace it with a 500.
+    xapi.onSearchConversationPage = () => {
+      throw new XApiError("X API 401 on /tweets/search/all", 401);
+    };
+    store.upsertConversation = () => {
+      throw new Error("store died during restore");
+    };
+    const failed = await app.request(`/api/conversations/${root.id}/refresh`, {
+      method: "POST",
+    });
+    expect(failed.status).toBe(401);
   });
 
   it("leaves a row that was already partial partial, first death and second", async () => {
