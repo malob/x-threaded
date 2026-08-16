@@ -19,12 +19,15 @@
   // Deploy-to-Cloudflare button in the README auto-provisions a database for
   // whoever forks this; a pinned id would aim their Worker at ours.
   //
-  // Migrations still work without it: `wrangler d1 migrations apply x-threaded
-  // --remote` matches this entry by `database_name`, then resolves the UUID
-  // over the API (GET /accounts/:id/d1/database/x-threaded), so all it needs is
-  // `wrangler login` and a database of that name on the account. Confirmed
-  // 2026-07-30 against wrangler 4.115 (d1/utils.ts `getDatabaseByNameOrBinding`,
-  // which only requires an id when the name is missing too).
+  // Migrations still work without it: wrangler matches this entry by binding
+  // or by `database_name`, then resolves the UUID over the API, so all it
+  // needs is `wrangler login` and a database bound here. Confirmed 2026-07-30
+  // against wrangler 4.115 (d1/utils.ts `getDatabaseByNameOrBinding`, which
+  // only requires an id when both are missing).
+  //
+  // package.json's scripts pass the BINDING (`DB`), not the database name, on
+  // purpose: the Deploy-to-Cloudflare button lets whoever deploys choose their
+  // own database name, and a command hardcoding "x-threaded" would miss it.
   //
   // There is no --dry-run for that command; `--local` is the rehearsal, and it
   // shares the `d1_migrations` ledger with the runner in

@@ -1,12 +1,14 @@
 /**
- * The migration runner, with the baselining case front and centre.
+ * The migration runner.
  *
- * Baselining is the one piece of this that can destroy something: it decides
- * whether an existing database gets its migrations *run* or merely *recorded*.
- * Guess wrong towards running and 0003's ALTER TABLE throws on Malo's real
- * data/x-threaded.sqlite; guess wrong towards recording and a fresh database
- * silently comes up with no tables. So all three shapes are pinned here —
- * fresh, pre-ledger-with-data, and already-ledgered.
+ * Until 2026-08-15 this file was dominated by baselining — deciding whether an
+ * existing database should have each migration *run* or merely *recorded* —
+ * because databases existed that predated the ledger. Folding 0001-0006 into
+ * one baseline retired that whole question, and the tests for it went with it.
+ * What remains is the property that replaced them, pinned first below: a
+ * database whose ledger already names a migration is not touched by it. That
+ * is what lets a live deployment survive the fold, so it is the one to keep
+ * passing.
  */
 import { Database } from "bun:sqlite";
 import { describe, expect, it } from "bun:test";
@@ -19,74 +21,6 @@ import {
   type Migration,
 } from "../src/server/db/migrations";
 
-/**
- * The schema a pre-Stage-2b local database has, verbatim: the retired `SCHEMA`
- * constant from src/server/storage.ts, which `applySchema` ran on every
- * startup. Copied here rather than imported because the point of the stage was
- * to delete it — this is a fixture describing databases that already exist on
- * disk, not a schema anything should still be producing.
- */
-const LEGACY_SCHEMA = `
-CREATE TABLE IF NOT EXISTS conversations (
-  root_id TEXT PRIMARY KEY,
-  root_author_handle TEXT NOT NULL,
-  root_text TEXT NOT NULL,
-  root_created_at TEXT NOT NULL,
-  fetched_at TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS posts (
-  id TEXT PRIMARY KEY,
-  conversation_id TEXT NOT NULL,
-  parent_id TEXT,
-  author_id TEXT NOT NULL,
-  author_handle TEXT NOT NULL,
-  author_name TEXT NOT NULL,
-  author_avatar_url TEXT,
-  text TEXT NOT NULL,
-  created_at TEXT NOT NULL,
-  likes INTEGER NOT NULL DEFAULT 0,
-  replies INTEGER NOT NULL DEFAULT 0,
-  reposts INTEGER NOT NULL DEFAULT 0,
-  quotes INTEGER NOT NULL DEFAULT 0,
-  bookmarks INTEGER NOT NULL DEFAULT 0,
-  impressions INTEGER NOT NULL DEFAULT 0,
-  entities_json TEXT,
-  quoted_post_id TEXT,
-  media_json TEXT,
-  fetched_at TEXT NOT NULL
-);
-
-CREATE INDEX IF NOT EXISTS idx_posts_conversation ON posts(conversation_id);
-
-CREATE TABLE IF NOT EXISTS read_state (
-  post_id TEXT PRIMARY KEY,
-  read_at TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS oauth_tokens (
-  id TEXT PRIMARY KEY,
-  access_token TEXT NOT NULL,
-  refresh_token TEXT NOT NULL,
-  expires_at INTEGER NOT NULL,
-  scope TEXT NOT NULL DEFAULT '',
-  user_id TEXT,
-  updated_at TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS settings (
-  key TEXT PRIMARY KEY,
-  value TEXT NOT NULL,
-  updated_at TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS saved_items (
-  post_id TEXT PRIMARY KEY,
-  source TEXT NOT NULL,
-  added_at TEXT NOT NULL
-);
-`;
-
 /** A stand-in for the migrations later stages will add. */
 const FUTURE: Migration = {
   name: "0007_future.sql",
@@ -97,16 +31,15 @@ ALTER TABLE settings ADD COLUMN note TEXT;`,
 const MIGRATIONS = loadMigrations();
 const MIGRATION_NAMES = MIGRATIONS.map((migration) => migration.name);
 
+/** The wrangler-shaped ledger, as `applyMigrations` creates it. */
+const LEDGER_DDL = `CREATE TABLE IF NOT EXISTS "d1_migrations"(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT UNIQUE,
+  applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL)`;
+
 /** A driver over an empty in-memory database, with nothing applied to it. */
 function emptyDriver(): SqlDriver {
   return bunDriverFor(new Database(":memory:"));
-}
-
-/** A driver over a database in the shape the retired `SCHEMA` produced. */
-function legacyDriver(): SqlDriver {
-  const db = new Database(":memory:");
-  db.run(LEGACY_SCHEMA);
-  return bunDriverFor(db);
 }
 
 async function ledger(driver: SqlDriver): Promise<string[]> {
@@ -128,15 +61,49 @@ async function columns(driver: SqlDriver, table: string): Promise<string[]> {
 
 describe("loadMigrations", () => {
   it("reads migrations/ in applied order", () => {
-    expect(MIGRATION_NAMES).toEqual([
-      "0001_init.sql",
-      "0002_oauth_tokens.sql",
-      "0003_oauth_user_id.sql",
-      "0004_settings_and_saved.sql",
-      "0005_token_lease.sql",
-      "0006_conversation_lifecycle.sql",
-    ]);
+    expect(MIGRATION_NAMES).toEqual(["0001_init.sql"]);
     expect(MIGRATIONS.every((migration) => migration.sql.length > 0)).toBe(true);
+  });
+});
+
+/**
+ * The fold's load-bearing guarantee. Every database that existed when
+ * 0001-0006 became one file has 0001_init.sql in its ledger, and the baseline
+ * kept that name precisely so those databases skip it. If this ever fails, a
+ * deployment's schema is being rewritten under it.
+ */
+describe("applyMigrations — a database whose ledger already names the migration", () => {
+  it("does not run it, whatever the file now contains", async () => {
+    const db = new Database(":memory:");
+    db.run(LEDGER_DDL);
+    db.run(`INSERT INTO d1_migrations (name) VALUES ('0001_init.sql')`);
+    // A table the baseline would create, deliberately the wrong shape: if the
+    // migration ran, this CREATE ... IF NOT EXISTS would be a silent no-op and
+    // the column would be missing, so assert on something a re-run destroys.
+    db.run(`CREATE TABLE settings (key TEXT PRIMARY KEY, sentinel TEXT)`);
+    db.run(`INSERT INTO settings (key, sentinel) VALUES ('k', 'untouched')`);
+    const driver = bunDriverFor(db);
+
+    await applyMigrations(driver, MIGRATIONS);
+
+    expect(await driver.all(`SELECT sentinel FROM settings`)).toEqual([{ sentinel: "untouched" }]);
+    expect(await ledger(driver)).toEqual(["0001_init.sql"]);
+    // And the tables the baseline would have made are still absent, proving
+    // the skip was total rather than partial.
+    expect(await tables(driver)).not.toContain("posts");
+  });
+
+  it("still applies a migration added after it", async () => {
+    const db = new Database(":memory:");
+    db.run(LEDGER_DDL);
+    db.run(`INSERT INTO d1_migrations (name) VALUES ('0001_init.sql')`);
+    db.run(`CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)`);
+    const driver = bunDriverFor(db);
+
+    await applyMigrations(driver, [...MIGRATIONS, FUTURE]);
+
+    expect(await ledger(driver)).toEqual(["0001_init.sql", FUTURE.name]);
+    expect(await columns(driver, "settings")).toContain("note");
   });
 });
 
@@ -157,9 +124,43 @@ describe("applyMigrations — a fresh database", () => {
       "sqlite_sequence",
     ]);
     expect(await ledger(driver)).toEqual(MIGRATION_NAMES);
-    // 0003 is an ALTER TABLE, so its column proves the file ran rather than
-    // the CREATE TABLE in 0002 happening to include it.
-    expect(await columns(driver, "oauth_tokens")).toContain("user_id");
+  });
+
+  /**
+   * The columns the folded 0002-0006 contributed. Spelled out because the
+   * baseline is now the only place they are declared: if one is dropped while
+   * rewriting that file, nothing else in the suite necessarily notices.
+   */
+  it("carries every column the folded migrations added", async () => {
+    const driver = emptyDriver();
+
+    await applyMigrations(driver, MIGRATIONS);
+
+    expect(await columns(driver, "conversations")).toEqual(
+      expect.arrayContaining(["status", "full_read_at"]),
+    );
+    expect(await columns(driver, "oauth_tokens")).toEqual(
+      expect.arrayContaining([
+        "user_id",
+        "state",
+        "lease_id",
+        "lease_until",
+        "recovery_used",
+        "broken_reason",
+        "username",
+        "display_name",
+      ]),
+    );
+    // The lease protocol reads an untouched row as ready and unleased.
+    await driver.run(
+      `INSERT INTO oauth_tokens (id, access_token, refresh_token, expires_at, updated_at)
+       VALUES ('self', 'a', 'r', 1, '2024-01-01')`,
+    );
+    expect(
+      await driver.first<{ state: string; recovery_used: number }>(
+        `SELECT state, recovery_used FROM oauth_tokens WHERE id = 'self'`,
+      ),
+    ).toEqual({ state: "ready", recovery_used: 0 });
   });
 
   it("keeps the ledger in wrangler's shape", async () => {
@@ -175,7 +176,7 @@ describe("applyMigrations — a fresh database", () => {
     expect(typeof row?.applied_at).toBe("string");
   });
 
-  it("does not baseline a database whose tables are none of ours", async () => {
+  it("is not deterred by unrelated tables sharing the database", async () => {
     const db = new Database(":memory:");
     db.run(`CREATE TABLE unrelated (id TEXT PRIMARY KEY)`);
     const driver = bunDriverFor(db);
@@ -186,80 +187,47 @@ describe("applyMigrations — a fresh database", () => {
     expect(await ledger(driver)).toEqual(MIGRATION_NAMES);
   });
 
+  it("re-runs after a crash that left the ledger created but empty", async () => {
+    const db = new Database(":memory:");
+    db.run(LEDGER_DDL);
+    const driver = bunDriverFor(db);
+
+    await applyMigrations(driver, MIGRATIONS);
+
+    expect(await ledger(driver)).toEqual(MIGRATION_NAMES);
+    expect(await tables(driver)).toContain("posts");
+  });
+
   it("is what bunDriver gives you", async () => {
     const driver = await bunDriver(":memory:");
 
     expect(await ledger(driver)).toEqual(MIGRATION_NAMES);
   });
-});
-
-describe("applyMigrations — a pre-ledger database with data", () => {
-  /** A legacy database with a row in it, as Malo's data/x-threaded.sqlite is. */
-  async function seededLegacyDriver(): Promise<SqlDriver> {
-    const driver = legacyDriver();
-    await driver.run(
-      `INSERT INTO posts (id, conversation_id, author_id, author_handle, author_name,
-         text, created_at, fetched_at)
-       VALUES ('1', '1', '100', 'someone', 'Someone', 'hello', '2024-01-01', '2024-01-01')`,
-    );
-    await driver.run(
-      `INSERT INTO oauth_tokens (id, access_token, refresh_token, expires_at, scope, user_id,
-         updated_at)
-       VALUES ('self', 'a', 'r', 1, 'tweet.read', '42', '2024-01-01')`,
-    );
-    return driver;
-  }
-
-  it("records the migrations instead of running them, keeping the data", async () => {
-    const driver = await seededLegacyDriver();
-
-    // Without baselining this throws: 0003 adds oauth_tokens.user_id, which
-    // addMissingColumns already added to this database.
-    await applyMigrations(driver, MIGRATIONS);
-
-    expect(await ledger(driver)).toEqual(MIGRATION_NAMES);
-    expect(await driver.all(`SELECT id FROM posts`)).toEqual([{ id: "1" }]);
-    expect(await driver.all(`SELECT user_id FROM oauth_tokens`)).toEqual([{ user_id: "42" }]);
-  });
-
-  it("still applies a migration newer than the baseline", async () => {
-    const driver = await seededLegacyDriver();
-
-    await applyMigrations(driver, [...MIGRATIONS, FUTURE]);
-
-    expect(await ledger(driver)).toEqual([...MIGRATION_NAMES, FUTURE.name]);
-    expect(await columns(driver, "settings")).toContain("note");
-    expect(await driver.all(`SELECT id FROM posts`)).toEqual([{ id: "1" }]);
-  });
 
   /**
-   * The conversation lifecycle columns arrive on a database whose rows were
-   * all written by the old ordering — a full fetch that finished — so calling
-   * them complete, and dating their full read from fetched_at, is a statement
-   * about those rows rather than a guess.
+   * Not just presence: the live store must read and write against a database
+   * built from the baseline alone. This is the test that would have caught a
+   * column dropped in the fold.
    */
-  it("baselines existing conversations as completely read", async () => {
-    const driver = await seededLegacyDriver();
-    await driver.run(
-      `INSERT INTO conversations (root_id, root_author_handle, root_text, root_created_at,
-         fetched_at)
-       VALUES ('1', 'someone', 'hello', '2024-01-01', '2024-02-03T04:05:06.000Z')`,
-    );
+  it("produces a schema the store can actually use", async () => {
+    const driver = await bunDriver(":memory:");
+    const { SqlStore } = await import("../src/server/db/store");
+    const { makePost } = await import("./fixtures");
+    const store = new SqlStore(driver);
 
-    await applyMigrations(driver, MIGRATIONS);
-
-    expect(await driver.all(`SELECT status, full_read_at FROM conversations`)).toEqual([
-      { status: "complete", full_read_at: "2024-02-03T04:05:06.000Z" },
-    ]);
-  });
-
-  it("baselines only once — a later run behaves like any other", async () => {
-    const driver = await seededLegacyDriver();
-    await applyMigrations(driver, MIGRATIONS);
-
-    await applyMigrations(driver, [...MIGRATIONS, FUTURE]);
-
-    expect(await ledger(driver)).toEqual([...MIGRATION_NAMES, FUTURE.name]);
+    const post = makePost({ text: "built from the baseline" });
+    await store.upsertPosts([post]);
+    expect(await store.getPost(post.id)).toEqual(post);
+    await store.setReadState([post.id], true);
+    expect(await store.getUnreadIds(post.conversationId)).toEqual([]);
+    await store.putOAuthTokens("self", {
+      accessToken: "a",
+      refreshToken: "r",
+      expiresAt: 1,
+      scope: "s",
+      userId: "42",
+    });
+    expect((await store.getOAuthTokens("self"))?.userId).toBe("42");
   });
 });
 
@@ -302,21 +270,19 @@ describe("applyMigrations — an already-ledgered database", () => {
 
 describe("splitStatements", () => {
   it("splits on bare semicolons and trims", () => {
-    expect(splitStatements("SELECT 1;\n\nSELECT 2;\n")).toEqual(["SELECT 1", "SELECT 2"]);
+    expect(splitStatements(`SELECT 1; SELECT 2;`)).toEqual(["SELECT 1", "SELECT 2"]);
   });
 
   it("tolerates a missing trailing semicolon", () => {
-    expect(splitStatements("SELECT 1")).toEqual(["SELECT 1"]);
+    expect(splitStatements(`SELECT 1`)).toEqual(["SELECT 1"]);
   });
 
   it("drops line comments, semicolons and apostrophes included", () => {
-    const sql = `-- Cache the user's ID; it is billable to look up.
-SELECT 1;`;
-    expect(splitStatements(sql)).toEqual(["SELECT 1"]);
+    expect(splitStatements(`-- what's this; really\nSELECT 1;`)).toEqual(["SELECT 1"]);
   });
 
   it("drops block comments", () => {
-    expect(splitStatements("/* one; two */ SELECT 1;")).toEqual(["SELECT 1"]);
+    expect(splitStatements(`/* a; b */ SELECT 1;`)).toEqual(["SELECT 1"]);
   });
 
   it("keeps a semicolon inside a string literal", () => {
@@ -326,143 +292,21 @@ SELECT 1;`;
   });
 
   it("keeps a doubled quote and the semicolon after it together", () => {
-    expect(splitStatements(`INSERT INTO t VALUES ('it''s;fine');`)).toEqual([
-      `INSERT INTO t VALUES ('it''s;fine')`,
+    expect(splitStatements(`INSERT INTO t VALUES ('it''s;');`)).toEqual([
+      `INSERT INTO t VALUES ('it''s;')`,
     ]);
   });
 
   it("does not treat a comment marker inside a literal as a comment", () => {
-    expect(splitStatements(`SELECT '-- not a comment';`)).toEqual([`SELECT '-- not a comment'`]);
+    expect(splitStatements(`INSERT INTO t VALUES ('a--b'); SELECT 1;`)).toEqual([
+      `INSERT INTO t VALUES ('a--b')`,
+      `SELECT 1`,
+    ]);
   });
 
   it("finds every statement in the real migrations", () => {
     const statements = MIGRATIONS.flatMap((migration) => splitStatements(migration.sql));
-    expect(statements).toHaveLength(18);
+    expect(statements).toHaveLength(7);
     expect(statements.every((statement) => !statement.includes("--"))).toBe(true);
-  });
-});
-
-/**
- * Databases from schema eras older than the retired SCHEMA constant: the
- * Stage 2b adversarial review showed a single posts-table sentinel would
- * falsely record migrations these never ran.
- */
-describe("applyMigrations — historical partial schemas", () => {
-  it("records only what is present and runs the rest (pre-oauth era)", async () => {
-    // The 0001-era shape: posts/conversations/read_state, nothing later.
-    // conversations is spelled out as 0001 created it, because a later
-    // migration backfills one of its columns from another.
-    const db = new Database(":memory:");
-    db.run(`
-      CREATE TABLE posts (id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL);
-      CREATE TABLE conversations (
-        root_id TEXT PRIMARY KEY, root_author_handle TEXT NOT NULL,
-        root_text TEXT NOT NULL, root_created_at TEXT NOT NULL, fetched_at TEXT NOT NULL);
-      CREATE TABLE read_state (post_id TEXT PRIMARY KEY);
-    `);
-    db.run(`INSERT INTO posts (id, conversation_id) VALUES ('1', '1')`);
-    const driver = bunDriverFor(db);
-
-    await applyMigrations(driver, MIGRATIONS);
-
-    // All four end up in the ledger — 0001 by detection, the rest by running.
-    expect(await ledger(driver)).toEqual(MIGRATION_NAMES);
-    const present = await tables(driver);
-    for (const table of ["oauth_tokens", "settings", "saved_items"]) {
-      expect(present).toContain(table);
-    }
-    expect(await columns(driver, "oauth_tokens")).toContain("user_id");
-    expect(await driver.first(`SELECT id FROM posts WHERE id = '1'`)).not.toBeNull();
-  });
-
-  it("survives a crash that left the ledger created but empty", async () => {
-    // A legacy database plus an empty ledger: the pre-fix code replayed the
-    // migrations here and died on 0003's duplicate column.
-    const db = new Database(":memory:");
-    db.run(LEGACY_SCHEMA);
-    const driver = bunDriverFor(db);
-    await driver.run(`CREATE TABLE IF NOT EXISTS "d1_migrations"(
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      name TEXT UNIQUE,
-      applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL)`);
-
-    await applyMigrations(driver, MIGRATIONS);
-
-    expect(await ledger(driver)).toEqual(MIGRATION_NAMES);
-    // Re-run stays a no-op.
-    await applyMigrations(driver, MIGRATIONS);
-    expect(await ledger(driver)).toEqual(MIGRATION_NAMES);
-  });
-});
-
-describe("applyMigrations — interrupted legacy schemas self-heal", () => {
-  it("fills in read_state when a legacy crash left only posts/conversations", async () => {
-    const db = new Database(":memory:");
-    db.run(`
-      CREATE TABLE posts (id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL);
-      CREATE TABLE conversations (
-        root_id TEXT PRIMARY KEY, root_author_handle TEXT NOT NULL,
-        root_text TEXT NOT NULL, root_created_at TEXT NOT NULL, fetched_at TEXT NOT NULL);
-    `);
-    const driver = bunDriverFor(db);
-
-    await applyMigrations(driver, MIGRATIONS);
-
-    expect(await tables(driver)).toContain("read_state");
-    expect(await ledger(driver)).toEqual(MIGRATION_NAMES);
-  });
-
-  it("fills in saved_items when settings exists without it", async () => {
-    const db = new Database(":memory:");
-    db.run(LEGACY_SCHEMA);
-    db.run(`DROP TABLE saved_items`);
-    const driver = bunDriverFor(db);
-
-    await applyMigrations(driver, MIGRATIONS);
-
-    expect(await tables(driver)).toContain("saved_items");
-    expect(await ledger(driver)).toEqual(MIGRATION_NAMES);
-  });
-});
-
-describe("applyMigrations — restored early-era backups", () => {
-  it("repairs columns that arrived after their table's CREATE, then the store works", async () => {
-    // A backup from before posts gained entities/quoted/media/bookmarks and
-    // before oauth_tokens gained user_id — the shape addMissingColumns fixed.
-    const db = new Database(":memory:");
-    db.run(`
-      CREATE TABLE conversations (
-        root_id TEXT PRIMARY KEY, root_author_handle TEXT NOT NULL,
-        root_text TEXT NOT NULL, root_created_at TEXT NOT NULL, fetched_at TEXT NOT NULL);
-      CREATE TABLE posts (
-        id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL, parent_id TEXT,
-        author_id TEXT NOT NULL, author_handle TEXT NOT NULL, author_name TEXT NOT NULL,
-        author_avatar_url TEXT, text TEXT NOT NULL, created_at TEXT NOT NULL,
-        likes INTEGER NOT NULL DEFAULT 0, replies INTEGER NOT NULL DEFAULT 0,
-        reposts INTEGER NOT NULL DEFAULT 0, quotes INTEGER NOT NULL DEFAULT 0,
-        impressions INTEGER NOT NULL DEFAULT 0, fetched_at TEXT NOT NULL);
-      CREATE TABLE read_state (post_id TEXT PRIMARY KEY, read_at TEXT NOT NULL);
-      CREATE TABLE oauth_tokens (
-        id TEXT PRIMARY KEY, access_token TEXT NOT NULL, refresh_token TEXT NOT NULL,
-        expires_at INTEGER NOT NULL, scope TEXT NOT NULL, updated_at TEXT NOT NULL);
-    `);
-    const driver = bunDriverFor(db);
-
-    await applyMigrations(driver, MIGRATIONS);
-
-    // Not just presence: the live store must read and write (the failure mode
-    // was "no column named bookmarks" on first upsert after certification).
-    const { SqlStore } = await import("../src/server/db/store");
-    const { makePost } = await import("./fixtures");
-    const store = new SqlStore(driver);
-    const post = makePost({ text: "restored backup" });
-    await store.upsertPosts([post]);
-    expect(await store.getPost(post.id)).toEqual(post);
-    await store.setReadState([post.id], true);
-    expect(await store.getUnreadIds(post.conversationId)).toEqual([]);
-    await store.putOAuthTokens("self", {
-      accessToken: "a", refreshToken: "r", expiresAt: 1, scope: "s", userId: "42",
-    });
-    expect((await store.getOAuthTokens("self"))?.userId).toBe("42");
   });
 });

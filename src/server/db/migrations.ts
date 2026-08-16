@@ -18,6 +18,12 @@ import type { SqlDriver } from "./driver";
  * This replaces the pre-Stage-2b arrangement, where a `SCHEMA` constant, the
  * migration files, and an `addMissingColumns` column repair each described the
  * schema separately (2026-07-30 review, M8).
+ *
+ * A migration's identity is its file name, which is what let 0001-0006 be
+ * folded into a single baseline on 2026-08-15 without touching a live
+ * database: the name was already in every existing ledger, so every existing
+ * database skips it and only an empty one runs it. See the header comment of
+ * migrations/0001_init.sql.
  */
 
 export interface Migration {
@@ -58,64 +64,21 @@ const LEDGER_TABLE = "d1_migrations";
 const RECORD_SQL = `INSERT INTO "d1_migrations" (name) VALUES (?)`;
 
 /**
- * Migrations that must be *recorded without running* when their effect is
- * already present, probed by their distinctive schema artifact.
- *
- * Pre-ledger databases were built by the retired `SCHEMA` + `addMissingColumns`
- * path. Nearly every migration is pure `CREATE ... IF NOT EXISTS`, so on such
- * a database the right move is simply to RUN it — a no-op where the objects
- * exist, and self-healing where an interrupted legacy startup left only a
- * prefix of them (two adversarial-review rounds arrived here: a one-sentinel
- * baseline over-claimed on older eras, and per-migration single-artifact
- * probes still blessed partial prefixes). The sole exception is 0003, whose
- * bare `ALTER TABLE ADD COLUMN` throws when the column exists — the one case
- * where detection is the only honest option, and a column either exists or
- * doesn't, so its probe can't half-match.
- *
- * Future non-idempotent migrations must either be written idempotently or add
- * a probe here.
- */
-const RECORD_WITHOUT_RUN: Record<string, (driver: SqlDriver) => Promise<boolean>> = {
-  "0003_oauth_user_id.sql": (driver) => columnExists(driver, "oauth_tokens", "user_id"),
-};
-
-/**
- * Columns that arrived after their table's original CREATE, repaired the way
- * the retired `addMissingColumns` did.
- *
- * `IF NOT EXISTS` heals a missing table but not a table created by an early
- * schema before these columns existed — reachable today by restoring an old
- * backup of data/x-threaded.sqlite, which would otherwise be certified as
- * migrated and then fail on first write ("no column named bookmarks"). This
- * list is closed: it is every column the schema ever gained after its table,
- * which is exactly what the retired repair covered. Shapes older or stranger
- * than anything this repo's code ever wrote are out of scope and fail loudly
- * at first use, not silently.
- */
-const LEGACY_COLUMN_REPAIRS: Record<string, Record<string, string>> = {
-  posts: {
-    entities_json: "TEXT",
-    quoted_post_id: "TEXT",
-    media_json: "TEXT",
-    bookmarks: "INTEGER NOT NULL DEFAULT 0",
-  },
-  oauth_tokens: { user_id: "TEXT" },
-};
-
-/**
  * Bring `driver`'s database up to date with `migrations`, recording each in a
  * wrangler-compatible `d1_migrations` ledger. Already-recorded migrations are
  * skipped; each remaining one runs as a single atomic batch together with its
  * own ledger row, so a migration is either fully applied and recorded or
- * neither.
+ * neither. An interruption leaves the unrecorded migrations to re-run on the
+ * next start, so every restart converges.
  *
- * Baselining: unrecorded migrations RUN — they are idempotent, so a legacy or
- * partially-created schema is healed rather than guessed at — except the ones
- * in RECORD_WITHOUT_RUN whose probe finds their effect already present; those
- * are recorded without executing, at their ordinal position so the ledger
- * reads in migration order. Crash-safety is by re-derivation, not ceremony:
- * an interruption anywhere leaves a state where the idempotent migrations
- * re-run harmlessly and 0003 is re-detected, so every restart converges.
+ * There is no baselining step. Until 2026-08-15 there was an elaborate one —
+ * probes deciding whether to run or merely record each migration, plus a
+ * closed list of column repairs — because databases existed that predated the
+ * ledger, built by the retired `SCHEMA` + `addMissingColumns` path. The
+ * migration fold retired the last of them: every database now either has
+ * 0001_init.sql in its ledger and is current, or is empty and runs it. A
+ * database in neither state is not one this repo's code ever wrote, and it
+ * fails loudly at first use rather than being silently certified as migrated.
  */
 export async function applyMigrations(driver: SqlDriver, migrations: Migration[]): Promise<void> {
   const hadLedger = await tableExists(driver, LEDGER_TABLE);
@@ -130,20 +93,10 @@ export async function applyMigrations(driver: SqlDriver, migrations: Migration[]
 
   for (const migration of migrations) {
     if (applied.has(migration.name)) continue;
-    const probe = RECORD_WITHOUT_RUN[migration.name];
-    const alreadyPresent = probe ? await probe(driver) : false;
     await driver.batch([
-      ...(alreadyPresent ? [] : splitStatements(migration.sql).map((sql) => ({ sql, params: [] }))),
+      ...splitStatements(migration.sql).map((sql) => ({ sql, params: [] })),
       { sql: RECORD_SQL, params: [migration.name] },
     ]);
-  }
-
-  for (const [table, columns] of Object.entries(LEGACY_COLUMN_REPAIRS)) {
-    for (const [column, definition] of Object.entries(columns)) {
-      if (!(await columnExists(driver, table, column))) {
-        await driver.run(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
-      }
-    }
   }
 }
 
@@ -151,15 +104,6 @@ async function tableExists(driver: SqlDriver, name: string): Promise<boolean> {
   const row = await driver.first<{ name: string }>(
     `SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?`,
     [name],
-  );
-  return row !== null;
-}
-
-async function columnExists(driver: SqlDriver, table: string, column: string): Promise<boolean> {
-  if (!(await tableExists(driver, table))) return false;
-  const row = await driver.first<{ name: string }>(
-    `SELECT name FROM pragma_table_info(?) WHERE name = ?`,
-    [table, column],
   );
   return row !== null;
 }
