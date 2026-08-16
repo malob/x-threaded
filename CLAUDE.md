@@ -3,6 +3,13 @@
 A threaded reader for X/Twitter reply trees. One TypeScript repo, two server
 targets (Bun locally, Cloudflare Workers deployed), one set of routes.
 
+**Status: personal work in progress, public but not polished.** It was built
+for one user and has never been run by anyone else. Where something looks
+under-built for a general audience — a missing setting, an assumption that
+there is only one person using it, an error message written for someone who
+knows the code — it probably is exactly that, not a deliberate design worth
+preserving. Say so rather than working around it.
+
 This file is short on purpose — it loads into every session, so it holds only
 pointers and the handful of things that are specific to working here.
 

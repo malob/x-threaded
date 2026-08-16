@@ -1,5 +1,17 @@
 # x-threaded
 
+> [!WARNING]
+> **This is a personal work in progress.** It was built for one person's use,
+> and it has not been tested by anyone else, on anyone else's Cloudflare
+> account, or against anyone else's X data. It is not fitted for general use:
+> expect rough edges, expect to read the source when something is confusing,
+> and expect no support. It also spends real money on **your** X API account
+> every time it fetches — read [Costs](#costs) and set a spending limit before
+> you deploy it.
+>
+> If you want it anyway, [`DEPLOYING.md`](DEPLOYING.md) is honest about every
+> step, and [Limitations](#limitations) is honest about what's missing.
+
 A threaded reader for X/Twitter reply trees. Paste a post URL, get the full
 conversation as a navigable tree — the thing x.com's flattened reply view
 can't do. Keyboard-driven, with a saved queue fed by an X bookmark folder, a
