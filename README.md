@@ -12,29 +12,41 @@ that cache for free afterwards, and prices anything that would spend before
 you click it. There is no hosted instance and no account system — the
 deployment is yours.
 
+> **What you need first:** an X developer account with **pay-per-use billing**.
+> The free tier can't read conversations at all. Reads cost about $0.005 a
+> post, so a typical conversation is $0.25–$2.50 to load and free to revisit —
+> [set a spending limit](https://developer.x.com) before you start.
+
+## Try it locally
+
+Three minutes, no Cloudflare account, nothing exposed to the internet.
+
+```bash
+bun install && bun run build
+cp .env.example .env      # put your Bearer Token in X_BEARER_TOKEN
+bun run dev:server
+```
+
+Then open <http://localhost:8788> and paste any x.com post URL. That's the
+whole app — everything else is about reaching it from somewhere other than
+your laptop.
+
+## Deploy it
+
 [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/malob/x-threaded)
 
-## Deploy
+The button clones this repo into your GitHub, provisions a Worker and a D1
+database on the free tiers (no card), asks for your X token, and deploys.
 
-The button above provisions a Worker and a D1 database on the free tiers (no
-card required); it activates once this repo is public on GitHub. Afterwards,
-apply migrations and set your secrets as below.
+**[`DEPLOYING.md`](DEPLOYING.md) is the full procedure** — the button, the
+manual route, the Access gate, and connecting an X account for the Your posts
+tab and bookmark sync. Using Claude Code? Ask it to deploy this and point it
+at that file; it's written to be followed literally.
 
-Manually:
-
-```
-bun install && bun run build
-bunx wrangler login
-bunx wrangler deploy                               # auto-provisions D1
-bunx wrangler d1 migrations apply x-threaded --remote
-bunx wrangler secret put X_BEARER_TOKEN            # and any others you want
-```
-
-`scripts/push-secrets.sh` pushes the five credential-shaped values
-(`X_BEARER_TOKEN`, the two OAuth ones, `POLICY_AUD`, `TEAM_DOMAIN`) from your
-local `.env` in one go, skipping any that aren't set. If you put the Worker
-behind Cloudflare Access, note that `wrangler dev --remote` won't reach it
-without an Access service token.
+One thing worth knowing before you start: a deployed Worker holding a working
+X token is a way for anyone with the URL to spend your money, so the app
+**refuses to serve its API until you've either put a gate in front of it or
+said explicitly that you don't want one.** Localhost is never gated.
 
 ## Configuration
 
@@ -47,6 +59,7 @@ the app degrades cleanly without the rest.
 | `X_BEARER_TOKEN` | **Required.** App-only bearer; reads public conversations. |
 | `X_OAUTH_CLIENT_ID` / `X_OAUTH_CLIENT_SECRET` | Enables the Your posts tab and bookmark folder sync. |
 | `POLICY_AUD` / `TEAM_DOMAIN` | Verify Cloudflare Access JWTs, so the API fails closed if Access is turned off. |
+| `ALLOW_UNGATED` | `true` serves a deployed Worker with no gate at all. Deliberately explicit. |
 | `MAX_POSTS_PER_FETCH` | Safety cap per conversation load, 10–5000 (default 500 ≈ $2.50 worst case). A malformed value refuses to boot rather than uncapping spend. |
 | `PORT` / `DB_PATH` | Bun server only: listen port, SQLite file. |
 | `WORKER_PORT` | `scripts/dev-worker.sh` only: port for `wrangler dev`. |
@@ -61,22 +74,17 @@ The user-context features need one interactive authorization per deployment at
 per user per client id, so two deployments sharing a client id revoke each
 other's tokens on login — see [`docs/x-api-notes.md`](docs/x-api-notes.md) N15.
 
-## Running locally
+## Development
 
-Both targets serve the same app on `:8788`.
-
-```
-bun install
-bun run build            # build the SPA into dist/
-
-bun run dev:server       # Bun + SQLite file
-# or
-bunx wrangler d1 migrations apply x-threaded --local
+```bash
+bun run dev:server       # Bun + a SQLite file
+# or, to run the Worker itself:
+bun run db:migrate       # applies migrations to the local D1 simulation
 ./scripts/dev-worker.sh  # wrangler dev + local D1
 ```
 
-For frontend work with HMR, also run `bun run dev:web` (Vite on `:5173`,
-proxying `/api` and `/auth` to `:8788`).
+Both targets serve the same app on `:8788`. For frontend work with HMR, also
+run `bun run dev:web` (Vite on `:5173`, proxying `/api` and `/auth` to `:8788`).
 
 Gates: `bun run lint`, `bun run typecheck`, `bun test`, `bun run test:d1`
 (the storage contract against a real local-workerd D1 binding — slow, so it is
@@ -136,6 +144,17 @@ is where the bill lives, and where you should set a spending limit.
 
 ## Further reading
 
-[`docs/x-api-notes.md`](docs/x-api-notes.md) — what this app has measured
-about the X API, including several behaviours X's own docs contradict. Read it
-before changing anything that talks to X.
+- [`DEPLOYING.md`](DEPLOYING.md) — the full deploy procedure, start to finish.
+- [`docs/x-api-notes.md`](docs/x-api-notes.md) — what this app has measured
+  about the X API, including several behaviours X's own docs contradict. Read
+  it before changing anything that talks to X.
+- [`docs/design/`](docs/design/README.md) — the design record for the thread
+  view: the "avatar graph" grammar, the rulings behind it, and three
+  self-contained mockups you can open in a browser.
+- [`docs/history/`](docs/history/README.md) — superseded work kept for its
+  reasoning, including a seven-reviewer architecture audit and the adversarial
+  dialogue that settled its roadmap. Describes older code, not this one.
+
+## License
+
+MIT — see [`LICENSE`](LICENSE).

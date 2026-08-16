@@ -9,5 +9,25 @@
   },
   "enabledPlugins": {
     "cloudflare@cloudflare": true
+  },
+  "permissions": {
+    "allow": [
+      "Bash(bun install)",
+      "Bash(bun run lint)",
+      "Bash(bun run typecheck)",
+      "Bash(bun run build)",
+      "Bash(bun test)",
+      "Bash(bun test *)",
+      "Bash(bun run test:d1)",
+      "Bash(bun run db:migrate)",
+      "Bash(git status)",
+      "Bash(git status *)",
+      "Bash(git diff)",
+      "Bash(git diff *)",
+      "Bash(git log)",
+      "Bash(git log *)",
+      "Bash(git show *)",
+      "Bash(git branch)"
+    ]
   }
 }

@@ -11,3 +11,6 @@ data/
 *.tsbuildinfo
 # Agent worktrees (Claude Code process scaffolding).
 .claude/worktrees/
+# Per-developer Claude Code settings (enabled plugins, extra permissions).
+# .claude/settings.json is the shared one and IS committed.
+.claude/settings.local.json

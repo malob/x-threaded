@@ -11,7 +11,23 @@
     "start": "bun src/server/index.ts",
     "test": "bun test",
     "test:d1": "bun test ./test-d1/storage-contract.d1.ts",
-    "typecheck": "tsc -b --force"
+    "typecheck": "tsc -b --force",
+    "db:migrate": "wrangler d1 migrations apply DB --local",
+    "db:migrate:remote": "wrangler d1 migrations apply DB --remote",
+    "deploy": "wrangler d1 migrations apply DB --remote && wrangler deploy"
+  },
+  "cloudflare": {
+    "bindings": {
+      "X_BEARER_TOKEN": {
+        "description": "**Required.** App-only Bearer Token from an app on your own [X developer account](https://developer.x.com) — the free tier cannot read conversations, so the account needs pay-per-use billing enabled. X bills you about **$0.005 per post read**, so set a spending limit in the developer console before you load anything."
+      },
+      "X_OAUTH_CLIENT_ID": {
+        "description": "Optional. OAuth 2.0 Client ID from the same X app, with *Type of App* set to **confidential client**. Adds the Your posts tab and bookmark-folder sync. Register `https://<your-worker-url>/auth/callback` as the app's callback first, and give this deployment an X app of its own — X keeps only one live grant per user per client id."
+      },
+      "X_OAUTH_CLIENT_SECRET": {
+        "description": "Optional. The matching OAuth 2.0 Client Secret. Use the portal's *Show* button rather than regenerating — regenerating revokes any grant you already have."
+      }
+    }
   },
   "dependencies": {
     "@tanstack/react-query": "^5.101.4",
