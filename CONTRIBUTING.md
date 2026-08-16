@@ -51,18 +51,10 @@ at someone else's database. Per-deployment values are secrets, documented in
 edit `0001_init.sql`, which existing databases have already recorded and will
 skip. Apply migrations before deploying a Worker that needs new columns.
 
-## Where the knowledge lives
-
-- **[`docs/x-api-notes.md`](docs/x-api-notes.md)** — read this before changing
-  anything that talks to X. It records what this app has *measured* about the
-  API, including several behaviours X's own documentation contradicts. Entries
-  are labelled Measured or Recorded so you can tell evidence from documentation.
-- **[`docs/design/`](docs/design/README.md)** — the design record for the thread
-  view. Read it before touching `styles.css`, `Thread.tsx`, or `PostView.tsx`.
-  Its own trust order applies: where those documents disagree with `src/web` on
-  paint numbers, the app is the truth.
-- **[`docs/history/`](docs/history/README.md)** — superseded. Good reasoning,
-  stale line numbers. Don't take it as a description of the current code.
+Before changing anything that talks to X, read
+[`docs/x-api-notes.md`](docs/x-api-notes.md); before touching the thread view,
+[`docs/design/`](docs/design/README.md). The README's Further reading section
+says what each one is for.
 
 ## Two traps worth knowing about
 
@@ -96,17 +88,14 @@ the point where they happen. Before "fixing" one, read the comment next to it:
 
 ## Known gaps
 
-The list the code means when a comment says "ship-day list":
+They live in the README's [Limitations](README.md#limitations) section, written
+as what a user notices rather than as what's absent from the code. Two notes
+for whoever picks one up:
 
-- **No per-conversation run lease.** Two overlapping runs on one conversation
-  can overwrite each other's lifecycle status, and the write-less-death restore
-  in `conversation-fetch.ts` can lay a stale snapshot over newer state. Benign
-  for a single user driving one browser; the lease is the real fix, and the
-  restore should become lease-holder-only when it lands.
-- **No in-app settings surface.** `MAX_POSTS_PER_FETCH` is env-only, though the
-  `settings` table and `/api/settings` route already exist, and the two
-  automatic fetches (open-refresh, own-posts scan on reload) have no toggles.
-- **`/api/auth/status` can report `user: null`** for a token row that predates
-  profile caching. It heals on any re-login.
-- **No placeholder cards for unavailable bookmarks.** Sync reports them; the
-  Saved tab doesn't show them.
+- The **per-conversation run lease** is the one with a dependency attached: the
+  write-less-death restore in `conversation-fetch.ts` should become
+  lease-holder-only when the lease lands, and the comment there says so.
+- The **settings surface** is further along than it looks — the `settings`
+  table and the `/api/settings` route already exist and back the bookmark
+  folder. What's missing is UI and a runtime read of the fetch cap, with the
+  environment variable staying the hard ceiling.

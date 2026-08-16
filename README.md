@@ -86,14 +86,9 @@ bun run db:migrate       # applies migrations to the local D1 simulation
 Both targets serve the same app on `:8788`. For frontend work with HMR, also
 run `bun run dev:web` (Vite on `:5173`, proxying `/api` and `/auth` to `:8788`).
 
-Gates: `bun run lint`, `bun run typecheck`, `bun test`, `bun run test:d1`
-(the storage contract against a real local-workerd D1 binding — slow, so it is
-kept out of the default run), `bun run build`.
-
-`typecheck` is `tsc -b --force` on purpose. Incremental `tsc -b` trusts the
-`.tsbuildinfo` files, and a stale one reports success over sources that no
-longer compile — a gate that can pass on broken code is not a gate. The full
-build takes about a second and a half.
+Before opening a pull request, run the gates and read
+[`CONTRIBUTING.md`](CONTRIBUTING.md) — it has them in one place, along with the
+invariants worth preserving and two failure modes that are silent.
 
 ## Architecture
 
@@ -141,6 +136,28 @@ post was read minutes earlier — so the estimate leans high rather than low.
 X's free `/2/usage/tweets` endpoint reports daily post-consumption counts, so
 it cross-checks the post counts and not the dollars; the X Developer Console
 is where the bill lives, and where you should set a spending limit.
+
+## Limitations
+
+Known and deliberate, as of this writing:
+
+- **It assumes one person.** Nothing coordinates two conversation fetches
+  running at once, so refreshing the same conversation from two tabs
+  simultaneously can leave its "partial / complete" state wrong. A later full
+  read repairs it. A per-conversation run lease is the real fix and isn't
+  written yet.
+- **Replies from protected accounts stay "unavailable post" placeholders.**
+  Full-archive search accepts the app-only bearer token *only*, so conversation
+  trees can never be fetched as the signed-in user — connecting your X account
+  doesn't change this. See [`docs/x-api-notes.md`](docs/x-api-notes.md) N5.
+- **Settings are environment variables, not a settings screen.**
+  `MAX_POSTS_PER_FETCH` can only be changed by redeploying, and the two
+  automatic fetches — the refresh when you open a cached conversation, and the
+  own-posts scan on reload — have no toggles.
+- **Bookmarks you can't read are reported but not shown.** Sync tells you how
+  many were unavailable; the Saved tab has no placeholder card for them.
+- **A token row from before profile caching reports `user: null`** on
+  `/api/auth/status`. It heals on any re-login.
 
 ## Further reading
 
