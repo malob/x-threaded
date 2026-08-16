@@ -12,6 +12,9 @@
  */
 import { Database } from "bun:sqlite";
 import { describe, expect, it } from "bun:test";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { bunDriver, bunDriverFor } from "../src/server/db/bun";
 import type { SqlDriver } from "../src/server/db/driver";
 import {
@@ -202,6 +205,24 @@ describe("applyMigrations — a fresh database", () => {
     const driver = await bunDriver(":memory:");
 
     expect(await ledger(driver)).toEqual(MIGRATION_NAMES);
+  });
+
+  /**
+   * A fresh clone has no data/ — it is gitignored — and bun:sqlite creates the
+   * file but not the directory above it, so `bun run dev:server` died on
+   * SQLITE_CANTOPEN before serving anything. Found by cloning the repo and
+   * following the README, which is the only way this one shows up: every other
+   * caller either uses :memory: or a directory that already exists.
+   */
+  it("creates the directory its database file lives in", async () => {
+    const root = mkdtempSync(join(tmpdir(), "x-threaded-db-"));
+    const nested = join(root, "data", "deeper", "x-threaded.sqlite");
+
+    const driver = await bunDriver(nested);
+
+    expect(existsSync(nested)).toBe(true);
+    expect(await ledger(driver)).toEqual(MIGRATION_NAMES);
+    rmSync(root, { recursive: true, force: true });
   });
 
   /**

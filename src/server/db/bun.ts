@@ -1,4 +1,6 @@
 import { Database, type SQLQueryBindings } from "bun:sqlite";
+import { mkdirSync } from "node:fs";
+import { dirname } from "node:path";
 import { MAX_SQL_PARAMS, type SqlDriver, type SqlStatement } from "./driver";
 import { applyMigrations, loadMigrations } from "./migrations";
 
@@ -11,6 +13,12 @@ import { applyMigrations, loadMigrations } from "./migrations";
  * migration runner is shared with D1, which is not.
  */
 export async function bunDriver(path: string, migrationsDir?: string): Promise<SqlDriver> {
+  // bun:sqlite creates the file but not the directory holding it, and the
+  // default DB_PATH lives in data/, which is gitignored — so a fresh clone has
+  // no such directory and the server died on SQLITE_CANTOPEN before it could
+  // serve anything. Cheap to do for any DB_PATH rather than just that one: a
+  // user pointing this somewhere new should not have to mkdir first.
+  if (path !== ":memory:" && path !== "") mkdirSync(dirname(path), { recursive: true });
   const db = new Database(path, { create: true });
   db.run("PRAGMA journal_mode = WAL;");
   const driver = bunDriverFor(db);
