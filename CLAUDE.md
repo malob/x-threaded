@@ -5,6 +5,11 @@ targets (Bun locally, Cloudflare Workers deployed), one set of routes. The
 README's Architecture section is the map; this file is the things that will
 bite you.
 
+[`CONTRIBUTING.md`](CONTRIBUTING.md) carries the rest of what this file would
+otherwise repeat: the invariants reviews keep returning to, two traps that fail
+silently, the behaviours that look like bugs and are deliberate, and the known
+gaps a code comment means when it says "Known gaps".
+
 **Deploying, or setting someone up from scratch? Follow
 [`DEPLOYING.md`](DEPLOYING.md) start to finish.** Don't improvise the order —
 step 4 exists because a deployed Worker with no gate lets anyone spend the

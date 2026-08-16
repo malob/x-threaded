@@ -145,6 +145,8 @@ is where the bill lives, and where you should set a spending limit.
 ## Further reading
 
 - [`DEPLOYING.md`](DEPLOYING.md) — the full deploy procedure, start to finish.
+- [`CONTRIBUTING.md`](CONTRIBUTING.md) — the gates, the invariants worth
+  preserving, the traps that fail silently, and what's knowingly missing.
 - [`docs/x-api-notes.md`](docs/x-api-notes.md) — what this app has measured
   about the X API, including several behaviours X's own docs contradict. Read
   it before changing anything that talks to X.

@@ -105,8 +105,8 @@ export async function runConversationFetch(
     // its stale snapshot over the other run's newer lifecycle state (Codex
     // review of b1543e6, finding 4). Guarding the restore can't fix that —
     // nothing in the row identifies which run last touched it. The
-    // per-conversation run lease (ship-day list) is the real answer, and
-    // this restore should become lease-holder-only when it lands.
+    // per-conversation run lease (CONTRIBUTING.md, "Known gaps") is the real
+    // answer, and this restore should become lease-holder-only when it lands.
     if (!written.posts && prior !== null) {
       try {
         await store.upsertConversation({ rootId, ...prior });
