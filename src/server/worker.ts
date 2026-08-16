@@ -14,6 +14,8 @@ interface Env {
   POLICY_AUD?: string;
   /** https://<team>.cloudflareaccess.com */
   TEAM_DOMAIN?: string;
+  /** "true" to serve this deployment with no gate; see access.ts. */
+  ALLOW_UNGATED?: string;
   /** OAuth 2.0 user context; absent means user-context features are off. */
   X_OAUTH_CLIENT_ID?: string;
   X_OAUTH_CLIENT_SECRET?: string;
@@ -31,6 +33,8 @@ export default {
     const denial = await checkAccess(request, {
       policyAud: env.POLICY_AUD,
       teamDomain: env.TEAM_DOMAIN,
+      // Exact match on purpose: "false", "0" and typos all leave the gate up.
+      allowUngated: env.ALLOW_UNGATED === "true",
     });
     if (denial) return denial;
 

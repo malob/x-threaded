@@ -5,7 +5,18 @@ export interface AccessConfig {
   policyAud?: string;
   /** e.g. https://<team>.cloudflareaccess.com */
   teamDomain?: string;
+  /**
+   * Deliberately serve a deployed Worker with no gate in front of it. Off
+   * unless ALLOW_UNGATED is exactly "true", so a typo fails safe.
+   */
+  allowUngated?: boolean;
 }
+
+const UNGATED =
+  "this deployment has no gate in front of it, and an open Worker holding a " +
+  "working X token lets anyone on the internet spend your X credits. Put it " +
+  "behind Cloudflare Access and set POLICY_AUD + TEAM_DOMAIN, or set " +
+  "ALLOW_UNGATED=true to accept the risk. See the README, 'Gating your deployment'.";
 
 const jwksCache = new Map<string, ReturnType<typeof createRemoteJWKSet>>();
 
@@ -30,17 +41,29 @@ function denied(reason: string): Response {
  * rather than silently serving the API (and spending X API credits) to
  * anyone. Returns null when the request may proceed, or a 403 Response.
  *
- * Enforcement is skipped when the deployment hasn't configured Access
- * (no policyAud/teamDomain — e.g. a fork that chose to run without it) and
- * on localhost, where `wrangler dev` runs with no Access in front.
+ * Two escapes, in this order:
+ *
+ * 1. localhost is never gated — `wrangler dev` and the Bun server both run
+ *    with no Access in front, and neither is reachable from the internet.
+ * 2. A *deployed* Worker with no Access configured is refused rather than
+ *    served. This used to be allowed, as an escape hatch for forks that
+ *    didn't want a gate, but the hatch pointed the wrong way: the deployer
+ *    who never reads this file is exactly the one who ends up with a public
+ *    URL billing their card at $0.005 a post. Wanting no gate is now
+ *    something you say out loud, with ALLOW_UNGATED.
+ *
+ * Only /api/* and /auth/* reach the Worker (wrangler.jsonc `run_worker_first`),
+ * so a refusal here still serves the SPA — the app loads and reports why it
+ * can't talk to its own API, which is the state that explains itself best.
  */
 export async function checkAccess(
   request: Request,
-  { policyAud, teamDomain }: AccessConfig,
+  { policyAud, teamDomain, allowUngated }: AccessConfig,
 ): Promise<Response | null> {
-  if (!policyAud || !teamDomain) return null;
   const hostname = new URL(request.url).hostname;
   if (hostname === "localhost" || hostname === "127.0.0.1") return null;
+
+  if (!policyAud || !teamDomain) return allowUngated ? null : denied(UNGATED);
 
   const token =
     request.headers.get("Cf-Access-Jwt-Assertion") ??
