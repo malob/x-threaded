@@ -440,6 +440,75 @@ describe("what a run that dies before its first page leaves", () => {
   });
 });
 
+describe("what a run that dies restores", () => {
+  it("puts a complete conversation's row back when it wrote nothing", async () => {
+    const { app, store, xapi } = await makeTestApp();
+    const root = makePost();
+    xapi.onGetPost = () => root;
+    servePages(xapi, [searchPage([root, replyTo(root)])]);
+    await fetchConversationRequest(app, root.id);
+    const before = await store.getConversationMeta(root.id);
+    expect(before).toMatchObject({ status: "complete" });
+
+    // The refresh's first request dies — a bad token, an outage. Opening the
+    // run stamped the row partial; a death with nothing written proved
+    // nothing, so the stamp must come back off, or held history gets
+    // re-labeled as missing and offered for sale again.
+    xapi.onSearchConversationPage = () => {
+      throw new Error("X died before page one");
+    };
+    const failed = await app.request(`/api/conversations/${root.id}/refresh`, {
+      method: "POST",
+    });
+    expect(failed.ok).toBe(false);
+
+    expect(await store.getConversationMeta(root.id)).toEqual(before);
+  });
+
+  it("keeps a mid-run death partial: the pages it wrote are real", async () => {
+    const { app, store, xapi } = await makeTestApp();
+    const root = makePost();
+    xapi.onGetPost = () => root;
+    servePages(xapi, [searchPage([root, replyTo(root)])]);
+    await fetchConversationRequest(app, root.id);
+
+    let served = 0;
+    xapi.onSearchConversationPage = () => {
+      if (served++ === 0) return searchPage([replyTo(root)], { nextToken: "page2" });
+      throw new Error("X died on page 2");
+    };
+    const failed = await app.request(`/api/conversations/${root.id}/refresh`, {
+      method: "POST",
+    });
+    expect(failed.ok).toBe(false);
+
+    // Page one landed in the store, so this run's data really is unfinished
+    // business — partial stands until a later run closes it.
+    expect(await store.getConversationMeta(root.id)).toMatchObject({ status: "partial" });
+  });
+
+  it("leaves a row that was already partial partial, first death and second", async () => {
+    const { app, store, xapi } = await makeTestApp();
+    const root = makePost();
+    xapi.onGetPost = () => root;
+    xapi.onSearchConversationPage = () => {
+      throw new Error("X died before page one");
+    };
+
+    // A first fetch with no prior row: the opened `partial` stamp is the
+    // honest state — a fetch never finished — and stays.
+    await fetchConversationRequest(app, root.id);
+    expect(await store.getConversationMeta(root.id)).toMatchObject({ status: "partial" });
+
+    // A retry dying the same way restores partial onto partial: a no-op.
+    const failed = await app.request(`/api/conversations/${root.id}/refresh`, {
+      method: "POST",
+    });
+    expect(failed.ok).toBe(false);
+    expect(await store.getConversationMeta(root.id)).toMatchObject({ status: "partial" });
+  });
+});
+
 describe("empty pages mid-search", () => {
   it("follows the token across an empty page instead of wedging", async () => {
     const harness = await makeTestApp();

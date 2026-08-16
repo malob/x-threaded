@@ -1,7 +1,7 @@
 import type { Post } from "../shared/types";
 import { persistFetchedPosts, resolveQuotedPosts } from "./conversations";
 import type { SpendMeter } from "./meter";
-import type { ConversationStatus, Storage } from "./storage";
+import type { ConversationMeta, ConversationStatus, Storage } from "./storage";
 import {
   conversationStartTime,
   MIN_SEARCH_PAGE_SIZE,
@@ -22,6 +22,12 @@ import {
  * a fetch that dies on page five leaves four pages of posts and a conversation
  * that knows it is missing history — which the resume path can go back for —
  * rather than either nothing at all or a cache quietly claiming to be whole.
+ *
+ * With one refinement: a run that dies having written *nothing* also proved
+ * nothing, so it restores whatever the row said before it opened. Without
+ * that, a refresh 401-ing on its first request re-labels a complete
+ * conversation partial and sends the reader off to buy history that was never
+ * missing (seen live, 2026-08-09).
  */
 
 export interface ConversationFetchOptions {
@@ -73,6 +79,42 @@ export async function runConversationFetch(
   const prior = await store.getConversationMeta(rootId);
   await store.openConversation(rootId, new Date().toISOString());
 
+  const written = { posts: false };
+  try {
+    return await fetchAndClose(store, xapi, meter, rootId, opts, prior, written);
+  } catch (error) {
+    // The open above stamped the row partial. A run that then died without
+    // persisting a single post proved nothing, so the stamp comes back off —
+    // for a conversation that was complete, leaving it would un-earn the full
+    // read and offer to sell back history that isn't missing. A run that DID
+    // write stays partial: what it holds really is unfinished business until
+    // a later run closes it.
+    if (!written.posts && prior !== null) {
+      try {
+        await store.upsertConversation({ rootId, ...prior });
+      } catch {
+        // The fetch error is the one worth reporting; a failed restore must
+        // not replace it.
+      }
+    }
+    throw error;
+  }
+}
+
+/**
+ * The run itself, from first page to closed row — split from the wrapper
+ * above so it can restore the row when this dies having written nothing.
+ * `written.posts` flips the moment any post lands in the store.
+ */
+async function fetchAndClose(
+  store: Storage,
+  xapi: XApiClient,
+  meter: SpendMeter,
+  rootId: string,
+  opts: ConversationFetchOptions,
+  prior: Omit<ConversationMeta, "rootId"> | null,
+  written: { posts: boolean },
+): Promise<ConversationRun> {
   const startTime = conversationStartTime(rootId);
   const posts: Post[] = [];
   const referencedById = new Map<string, Post>();
@@ -103,7 +145,9 @@ export async function runConversationFetch(
     for (const id of page.unresolvedMediaIds) unresolvedMedia.add(id);
     // Before the next request, which is the one that can fail: what this page
     // billed for is in the store either way.
-    await persistFetchedPosts(store, meter, [...page.posts, ...page.referenced]);
+    const landed = [...page.posts, ...page.referenced];
+    await persistFetchedPosts(store, meter, landed);
+    if (landed.length > 0) written.posts = true;
 
     nextToken = page.nextToken;
     if (!nextToken) {
@@ -137,6 +181,7 @@ export async function runConversationFetch(
     const refetched = meter.charge(await xapi.getPostsByIds(toRefetch)).posts;
     for (const post of refetched) referencedById.set(post.id, post);
     await store.upsertPosts(refetched);
+    if (refetched.length > 0) written.posts = true;
   }
 
   // What the pages returned wins over what the caller brought: a `known` post
@@ -161,6 +206,7 @@ export async function runConversationFetch(
     if (!fromPages.has(post.id)) extras.set(post.id, post);
   }
   await store.upsertPosts([...extras.values()]);
+  if (extras.size > 0) written.posts = true;
 
   // Running out of pages means nothing more is there — except for a since_id
   // run, which only ever learns that about the posts newer than its bound and
