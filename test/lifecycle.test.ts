@@ -195,6 +195,124 @@ describe("a budget-capped fetch", () => {
   });
 });
 
+describe("conversation response consistency", () => {
+  it("never labels a pre-finish post snapshot complete", async () => {
+    const { app, store } = await makeTestApp();
+    const root = makePost();
+    const lateReply = replyTo(root);
+    const startedAt = new Date().toISOString();
+    const runId = "finishing-run";
+    const now = Date.now();
+    await store.upsertPosts([root]);
+    await store.upsertConversation({
+      rootId: root.id,
+      rootAuthorHandle: root.authorHandle,
+      rootText: root.text,
+      rootCreatedAt: root.createdAt,
+      fetchedAt: startedAt,
+      status: "partial",
+      fullReadAt: null,
+    });
+    expect(
+      await store.claimConversationRun(
+        root.id,
+        runId,
+        startedAt,
+        now + 5 * 60_000,
+        now,
+        false,
+      ),
+    ).not.toBeNull();
+
+    const readSnapshot = store.getConversationResponseSnapshot.bind(store);
+    const readPosts = store.getPosts.bind(store);
+    let finished = false;
+    store.getConversationResponseSnapshot = async (conversationId) => {
+      const snapshot = await readSnapshot(conversationId);
+      if (conversationId === root.id && !finished) {
+        finished = true;
+        expect(
+          await store.renewConversationRun(root.id, runId, now + 5 * 60_000, true),
+        ).toBe(true);
+        await store.upsertPosts([lateReply]);
+        expect(
+          await store.finishConversationRun(runId, {
+            rootId: root.id,
+            rootAuthorHandle: root.authorHandle,
+            rootText: root.text,
+            rootCreatedAt: root.createdAt,
+            fetchedAt: new Date().toISOString(),
+            status: "complete",
+            fullReadAt: new Date().toISOString(),
+          }),
+        ).toBe(true);
+      }
+      return snapshot;
+    };
+
+    const response = await app.request(`/api/conversations/${root.id}`);
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as ConversationResponse;
+
+    // This reader captured the old subset while the run was partial. The run
+    // completed before the response finished, but that must not relabel this
+    // older snapshot as whole.
+    expect(body.posts.map((post) => post.id)).toEqual([root.id]);
+    expect(body.truncated).toBe(true);
+    expect((await store.getConversationMeta(root.id))?.status).toBe("complete");
+    expect(await readPosts(root.id)).toHaveLength(2);
+  });
+
+  it("never labels posts read after a complete-to-partial claim complete", async () => {
+    const { app, store } = await makeTestApp();
+    const root = makePost();
+    const firstNewReply = replyTo(root);
+    const completedAt = new Date().toISOString();
+    await store.upsertPosts([root]);
+    await store.upsertConversation({
+      rootId: root.id,
+      rootAuthorHandle: root.authorHandle,
+      rootText: root.text,
+      rootCreatedAt: root.createdAt,
+      fetchedAt: completedAt,
+      status: "complete",
+      fullReadAt: completedAt,
+    });
+
+    const readSnapshot = store.getConversationResponseSnapshot.bind(store);
+    let claimed = false;
+    store.getConversationResponseSnapshot = async (conversationId) => {
+      if (conversationId === root.id && !claimed) {
+        claimed = true;
+        const now = Date.now();
+        expect(
+          await store.claimConversationRun(
+            root.id,
+            "refreshing-run",
+            new Date(now).toISOString(),
+            now + 5 * 60_000,
+            now,
+            false,
+          ),
+        ).not.toBeNull();
+        expect(
+          await store.renewConversationRun(root.id, "refreshing-run", now + 5 * 60_000, true),
+        ).toBe(true);
+        await store.upsertPosts([firstNewReply]);
+      }
+      return await readSnapshot(conversationId);
+    };
+
+    const response = await app.request(`/api/conversations/${root.id}`);
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as ConversationResponse;
+
+    expect(body.posts.map((post) => post.id)).toEqual([root.id, firstNewReply.id]);
+    expect(body.truncated).toBe(true);
+    expect((await store.getConversationMeta(root.id))?.status).toBe("partial");
+  });
+});
+
 describe("POST /api/conversations/:rootId/resume", () => {
   /** A partial conversation holding its root and its newest `count` replies. */
   async function partial(count = 2): Promise<TestApp & { root: Post; held: Post[] }> {
@@ -278,10 +396,11 @@ describe("POST /api/conversations/:rootId/resume", () => {
 });
 
 /**
- * Which branch a refresh takes is a spending decision: a full re-read is free
- * only on the same UTC day as the last one, and X's dedup is keyed on the read
- * itself, not on our row. So the fork reads `full_read_at` — the last time we
- * actually re-read the whole thing — and nothing else may move it.
+ * Which branch a refresh takes is a spending decision: a full reread gets
+ * credit for already-stored page posts only on the same UTC day as the last
+ * one, and X's dedup is keyed on the read itself, not on our row. Ancillary
+ * lookups remain separately billable. So the fork reads `full_read_at` — the
+ * last time we actually reread the whole thing — and nothing else may move it.
  */
 describe("POST /api/conversations/:rootId/refresh — the full-read fork", () => {
   const TODAY = "2024-06-01T12:00:00.000Z";
@@ -529,7 +648,7 @@ describe("what a run that dies restores", () => {
     xapi.onSearchConversationPage = () => {
       throw new XApiError("X API 401 on /tweets/search/all", 401);
     };
-    store.upsertConversation = () => {
+    store.abortConversationRun = () => {
       throw new Error("store died during restore");
     };
     const failed = await app.request(`/api/conversations/${root.id}/refresh`, {
@@ -557,6 +676,304 @@ describe("what a run that dies restores", () => {
     });
     expect(failed.ok).toBe(false);
     expect(await store.getConversationMeta(root.id)).toMatchObject({ status: "partial" });
+  });
+});
+
+describe("per-conversation run ownership", () => {
+  afterEach(() => {
+    setSystemTime();
+  });
+
+  it("409s an overlapping active run before it can call X", async () => {
+    const { app, store, xapi } = await makeTestApp();
+    const root = makePost();
+    await seedConversation(store, root);
+
+    let firstStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      firstStarted = resolve;
+    });
+    let finishFirst!: (page: ReturnType<typeof searchPage>) => void;
+    const firstPage = new Promise<ReturnType<typeof searchPage>>((resolve) => {
+      finishFirst = resolve;
+    });
+    let calls = 0;
+    xapi.onSearchConversationPage = () => {
+      if (calls++ === 0) {
+        firstStarted();
+        return firstPage;
+      }
+      return searchPage([root]);
+    };
+
+    const first = fetchConversationRequest(app, root.id, { force: true });
+    await started;
+    const overlapping = await fetchConversationRequest(app, root.id, { force: true });
+    finishFirst(searchPage([root]));
+    const original = await first;
+
+    expect(original.status).toBe(200);
+    expect(overlapping.status).toBe(409);
+    expect(await overlapping.json()).toEqual({ error: "conversation fetch already in progress" });
+    expect(xapi.count("searchConversationPage")).toBe(1);
+  });
+
+  it("renews a long live pagination before its original lease can be recovered", async () => {
+    const START = "2024-06-01T12:00:00.000Z";
+    setSystemTime(new Date(START));
+    const { app, store, xapi } = await makeTestApp();
+    const root = makePost({ createdAt: START });
+    await seedConversation(store, root);
+
+    let thirdPageStarted!: () => void;
+    const onThirdPage = new Promise<void>((resolve) => {
+      thirdPageStarted = resolve;
+    });
+    let finishThirdPage!: (page: ReturnType<typeof searchPage>) => void;
+    const thirdPage = new Promise<ReturnType<typeof searchPage>>((resolve) => {
+      finishThirdPage = resolve;
+    });
+    let calls = 0;
+    xapi.onSearchConversationPage = () => {
+      if (calls++ === 0) {
+        // Page one records the durable write bit, but does so at the original
+        // clock time. Its lease therefore still ends at 12:05.
+        return searchPage([root, replyTo(root)], { nextToken: "page-2" });
+      }
+      if (calls === 2) {
+        // Page two returns near expiry. The write bit is already set, so the
+        // conditional renewal window—not first-write marking—extends the lease.
+        setSystemTime(new Date("2024-06-01T12:04:00.000Z"));
+        return searchPage([replyTo(root)], { nextToken: "page-3" });
+      }
+      thirdPageStarted();
+      return thirdPage;
+    };
+
+    const live = fetchConversationRequest(app, root.id, { force: true });
+    await onThirdPage;
+    // Past the original 12:05 lease, but still inside page two's renewal.
+    setSystemTime(new Date("2024-06-01T12:05:01.000Z"));
+    const overlapping = await fetchConversationRequest(app, root.id, { force: true });
+    finishThirdPage(searchPage([root]));
+
+    expect(overlapping.status).toBe(409);
+    expect((await live).status).toBe(200);
+    expect(xapi.count("searchConversationPage")).toBe(3);
+  });
+
+  it("keeps the original snapshot when both an expired owner and its recovery write nothing", async () => {
+    const ORIGINAL = "2024-06-01T12:00:00.000Z";
+    setSystemTime(new Date(ORIGINAL));
+    const { app, store, xapi } = await makeTestApp();
+    const root = makePost({ createdAt: ORIGINAL });
+    await seedConversation(store, root);
+    const before = await store.getConversationMeta(root.id);
+
+    let firstStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      firstStarted = resolve;
+    });
+    let failFirst!: (error: Error) => void;
+    const firstPage = new Promise<ReturnType<typeof searchPage>>((_, reject) => {
+      failFirst = reject;
+    });
+    let calls = 0;
+    xapi.onSearchConversationPage = () => {
+      if (calls++ === 0) {
+        firstStarted();
+        return firstPage;
+      }
+      throw new Error("the recovery also failed before page one");
+    };
+
+    const expired = fetchConversationRequest(app, root.id, { force: true });
+    await started;
+    setSystemTime(new Date("2024-06-01T12:10:00.000Z"));
+    expect((await fetchConversationRequest(app, root.id, { force: true })).status).toBe(500);
+    expect(await store.getConversationMeta(root.id)).toEqual(before);
+
+    failFirst(new Error("the expired owner finally failed"));
+    expect((await expired).status).toBe(500);
+    expect(await store.getConversationMeta(root.id)).toEqual(before);
+  });
+
+  it("keeps recovery partial when the expired owner persisted a page", async () => {
+    const ORIGINAL = "2024-06-01T12:00:00.000Z";
+    setSystemTime(new Date(ORIGINAL));
+    const { app, store, xapi } = await makeTestApp();
+    const root = makePost({ createdAt: ORIGINAL });
+    await seedConversation(store, root);
+    const landed = replyTo(root);
+
+    let secondPageStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      secondPageStarted = resolve;
+    });
+    let failOldPage!: (error: Error) => void;
+    const oldPage = new Promise<ReturnType<typeof searchPage>>((_, reject) => {
+      failOldPage = reject;
+    });
+    let calls = 0;
+    xapi.onSearchConversationPage = () => {
+      if (calls++ === 0) return searchPage([landed], { nextToken: "page-2" });
+      if (calls === 2) {
+        secondPageStarted();
+        return oldPage;
+      }
+      throw new Error("recovery failed before its first page");
+    };
+
+    const expired = fetchConversationRequest(app, root.id, { force: true });
+    await started;
+    setSystemTime(new Date("2024-06-01T12:10:00.000Z"));
+    expect((await fetchConversationRequest(app, root.id, { force: true })).status).toBe(500);
+    expect(await store.getPost(landed.id)).not.toBeNull();
+    expect(await store.getConversationMeta(root.id)).toMatchObject({ status: "partial" });
+
+    failOldPage(new Error("the expired page finally failed"));
+    expect((await expired).status).toBe(500);
+    expect(await store.getConversationMeta(root.id)).toMatchObject({ status: "partial" });
+  });
+
+  it("does not let an expired owner restore over the run that recovered its lease", async () => {
+    const ORIGINAL = "2024-06-01T12:00:00.000Z";
+    const RECOVERED = "2024-06-01T12:10:00.000Z";
+    setSystemTime(new Date(ORIGINAL));
+    const { app, store, xapi } = await makeTestApp();
+    const root = makePost({ createdAt: ORIGINAL });
+    await seedConversation(store, root);
+
+    let firstStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      firstStarted = resolve;
+    });
+    let failFirst!: (error: Error) => void;
+    const firstPage = new Promise<ReturnType<typeof searchPage>>((_, reject) => {
+      failFirst = reject;
+    });
+    let calls = 0;
+    xapi.onSearchConversationPage = () => {
+      if (calls++ === 0) {
+        firstStarted();
+        return firstPage;
+      }
+      return searchPage([root, replyTo(root)]);
+    };
+
+    const stale = fetchConversationRequest(app, root.id, { force: true });
+    await started;
+    // The first Worker is still suspended, but its durable lease has had a
+    // generous ten minutes to expire. A new invocation may recover the run.
+    setSystemTime(new Date(RECOVERED));
+    const recovered = await fetchConversationRequest(app, root.id, { force: true });
+    expect(recovered.status).toBe(200);
+    const afterRecovery = await store.getConversationMeta(root.id);
+    expect(afterRecovery).toMatchObject({
+      status: "complete",
+      fetchedAt: RECOVERED,
+      fullReadAt: RECOVERED,
+    });
+
+    failFirst(new Error("the expired holder finally failed"));
+    expect((await stale).status).toBe(500);
+    expect(await store.getConversationMeta(root.id)).toEqual(afterRecovery);
+  });
+
+  it("holds ownership until paid quote resolution finishes", async () => {
+    const { app, store, xapi } = await makeTestApp();
+    const quoted = makePost();
+    const root = makePost({ quotedPostId: quoted.id });
+    await seedConversation(store, root);
+    xapi.onSearchConversationPage = () => searchPage([root]);
+
+    let quoteStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      quoteStarted = resolve;
+    });
+    let finishQuote!: (value: { posts: Post[]; missing: [] }) => void;
+    const quote = new Promise<{ posts: Post[]; missing: [] }>((resolve) => {
+      finishQuote = resolve;
+    });
+    xapi.onGetPostsByIds = () => {
+      quoteStarted();
+      return quote;
+    };
+
+    const first = fetchConversationRequest(app, root.id, { force: true });
+    await started;
+    const overlapping = await fetchConversationRequest(app, root.id, { force: true });
+    finishQuote({ posts: [quoted], missing: [] });
+
+    expect(overlapping.status).toBe(409);
+    expect((await first).status).toBe(200);
+    expect(xapi.count("searchConversationPage")).toBe(1);
+    expect(xapi.count("getPostsByIds")).toBe(1);
+  });
+
+  it("does not let an expired quote response overwrite the recovered owner's snapshot", async () => {
+    const ORIGINAL = "2024-06-01T12:00:00.000Z";
+    setSystemTime(new Date(ORIGINAL));
+    const { app, store, xapi } = await makeTestApp();
+    const quoteId = "1796000000000000999";
+    const staleQuote = makePost({ id: quoteId, text: "stale quote snapshot" });
+    const currentQuote = makePost({ id: quoteId, text: "recovered owner's quote snapshot" });
+    const root = makePost({ createdAt: ORIGINAL, quotedPostId: quoteId });
+    await seedConversation(store, root);
+    xapi.onSearchConversationPage = () => searchPage([root]);
+
+    let staleQuoteStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      staleQuoteStarted = resolve;
+    });
+    let finishStaleQuote!: (value: { posts: Post[]; missing: [] }) => void;
+    const staleLookup = new Promise<{ posts: Post[]; missing: [] }>((resolve) => {
+      finishStaleQuote = resolve;
+    });
+    let quoteCalls = 0;
+    xapi.onGetPostsByIds = () => {
+      if (quoteCalls++ === 0) {
+        staleQuoteStarted();
+        return staleLookup;
+      }
+      return { posts: [currentQuote], missing: [] };
+    };
+
+    const stale = fetchConversationRequest(app, root.id, { force: true });
+    await started;
+    // The first owner is still waiting on X, but its lease has expired. The
+    // recovered owner buys and persists a newer snapshot, then closes its run.
+    setSystemTime(new Date("2024-06-01T12:10:00.000Z"));
+    expect((await fetchConversationRequest(app, root.id, { force: true })).status).toBe(200);
+    expect((await store.getPost(quoteId))?.text).toBe(currentQuote.text);
+
+    finishStaleQuote({ posts: [staleQuote], missing: [] });
+
+    expect((await stale).status).toBe(409);
+    expect((await store.getPost(quoteId))?.text).toBe(currentQuote.text);
+    expect(xapi.count("getPostsByIds")).toBe(2);
+  });
+
+  it("closes and releases ownership after paid quote resolution fails", async () => {
+    const { app, store, xapi } = await makeTestApp();
+    const quoted = makePost();
+    const root = makePost({ quotedPostId: quoted.id });
+    await seedConversation(store, root);
+    xapi.onSearchConversationPage = () => searchPage([root]);
+    xapi.onGetPostsByIds = () => {
+      throw new Error("quote lookup failed after the conversation was complete");
+    };
+
+    expect((await fetchConversationRequest(app, root.id, { force: true })).status).toBe(500);
+    expect(await store.getConversationMeta(root.id)).toMatchObject({ status: "complete" });
+
+    // The quote error travels to the client, but lifecycle close happened after
+    // the paid lookup and released the run. A retry can therefore claim rather
+    // than inheriting a stranded active lease.
+    xapi.onGetPostsByIds = () => ({ posts: [quoted], missing: [] });
+    expect((await fetchConversationRequest(app, root.id, { force: true })).status).toBe(200);
+    expect(xapi.count("searchConversationPage")).toBe(2);
+    expect(xapi.count("getPostsByIds")).toBe(2);
   });
 });
 

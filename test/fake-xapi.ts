@@ -9,8 +9,10 @@ import {
 import type { Post } from "../src/shared/types";
 import type {
   Billed,
+  BookmarkFolderLookupOptions,
   ConversationPage,
   MissingPost,
+  PostLookupOptions,
   SearchPageOptions,
   XApiClient,
 } from "../src/server/xapi";
@@ -84,8 +86,12 @@ export class FakeXApi implements XApiClient {
     return this.record("getPost", this.onGetPost, [id], () => postReads(1));
   }
 
-  getPostsByIds(ids: string[]): Promise<Billed<{ posts: Post[]; missing: MissingPost[] }>> {
-    return this.record("getPostsByIds", this.onGetPostsByIds, [ids], ({ posts }) =>
+  async getPostsByIds(
+    ids: string[],
+    opts: PostLookupOptions = {},
+  ): Promise<Billed<{ posts: Post[]; missing: MissingPost[] }>> {
+    for (let i = 0; i < ids.length; i += 100) await opts.beforeRequest?.();
+    return await this.record("getPostsByIds", this.onGetPostsByIds, [ids], ({ posts }) =>
       postReads(posts.length),
     );
   }
@@ -134,21 +140,46 @@ export class FakeXApi implements XApiClient {
     );
   }
 
-  getBookmarksByFolder(
+  async getBookmarksByFolder(
     accessToken: string,
     userId: string,
     folderId: string,
-    maxPages = 10,
+    opts: BookmarkFolderLookupOptions = {},
   ): Promise<
     Billed<{ posts: Post[]; ids: string[]; missing: MissingPost[]; complete: boolean }>
   > {
-    return this.record(
+    // A canned call stands for one folder-enumeration request. Tests that
+    // model more pages invoke the same callback from their canned handler;
+    // hydration boundaries are derivable from the returned IDs here.
+    await opts.beforeRequest?.();
+    const result = await this.record(
       "getBookmarksByFolder",
       this.onGetBookmarksByFolder,
-      [accessToken, userId, folderId, maxPages],
+      [accessToken, userId, folderId, opts],
       // Owned Reads for the stubs the folder pages enumerate, lookups for the
       // posts hydrating them returned — the nesting the real client bills.
       ({ posts, ids }) => addReceipts(ownedReads(ids.length), postReads(posts.length)),
     );
+    let hydratedCapacity = 0;
+    try {
+      for (let i = 0; i < result.value.ids.length; i += 100) {
+        await opts.beforeRequest?.();
+        hydratedCapacity = i + 100;
+      }
+    } catch (error) {
+      if (error instanceof Error) {
+        const carrier = error as Error & { spentReceipt?: Receipt };
+        carrier.spentReceipt = addReceipts(
+          carrier.spentReceipt ?? NO_READS,
+          addReceipts(
+            ownedReads(result.value.ids.length),
+            // The failed callback ran before this batch's outbound request.
+            postReads(Math.min(result.value.posts.length, hydratedCapacity)),
+          ),
+        );
+      }
+      throw error;
+    }
+    return result;
   }
 }

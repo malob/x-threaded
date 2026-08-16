@@ -17,15 +17,22 @@ full-archive search, which the free tier can't call at all. Sign up at
 [developer.x.com](https://developer.x.com), enable pay-per-use, and **set a
 spending limit in the developer console before you load anything.**
 
-Budget roughly $0.005 per post read, so a typical conversation costs $0.25 to
-$2.50 to load the first time. It's cached after that and re-reading is free.
-The app prices every action that spends before you click it, and the README's
-Costs section breaks down each one.
+Budget roughly $0.005 per post read. A 50–500-result main conversation search
+costs $0.25–$2.50, but referenced posts and follow-up media, root, or quote
+lookups can add reads. Cached posts render without another X read; opening one
+also refreshes it and can bill newly returned posts or missing ancillary
+lookups. The app shows estimates where it can and receipts for paid actions;
+the README's Costs section breaks down each one.
 
 **Bun.** `curl -fsSL https://bun.sh/install | bash`, or your package manager.
+The repo uses Bun's package runner, `bunx`, for Wrangler commands; Node and npm
+are not separate prerequisites.
 
-**A Cloudflare account**, only if you want it deployed. The free tier is
-enough and takes no card.
+**A Cloudflare account**, only if you want it deployed. The free tier takes no
+card. The repo's query-budget proof is deliberately narrower than “every
+default-cap request”: its five-page, no-ancillary fixture uses 14 of D1 Free's
+50 queries per invocation. Ancillary lookup shapes are not covered by that
+proof, and a full 5,000-main-result run is not Free-safe.
 
 ## 2. Run it locally
 
@@ -47,8 +54,8 @@ bun run dev:server
 confirm the tree renders. That's the whole app — everything below is about
 reaching it from somewhere other than your laptop.
 
-Local runs are never gated (see step 4) and use a SQLite file under `data/`
-rather than D1.
+Local Bun runs are never gated (see step 4), bind only to `127.0.0.1`, and use
+a SQLite file under `data/` rather than D1.
 
 ## 3. Deploy to Cloudflare
 
@@ -63,25 +70,30 @@ Clones the repo into your own GitHub, provisions a D1 database, asks for
 `X_BEARER_TOKEN` (and the OAuth pair, which you can leave blank), then builds
 and deploys — applying migrations on the way, via this repo's `deploy` script.
 It also wires up Workers Builds, so later pushes to your copy redeploy
-automatically.
+automatically. Keep both commands Cloudflare detects on the setup screen: the
+package `build` script produces `dist/`, then the package `deploy` script
+rebuilds it defensively, applies migrations, and deploys the Worker and assets.
 
 ### By hand
 
 ```bash
 bunx wrangler login
-bunx wrangler deploy              # creates the Worker, provisions D1
-bun run db:migrate:remote         # only now does the database exist
+bun run build                      # creates fresh frontend assets in dist/
+bunx wrangler deploy               # creates the Worker, provisions D1
+bun run db:migrate:remote          # only now does the database exist
 bunx wrangler secret put X_BEARER_TOKEN
 ```
 
-The order matters on a first deploy and only on a first deploy: `wrangler
-deploy` is what provisions the D1 database, so migrations can't run before it.
-Afterwards `bun run deploy` does both in the right order, and that's the
-command to use from then on.
+The exceptional deploy-before-migrate order applies only to first bootstrap:
+`wrangler deploy` is what provisions the D1 database, so migrations cannot run
+before it. Afterwards `bun run deploy` enforces the normal order — rebuild
+`dist/`, apply pending migrations, then deploy the Worker and its fresh assets.
+That's the command to use from then on.
 
-`scripts/push-secrets.sh` pushes every credential-shaped value from your local
-`.env` in one go, skipping any that aren't set, if you'd rather not run
-`secret put` repeatedly.
+`scripts/push-secrets.sh` pushes the credentials, Access settings, and fetch cap
+from your local `.env` in one go, skipping any that aren't set, if you'd rather
+not run `secret put` repeatedly. It deliberately never pushes `ALLOW_UNGATED`;
+turning off the deployment gate remains a separate, explicit operation.
 
 **Verify:** `curl https://<your-worker>.workers.dev/api/saved` should answer
 403 with a message about having no gate. That's step 4 talking, and it means
@@ -133,8 +145,16 @@ own data from $0.005 to $0.001 a read.
 2. `bunx wrangler secret put X_OAUTH_CLIENT_ID` and
    `bunx wrangler secret put X_OAUTH_CLIENT_SECRET`. Read the secret with the
    portal's *Show* button — regenerating it revokes any grant you already have.
-3. Visit `https://<your-worker>/auth/login` once and approve. Costs $0.010,
-   one time.
+3. Visit `https://<your-worker>/auth/login` once and approve. The OAuth exchange
+   itself does not perform a billed User Read. The first folder or timeline
+   action that needs `/2/users/me` may cost $0.010 once; the app caches that
+   identity with the grant and reports the charge in the action's UI.
+
+The bookmark-folder picker loads folders only when you open it. Folder listing
+is free apart from that possible first identity lookup; selecting a folder saves
+the setting in the app database and immediately runs the billable first sync.
+Settings and folder failures stay visibly distinct from an empty folder list
+and offer a retry, while lookup and sync charges are shown in the UI.
 
 **Give each deployment its own X app.** A developer account allows three. X
 keeps at most one live grant per user per client id, so authorizing a second

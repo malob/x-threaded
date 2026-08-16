@@ -1,7 +1,7 @@
 import { Database, type SQLQueryBindings } from "bun:sqlite";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
-import { MAX_SQL_PARAMS, type SqlDriver, type SqlStatement } from "./driver";
+import type { SqlDriver, SqlRunResult, SqlStatement } from "./driver";
 import { applyMigrations, loadMigrations } from "./migrations";
 
 /**
@@ -33,8 +33,6 @@ export async function bunDriver(path: string, migrationsDir?: string): Promise<S
  */
 export function bunDriverFor(db: Database): SqlDriver {
   return {
-    maxParams: MAX_SQL_PARAMS,
-
     async first<T>(sql: string, params: unknown[] = []): Promise<T | null> {
       return db.query<T, SQLQueryBindings[]>(sql).get(...bind(params)) ?? null;
     },
@@ -48,12 +46,15 @@ export function bunDriverFor(db: Database): SqlDriver {
       return { rowsAffected: changes };
     },
 
-    async batch(statements: SqlStatement[]): Promise<void> {
-      if (statements.length === 0) return;
-      db.transaction(() => {
+    async batch(statements: SqlStatement[]): Promise<SqlRunResult[]> {
+      if (statements.length === 0) return [];
+      return db.transaction(() => {
+        const results: SqlRunResult[] = [];
         for (const { sql, params } of statements) {
-          db.query<unknown, SQLQueryBindings[]>(sql).run(...bind(params));
+          const { changes } = db.query<unknown, SQLQueryBindings[]>(sql).run(...bind(params));
+          results.push({ rowsAffected: changes });
         }
+        return results;
       })();
     },
   };

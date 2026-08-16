@@ -2,7 +2,12 @@ import { postReads } from "../shared/pricing";
 import type { ConversationResponse, Post } from "../shared/types";
 import type { SpendMeter } from "./meter";
 import { getQuotedFor, type Storage } from "./storage";
-import type { XApiClient } from "./xapi";
+import type { PostLookupOptions, XApiClient } from "./xapi";
+
+export interface QuoteResolutionOptions extends PostLookupOptions {
+  /** Ownership/write marker after X answers and immediately before its posts persist. */
+  beforePersist?: (posts: Post[]) => void | Promise<void>;
+}
 
 /**
  * Everything a client needs to render a conversation, read from the store.
@@ -18,15 +23,19 @@ export async function conversationResponse(
   focusId: string | null,
   opts: { fromCache: boolean },
 ): Promise<ConversationResponse> {
-  const posts = await store.getPosts(rootId);
-  const meta = await store.getConversationMeta(rootId);
+  // The lifecycle flag and posts must come from one database snapshot. Either
+  // ordering of two independent reads has an unsafe direction: posts→meta can
+  // label a pre-finish subset complete, while meta→posts can keep an old
+  // complete flag after a refresh has claimed partial and appended one page.
+  const snapshot = await store.getConversationResponseSnapshot(rootId);
+  const posts = snapshot?.posts ?? [];
   return {
     rootId,
     focusId,
     posts,
     quoted: await getQuotedFor(store, posts),
     unreadIds: await store.getUnreadIds(rootId),
-    truncated: meta?.status === "partial",
+    truncated: snapshot?.status === "partial",
     fromCache: opts.fromCache,
   };
 }
@@ -42,29 +51,37 @@ export async function resolveQuotedPosts(
   meter: SpendMeter,
   all: Post[],
   byId: Map<string, Post>,
+  lookup: QuoteResolutionOptions = {},
 ): Promise<void> {
   let sources = all;
   for (let level = 0; level < 2; level++) {
     const ids = [
       ...new Set(sources.map((p) => p.quotedPostId).filter((id): id is string => id !== null)),
     ];
-    const missing: string[] = [];
-    for (const id of ids) {
-      if (!byId.has(id) && !(await store.hasPost(id))) missing.push(id);
+    const candidates = ids.filter((id) => !byId.has(id));
+    if (candidates.length > 0) {
+      // One set read per level, not hasPost()+getPost() for every quote. D1's
+      // query allowance belongs to the whole Worker invocation, and a page of
+      // distinct quote cards must not consume it one row at a time.
+      for (const post of await store.getPostsByIds(candidates)) byId.set(post.id, post);
     }
+    const missing = candidates.filter((id) => !byId.has(id));
     if (missing.length > 0) {
       // Quote ids the lookup couldn't return are dropped here: the card
       // simply doesn't resolve and the post falls back to its t.co link.
-      const fetched = meter.charge(await xapi.getPostsByIds(missing)).posts;
+      const fetched = meter.charge(await xapi.getPostsByIds(missing, lookup)).posts;
       for (const post of fetched) byId.set(post.id, post);
+      // The request-side check happened before X and may now be several
+      // minutes old. Re-check after the paid response, and mark the durable
+      // write before touching the store, so a recovered owner cannot have its
+      // newer quote snapshot overwritten by this stale result.
+      await lookup.beforePersist?.(fetched);
       await store.upsertPosts(fetched);
     }
-    const resolved: Post[] = [];
-    for (const id of ids) {
-      const post = byId.get(id) ?? (await store.getPost(id));
-      if (post) resolved.push(post);
-    }
-    sources = resolved;
+    sources = ids.flatMap((id) => {
+      const post = byId.get(id);
+      return post ? [post] : [];
+    });
   }
 }
 

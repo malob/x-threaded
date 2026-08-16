@@ -16,7 +16,7 @@ const UNGATED =
   "this deployment has no gate in front of it, and an open Worker holding a " +
   "working X token lets anyone on the internet spend your X credits. Put it " +
   "behind Cloudflare Access and set POLICY_AUD + TEAM_DOMAIN, or set " +
-  "ALLOW_UNGATED=true to accept the risk. See the README, 'Gating your deployment'.";
+  "ALLOW_UNGATED=true to accept the risk. See DEPLOYING.md, step 4.";
 
 const jwksCache = new Map<string, ReturnType<typeof createRemoteJWKSet>>();
 

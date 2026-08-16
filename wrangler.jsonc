@@ -13,7 +13,7 @@
   // No per-deployment values live here: they would follow anyone who forks
   // this repo (a stale POLICY_AUD in particular would make their Worker
   // reject every request). Set them on your own Worker instead, with
-  // `wrangler secret put NAME` — see .env.example for the full list. Secrets
+  // `bunx wrangler secret put NAME` — see .env.example for the full list. Secrets
   // survive deploys, unlike dashboard-set vars.
   // `database_id` is deliberately absent. With only a name here, the
   // Deploy-to-Cloudflare button in the README auto-provisions a database for
@@ -21,7 +21,7 @@
   //
   // Migrations still work without it: wrangler matches this entry by binding
   // or by `database_name`, then resolves the UUID over the API, so all it
-  // needs is `wrangler login` and a database bound here. Confirmed 2026-07-30
+  // needs is `bunx wrangler login` and a database bound here. Confirmed 2026-07-30
   // against wrangler 4.115 (d1/utils.ts `getDatabaseByNameOrBinding`, which
   // only requires an id when both are missing).
   //

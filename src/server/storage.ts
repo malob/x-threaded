@@ -33,6 +33,18 @@ export interface ConversationMeta {
   fullReadAt: string | null;
 }
 
+/** The lifecycle row observed atomically when a conversation run took ownership. */
+export interface ConversationRunClaim {
+  /** Null when the claim created the conversation's first partial row. */
+  prior: Omit<ConversationMeta, "rootId"> | null;
+}
+
+/** Metadata and posts captured by one database statement for response rendering. */
+export interface ConversationResponseSnapshot {
+  status: ConversationStatus;
+  posts: Post[];
+}
+
 /**
  * Storage backend for conversations, posts, and read state. Async so the
  * same interface can be backed by bun:sqlite (sync under the hood, used by
@@ -41,21 +53,55 @@ export interface ConversationMeta {
 export interface Storage {
   getConversationMeta(rootId: string): Promise<Omit<ConversationMeta, "rootId"> | null>;
   /**
-   * Declare a fetch in flight: create the row as `partial`, or mark an
-   * existing one partial again.
-   *
-   * This is what makes a conversation resumable. A run that never comes back
-   * leaves a row saying so, rather than nothing at all (and a retry paying for
-   * the whole conversation again) or a row that claims to be whole. The root's
-   * own text and handle are left blank when the row is created here: a search
-   * returns newest first, so a long conversation's root arrives on the last
-   * page or not at all, and `upsertConversation` fills them in when the run
-   * finishes.
+   * Read response-visible lifecycle state and its post set atomically. A run
+   * may transition in either direction around this statement, but cannot make
+   * the returned status describe a different post snapshot.
    */
-  openConversation(rootId: string, at: string): Promise<void>;
+  getConversationResponseSnapshot(rootId: string): Promise<ConversationResponseSnapshot | null>;
   /**
-   * Write the row a finished run leaves: its root, when it landed, whether the
-   * search ran out, and — only for a full read — that a full read happened.
+   * Atomically own a fetch before it spends anything: create the row as
+   * `partial`, take an unleased row, or recover a lease no longer active at
+   * `now`. An active owner's row returns null and must not be sent to X.
+   *
+   * The previous lifecycle values are captured durably with the lease. That is
+   * what lets `abortConversationRun` restore a write-less failure without an
+   * unversioned process-local snapshot. The root's fields stay blank on a new
+   * row until the owning run finishes.
+   */
+  claimConversationRun(
+    rootId: string,
+    runId: string,
+    startedAt: string,
+    leaseUntil: number,
+    now: number,
+    wrotePosts: boolean,
+  ): Promise<ConversationRunClaim | null>;
+  /**
+   * Extend a live run immediately before a persistence boundary. When that
+   * boundary will write posts, record the fact first so even a crash during
+   * the write makes recovery conservatively keep the row partial.
+   */
+  renewConversationRun(
+    rootId: string,
+    runId: string,
+    leaseUntil: number,
+    willWritePosts: boolean,
+  ): Promise<boolean>;
+  /**
+   * Close a run and release its lease, but only while `runId` still owns the
+   * row. False means an expired lease was recovered and this result is stale.
+   */
+  finishConversationRun(runId: string, meta: ConversationMeta): Promise<boolean>;
+  /**
+   * Release a failed run conditionally. The durable write bit decides whether
+   * to restore the lifecycle values captured by its own claim or leave the row
+   * partial because this run persisted (or may have persisted) paid posts. A
+   * first-ever failed run has no prior row and remains partial either way.
+   */
+  abortConversationRun(rootId: string, runId: string): Promise<boolean>;
+  /**
+   * Administrative/unleased write used by imports and fixtures. It cannot
+   * update a row while a conversation run owns it.
    *
    * A null `fullReadAt` leaves the recorded one standing rather than clearing
    * it, so a since_id refresh or a resume can say "I am not a full read"
@@ -132,6 +178,38 @@ export interface Storage {
   putUserProfile(id: string, observedRefreshToken: string, profile: UserProfile): Promise<boolean>;
 
   /**
+   * Own the first billable profile read for one coherently observed grant.
+   * An active lease on that grant rejects a second caller; an expired lease,
+   * or one left by a grant that has since rotated, may be replaced. This is
+   * intentionally independent of the single-use token-refresh lease below:
+   * repeating getMe after a crash costs money, but cannot revoke the grant.
+   */
+  claimUserProfileLease(
+    id: string,
+    observedRefreshToken: string,
+    leaseId: string,
+    leaseUntil: number,
+    now: number,
+  ): Promise<boolean>;
+  /**
+   * Cache the profile and release its lease atomically, only if both the grant
+   * and lease are still the ones this caller observed. False means a fresh
+   * login, token rotation, or expired-lease recovery won the race.
+   */
+  finishUserProfileLease(
+    id: string,
+    observedRefreshToken: string,
+    leaseId: string,
+    profile: UserProfile,
+  ): Promise<boolean>;
+  /** Release an owned profile lease after a getMe failure, without touching tokens. */
+  releaseUserProfileLease(
+    id: string,
+    observedRefreshToken: string,
+    leaseId: string,
+  ): Promise<boolean>;
+
+  /**
    * Take the refresh lease: the one statement that decides who calls X.
    *
    * True means this caller won and must either finalize, release, or break the
@@ -187,6 +265,40 @@ export interface Storage {
 
   getSetting(key: string): Promise<string | null>;
   setSetting(key: string, value: string): Promise<void>;
+  /** Read the bookmark folder's id/name pair in one database snapshot. */
+  getBookmarkFolder(): Promise<BookmarkFolderSetting>;
+  /** Atomically store the bookmark folder's id/name pair and invalidate any older scan. */
+  setBookmarkFolder(folderId: string, folderName: string): Promise<void>;
+  /**
+   * Own a scan for `folderId`, but only if it is still selected and no live
+   * owner exists. An expired owner may be recovered by a new run; the run ID
+   * fences every later renewal, release, and reconciliation write.
+   */
+  beginBookmarkSync(
+    folderId: string,
+    runId: string,
+    leaseUntil: number,
+    now: number,
+  ): Promise<boolean>;
+  /** Extend an owned scan before another X request. False means ownership moved. */
+  renewBookmarkSync(folderId: string, runId: string, leaseUntil: number): Promise<boolean>;
+  /** Best-effort owner-bound release after a handled failure. */
+  abortBookmarkSync(folderId: string, runId: string): Promise<boolean>;
+  /**
+   * Persist hydrated posts and reconcile bookmark-owned saved rows in one
+   * transaction, only while `runId` still owns the scan. Manual rows are
+   * never removed or re-sourced, and a superseded scan writes no post cache.
+   */
+  finishBookmarkSync(
+    folderId: string,
+    runId: string,
+    posts: Post[],
+    folderPostIds: string[],
+    complete: boolean,
+    addedAt: string,
+    /** Refuse before issuing the transaction when its expanded batch is larger. */
+    maxStatements?: number,
+  ): Promise<BookmarkSyncCommit>;
 
   /** Posts queued for reading, newest first. */
   listSavedItems(): Promise<SavedItem[]>;
@@ -209,6 +321,20 @@ export interface SavedItem {
   /** "bookmark" (synced from the folder) or "manual" (added in the app). */
   source: string;
   addedAt: string;
+}
+
+export interface BookmarkSyncCommit {
+  /** False when a newer scan or folder selection superseded this run. */
+  applied: boolean;
+  added: number;
+  removed: number;
+  /** No database write ran because the expanded transaction exceeded its caller's budget. */
+  budgetExceeded?: true;
+}
+
+export interface BookmarkFolderSetting {
+  id: string | null;
+  name: string | null;
 }
 
 /**
@@ -287,6 +413,15 @@ export interface ConversationRow {
   fetched_at: string;
   status: string;
   full_read_at: string | null;
+}
+
+export interface ConversationRunRow extends ConversationRow {
+  run_id: string | null;
+  run_lease_until: number | null;
+  run_wrote_posts: number;
+  run_previous_status: string | null;
+  run_previous_fetched_at: string | null;
+  run_previous_full_read_at: string | null;
 }
 
 export function rowToPost(row: PostRow): Post {

@@ -6,9 +6,10 @@ import {
   type MouseEventHandler,
   type ReactNode,
 } from "react";
-import type { Post } from "../shared/types";
+import type { MediaItem, Post } from "../shared/types";
 import { xPostUrl, xProfileUrl } from "../shared/urls";
 import { PostText } from "./PostText";
+import { mediaSourceVisible } from "./media-state";
 
 /**
  * One ResizeObserver for every clamped block on the page.
@@ -228,31 +229,35 @@ function Avatar({
   );
 }
 
+function MediaAttachment({ post, media, index }: { post: Post; media: MediaItem; index: number }) {
+  const src = media.url ?? media.previewImageUrl;
+  const [failedSrc, setFailedSrc] = useState<string | null>(null);
+  if (!mediaSourceVisible(src, failedSrc)) return null;
+  const href = media.type === "photo" ? `${postUrl(post)}/photo/${index + 1}` : postUrl(post);
+  return (
+    <a href={href} target="_blank" rel="noopener noreferrer">
+      <img
+        src={src}
+        alt={media.type === "photo" ? "attached image" : `${media.type} preview`}
+        loading="lazy"
+        onError={() => setFailedSrc(src)}
+      />
+      {media.type !== "photo" && (
+        <span className="media-badge">
+          {media.type === "animated_gif" ? "GIF" : "video"} ↗
+        </span>
+      )}
+    </a>
+  );
+}
+
 function MediaGrid({ post }: { post: Post }) {
   if (!post.media?.length) return null;
   return (
     <div className="post-media">
-      {post.media.map((m, i) => {
-        const src = m.url ?? m.previewImageUrl;
-        if (!src) return null;
-        const href = m.type === "photo" ? `${postUrl(post)}/photo/${i + 1}` : postUrl(post);
-        return (
-          <a key={m.mediaKey} href={href} target="_blank" rel="noopener noreferrer">
-            <img
-              src={src}
-              alt={m.type === "photo" ? "attached image" : `${m.type} preview`}
-              loading="lazy"
-              onError={(e) => {
-                const anchor = e.currentTarget.closest("a");
-                if (anchor) anchor.style.display = "none";
-              }}
-            />
-            {m.type !== "photo" && (
-              <span className="media-badge">{m.type === "animated_gif" ? "GIF" : "video"} ↗</span>
-            )}
-          </a>
-        );
-      })}
+      {post.media.map((media, index) => (
+        <MediaAttachment key={media.mediaKey} post={post} media={media} index={index} />
+      ))}
     </div>
   );
 }

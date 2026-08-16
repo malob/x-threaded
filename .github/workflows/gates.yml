@@ -1,7 +1,7 @@
-# The same five gates CONTRIBUTING.md asks a contributor to run, on every push
-# and pull request. Kept as one job on purpose: they share an install and a
-# build, and the whole run is under a minute — splitting it would cost more in
-# setup than it saves in parallelism.
+# The same five gates CONTRIBUTING.md asks a contributor to run, plus a
+# nondeploying Worker bundle/config validation, on every push and pull request.
+# Kept as one job on purpose: they share an install and a build, and splitting
+# the short run would cost more setup than it saves in parallelism.
 name: gates
 
 on:
@@ -38,9 +38,12 @@ jobs:
 
       - run: bun test
 
-      # The storage contract against a real workerd D1 binding. This is the leg
-      # that catches D1's 100-bound-parameter limit, which bun:sqlite does not
-      # enforce, so it is not optional here either.
+      # The storage contract against a real workerd D1 binding. It verifies API
+      # shapes, batch behaviour, and migrations; fake-D1 owns the service-only
+      # 100-bound-parameter regression because local workerd does not enforce it.
       - run: bun run test:d1
 
       - run: bun run build
+
+      # Bundle the Worker and validate its config/assets without deploying.
+      - run: bunx wrangler deploy --dry-run

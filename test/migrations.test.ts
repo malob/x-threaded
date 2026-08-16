@@ -26,7 +26,7 @@ import {
 
 /** A stand-in for the migrations later stages will add. */
 const FUTURE: Migration = {
-  name: "0007_future.sql",
+  name: "0008_future.sql",
   sql: `-- A later migration; note the semicolon and the apostrophe in X's prose.
 ALTER TABLE settings ADD COLUMN note TEXT;`,
 };
@@ -64,7 +64,10 @@ async function columns(driver: SqlDriver, table: string): Promise<string[]> {
 
 describe("loadMigrations", () => {
   it("reads migrations/ in applied order", () => {
-    expect(MIGRATION_NAMES).toEqual(["0001_init.sql"]);
+    expect(MIGRATION_NAMES).toEqual([
+      "0001_init.sql",
+      "0007_conversation_run_lease.sql",
+    ]);
     expect(MIGRATIONS.every((migration) => migration.sql.length > 0)).toBe(true);
   });
 });
@@ -87,7 +90,7 @@ describe("applyMigrations — a database whose ledger already names the migratio
     db.run(`INSERT INTO settings (key, sentinel) VALUES ('k', 'untouched')`);
     const driver = bunDriverFor(db);
 
-    await applyMigrations(driver, MIGRATIONS);
+    await applyMigrations(driver, [MIGRATIONS[0]!]);
 
     expect(await driver.all(`SELECT sentinel FROM settings`)).toEqual([{ sentinel: "untouched" }]);
     expect(await ledger(driver)).toEqual(["0001_init.sql"]);
@@ -101,11 +104,13 @@ describe("applyMigrations — a database whose ledger already names the migratio
     db.run(LEDGER_DDL);
     db.run(`INSERT INTO d1_migrations (name) VALUES ('0001_init.sql')`);
     db.run(`CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)`);
+    db.run(`CREATE TABLE conversations (root_id TEXT PRIMARY KEY)`);
     const driver = bunDriverFor(db);
 
     await applyMigrations(driver, [...MIGRATIONS, FUTURE]);
 
-    expect(await ledger(driver)).toEqual(["0001_init.sql", FUTURE.name]);
+    expect(await ledger(driver)).toEqual([...MIGRATION_NAMES, FUTURE.name]);
+    expect(await columns(driver, "conversations")).toContain("run_id");
     expect(await columns(driver, "settings")).toContain("note");
   });
 });
@@ -130,9 +135,9 @@ describe("applyMigrations — a fresh database", () => {
   });
 
   /**
-   * The columns the folded 0002-0006 contributed. Spelled out because the
-   * baseline is now the only place they are declared: if one is dropped while
-   * rewriting that file, nothing else in the suite necessarily notices.
+   * The columns the folded 0002-0006 contributed, plus the additive run lease.
+   * Spelled out because a dropped schema-evolution column can otherwise hide
+   * until the first production query that depends on it.
    */
   it("carries every column the folded migrations added", async () => {
     const driver = emptyDriver();
@@ -140,7 +145,16 @@ describe("applyMigrations — a fresh database", () => {
     await applyMigrations(driver, MIGRATIONS);
 
     expect(await columns(driver, "conversations")).toEqual(
-      expect.arrayContaining(["status", "full_read_at"]),
+      expect.arrayContaining([
+        "status",
+        "full_read_at",
+        "run_id",
+        "run_lease_until",
+        "run_wrote_posts",
+        "run_previous_status",
+        "run_previous_fetched_at",
+        "run_previous_full_read_at",
+      ]),
     );
     expect(await columns(driver, "oauth_tokens")).toEqual(
       expect.arrayContaining([
@@ -327,7 +341,7 @@ describe("splitStatements", () => {
 
   it("finds every statement in the real migrations", () => {
     const statements = MIGRATIONS.flatMap((migration) => splitStatements(migration.sql));
-    expect(statements).toHaveLength(7);
+    expect(statements).toHaveLength(13);
     expect(statements.every((statement) => !statement.includes("--"))).toBe(true);
   });
 });

@@ -1,5 +1,5 @@
 import { useState } from "react";
-import type { AuthStatus, SettingsResponse, SyncResponse } from "../shared/types";
+import type { AuthStatus, SyncResponse } from "../shared/types";
 import {
   useAuthStatus,
   useFolders,
@@ -14,6 +14,12 @@ import {
 import { PostView } from "./PostView";
 import { estimateFetchUsd, formatUsd } from "../shared/pricing";
 import { xPostUrl } from "../shared/urls";
+import {
+  createSingleFlight,
+  folderCostNotice,
+  folderSettingsState,
+  type FolderSettingsState,
+} from "./inbox-state";
 
 type Tab = "saved" | "yours";
 
@@ -42,14 +48,14 @@ function ConnectPrompt({ auth }: { auth: AuthStatus | undefined }) {
   if (!auth || auth.state === "authorized") return null;
   if (auth.state === "unconfigured") {
     return (
-      <p className="notice">
+      <p className="notice" role="status">
         user-context features are off — this deployment has no OAuth credentials (see
         .env.example)
       </p>
     );
   }
   return (
-    <p className="notice">
+    <p className="notice" role="status">
       <a className="connect-link" href={auth.loginUrl}>
         Connect your X account
       </a>{" "}
@@ -68,25 +74,53 @@ function ConnectPrompt({ auth }: { auth: AuthStatus | undefined }) {
 
 /** Folder picker plus sync control for the saved tab. */
 function FolderBar({
-  settings,
+  settingsState,
+  onRetrySettings,
   onChange,
   onSync,
+  settingFolder,
   syncing,
   syncNote,
 }: {
-  settings: SettingsResponse | undefined;
+  settingsState: FolderSettingsState;
+  onRetrySettings: () => void;
   onChange: (id: string | null, name: string) => void;
   onSync: () => void;
+  settingFolder: boolean;
   syncing: boolean;
   syncNote: string | null;
 }) {
   const [picking, setPicking] = useState(false);
   const folders = useFolders(picking);
   const folderList = folders.data;
+  const costNote = folderCostNotice(folderList);
+  const folderBusy = settingFolder || syncing;
+
+  if (settingsState.kind === "loading") {
+    return (
+      <p className="notice" role="status">
+        loading bookmark settings…
+      </p>
+    );
+  }
+  if (settingsState.kind === "error") {
+    return (
+      <p className="notice" role="alert">
+        couldn’t load bookmark settings — {settingsState.message} ·{" "}
+        <button className="notice-btn" onClick={onRetrySettings}>
+          retry
+        </button>
+      </p>
+    );
+  }
+  const settings = settingsState.settings;
 
   if (picking) {
     return (
-      <p className="notice">
+      <p
+        className="notice"
+        role={folders.error ? "alert" : !folderList ? "status" : undefined}
+      >
         {folders.error ? (
           // A failed call used to render as "no folders found — create one on
           // x.com", which sends the reader to fix something that isn't broken.
@@ -104,7 +138,9 @@ function FolderBar({
           <>
             sync from{" "}
             <select
-              defaultValue={settings?.bookmarkFolderId ?? ""}
+              aria-label="Bookmark folder to sync"
+              disabled={folderBusy}
+              defaultValue={settings.bookmarkFolderId ?? ""}
               onChange={(e) => {
                 const id = e.target.value || null;
                 const name = folderList.folders.find((f) => f.id === id)?.name ?? "";
@@ -120,6 +156,12 @@ function FolderBar({
               ))}
             </select>
           </>
+        )}
+        {costNote && (
+          <span className="new-badge" role="status">
+            {" "}
+            · {costNote}
+          </span>
         )}{" "}
         ·{" "}
         <button className="notice-btn" onClick={() => setPicking(false)}>
@@ -131,23 +173,42 @@ function FolderBar({
 
   return (
     <p className="notice">
-      {settings?.bookmarkFolderId ? (
+      {settings.bookmarkFolderId ? (
         <>
           syncing from{" "}
-          <button className="notice-btn" onClick={() => setPicking(true)}>
+          <button
+            className="notice-btn"
+            onClick={() => setPicking(true)}
+            disabled={folderBusy}
+          >
             {settings.bookmarkFolderName || "a folder"} ▾
           </button>{" "}
           ·{" "}
-          <button className="notice-btn" onClick={onSync} disabled={syncing}>
+          <button className="notice-btn" onClick={onSync} disabled={folderBusy}>
             {syncing ? "syncing…" : "sync now"}
           </button>
         </>
       ) : (
-        <button className="notice-btn" onClick={() => setPicking(true)}>
+        <button
+          className="notice-btn"
+          onClick={() => setPicking(true)}
+          disabled={folderBusy}
+        >
           choose a bookmark folder to sync ▾
         </button>
       )}
-      {syncNote && <span className="new-badge"> · {syncNote}</span>}
+      {syncNote && (
+        <span className="new-badge" role="status">
+          {" "}
+          · {syncNote}
+        </span>
+      )}
+      {costNote && (
+        <span className="new-badge" role="status">
+          {" "}
+          · {costNote}
+        </span>
+      )}
     </p>
   );
 }
@@ -170,6 +231,10 @@ function describeSync(result: SyncResponse): string {
 }
 
 const TAB_KEY = "inboxTab";
+const SAVED_TAB_ID = "inbox-tab-saved";
+const SAVED_PANEL_ID = "inbox-panel-saved";
+const YOURS_TAB_ID = "inbox-tab-yours";
+const YOURS_PANEL_ID = "inbox-panel-yours";
 
 /**
  * The scan the Your-posts tab is on, kept outside the component because the
@@ -201,9 +266,11 @@ export function Inbox({ onOpenPost }: { onOpenPost: (postId: string) => void }) 
   const [syncNote, setSyncNote] = useState<string | null>(null);
   /** Failures from the writes; the reads carry their own errors. */
   const [actionError, setActionError] = useState<string | null>(null);
+  const [syncFlight] = useState(createSingleFlight);
 
   const saved = useSaved();
   const settings = useSettings();
+  const settingsState = folderSettingsState(settings.data, settings.error);
   const authQuery = useAuthStatus();
   const auth = authQuery.data;
   const authorized = auth?.state === "authorized";
@@ -215,28 +282,34 @@ export function Inbox({ onOpenPost }: { onOpenPost: (postId: string) => void }) 
   const setFolder = useSetBookmarkFolder();
   const removeSaved = useRemoveSaved();
 
-  const runSync = () => {
+  /** Execute a sync for the caller that already owns `syncFlight`. */
+  const syncBookmarksOwned = async () => {
     setSyncNote(null);
     setActionError(null);
-    sync.mutate(undefined, {
-      onSuccess: (result) => setSyncNote(describeSync(result)),
-      onError: (e) => setActionError(e.message),
-    });
+    const result = await sync.mutateAsync(undefined);
+    setSyncNote(describeSync(result));
   };
 
-  const changeFolder = (id: string | null, name: string) => {
-    setActionError(null);
-    setFolder.mutate(
-      { id, name },
-      {
+  const runSync = async () => {
+    try {
+      await syncFlight.run(syncBookmarksOwned);
+    } catch (e) {
+      setActionError((e as Error).message);
+    }
+  };
+
+  const changeFolder = async (id: string | null, name: string) => {
+    try {
+      await syncFlight.run(async () => {
+        setActionError(null);
+        await setFolder.mutateAsync({ id, name });
         // Picking a folder is only half the instruction; the list is empty
-        // until it has been scanned.
-        onSuccess: () => {
-          if (id) runSync();
-        },
-        onError: (e) => setActionError(e.message),
-      },
-    );
+        // until it has been scanned. Keep the same ownership through the sync.
+        if (id) await syncBookmarksOwned();
+      });
+    } catch (e) {
+      setActionError((e as Error).message);
+    }
   };
 
   const drop = (postId: string) => {
@@ -252,127 +325,170 @@ export function Inbox({ onOpenPost }: { onOpenPost: (postId: string) => void }) 
 
   return (
     <div>
-      <div className="tabs">
-        <button className={tab === "saved" ? "tab active" : "tab"} onClick={() => setTab("saved")}>
+      <div className="tabs" role="tablist" aria-label="Inbox views">
+        <button
+          type="button"
+          id={SAVED_TAB_ID}
+          className={tab === "saved" ? "tab active" : "tab"}
+          role="tab"
+          aria-selected={tab === "saved"}
+          aria-controls={SAVED_PANEL_ID}
+          onClick={() => setTab("saved")}
+        >
           Saved{savedList ? ` (${savedList.items.length})` : ""}
         </button>
-        <button className={tab === "yours" ? "tab active" : "tab"} onClick={() => setTab("yours")}>
+        <button
+          type="button"
+          id={YOURS_TAB_ID}
+          className={tab === "yours" ? "tab active" : "tab"}
+          role="tab"
+          aria-selected={tab === "yours"}
+          aria-controls={YOURS_PANEL_ID}
+          onClick={() => setTab("yours")}
+        >
           Your posts
         </button>
       </div>
 
-      {errorMessage && <div className="error">{errorMessage}</div>}
+      {errorMessage && (
+        <div className="error" role="alert">
+          {errorMessage}
+        </div>
+      )}
       {authQuery.error ? (
         // Not knowing is a state of its own: without this the tab simply went
         // blank, and the reader had no idea anything had failed. The wording
         // avoids repeating the message, which often already says "auth status
         // unavailable (500)".
-        <p className="notice">couldn’t check your X connection — {authQuery.error.message}</p>
+        <p className="notice" role="alert">
+          couldn’t check your X connection — {authQuery.error.message}
+        </p>
       ) : (
         <ConnectPrompt auth={auth} />
       )}
 
-      {tab === "saved" ? (
-        <>
-          {authorized && (
-            <FolderBar
-              settings={settings.data}
-              onChange={changeFolder}
-              onSync={runSync}
-              syncing={sync.isPending}
-              syncNote={syncNote}
-            />
-          )}
-          <ul className="conversations">
-            {savedList?.items.map((item) => (
-              <li
-                key={item.post.id}
-                onClick={(e) => {
-                  if ((e.target as HTMLElement).closest("a, button")) return;
-                  onOpenPost(item.post.id);
-                }}
-              >
-                <PostView post={item.post} quoted={savedList.quoted} />
-                <div className="post-meta inbox-meta">
-                  <FetchCost loaded={item.loaded} replyCount={item.post.metrics.replies} />
-                  {item.source === "bookmark" ? "bookmarked" : "added here"} ·{" "}
-                  {item.source === "bookmark" ? (
-                    // The folder is the source of truth: removing it here
-                    // would just come back on the next sync.
-                    <a
-                      href={xPostUrl(item.post.authorHandle, item.post.id)}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      title="Un-bookmark on x.com to remove it from this list"
-                    >
-                      un-bookmark on x.com ↗
-                    </a>
-                  ) : (
-                    <button className="notice-btn" onClick={() => drop(item.post.id)}>
-                      remove
-                    </button>
-                  )}
-                </div>
-              </li>
-            ))}
-          </ul>
-          {savedList?.items.length === 0 && (
-            <p className="notice">
-              nothing saved yet — bookmark posts into your folder on x.com, or paste a URL above
-            </p>
-          )}
-        </>
-      ) : auth?.state !== "authorized" ? null : (
-        <>
-          <p className="notice">
-            {auth.user ? `@${auth.user.username} · ` : ""}
-            your recent threads{ownList ? ` (${ownList.items.length})` : ""} ·{" "}
-            <button
-              className="notice-btn"
-              onClick={() => setScan({ threads: 10, attempt: scan.attempt + 1 })}
-              disabled={own.isFetching}
-            >
-              {own.isFetching ? "loading…" : "refresh"}
-            </button>
-            {/* Scanning the timeline is an Owned Read per post, so asking for
-                more threads is a purchase, not a page turn. */}
-            {ownList && ownList.cost.billable > 0 && (
-              <> · scan {formatUsd(ownList.cost.usd, false)}</>
+      <div
+        id={SAVED_PANEL_ID}
+        role="tabpanel"
+        aria-labelledby={SAVED_TAB_ID}
+        hidden={tab !== "saved"}
+      >
+        {tab === "saved" && (
+          <>
+            {authorized && (
+              <FolderBar
+                settingsState={settingsState}
+                onRetrySettings={() => void settings.refetch()}
+                onChange={changeFolder}
+                onSync={runSync}
+                settingFolder={setFolder.isPending}
+                syncing={sync.isPending}
+                syncNote={syncNote}
+              />
             )}
-          </p>
-          <ul className="conversations">
-            {ownList?.items.map((item) => (
-              <li
-                key={item.root.id}
-                onClick={(e) => {
-                  if ((e.target as HTMLElement).closest("a, button")) return;
-                  onOpenPost(item.root.id);
-                }}
-              >
-                <PostView post={item.root} quoted={ownList.quoted} />
-                <div className="post-meta inbox-meta">
-                  <FetchCost loaded={item.loaded} replyCount={item.root.metrics.replies} />
-                  {item.ownPostCount > 1 && <>thread of {item.ownPostCount} · </>}
-                  {item.root.metrics.replies}{" "}
-                  {item.root.metrics.replies === 1 ? "reply" : "replies"}
-                </div>
-              </li>
-            ))}
-          </ul>
-          {ownList?.items.length === 0 && <p className="notice">no recent posts found</p>}
-          {ownList?.hasMore && (
+            <ul className="conversations">
+              {savedList?.items.map((item) => (
+                <li
+                  key={item.post.id}
+                  onClick={(e) => {
+                    if ((e.target as HTMLElement).closest("a, button")) return;
+                    onOpenPost(item.post.id);
+                  }}
+                >
+                  <PostView post={item.post} quoted={savedList.quoted} />
+                  <div className="post-meta inbox-meta">
+                    <FetchCost loaded={item.loaded} replyCount={item.post.metrics.replies} />
+                    {item.source === "bookmark" ? "bookmarked" : "added here"} ·{" "}
+                    {item.source === "bookmark" ? (
+                      // The folder is the source of truth: removing it here
+                      // would just come back on the next sync.
+                      <a
+                        href={xPostUrl(item.post.authorHandle, item.post.id)}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        title="Un-bookmark on x.com to remove it from this list"
+                      >
+                        un-bookmark on x.com ↗
+                      </a>
+                    ) : (
+                      <button className="notice-btn" onClick={() => drop(item.post.id)}>
+                        remove
+                      </button>
+                    )}
+                  </div>
+                </li>
+              ))}
+            </ul>
+            {savedList?.items.length === 0 && (
+              <p className="notice">
+                nothing saved yet — bookmark posts into your folder on x.com, or paste a URL above
+              </p>
+            )}
+          </>
+        )}
+      </div>
+
+      <div
+        id={YOURS_PANEL_ID}
+        role="tabpanel"
+        aria-labelledby={YOURS_TAB_ID}
+        hidden={tab !== "yours"}
+      >
+        {tab === "yours" && auth?.state === "authorized" && (
+          <>
             <p className="notice">
+              <span role="status">
+                {auth.user ? `@${auth.user.username} · ` : ""}
+                your recent threads{ownList ? ` (${ownList.items.length})` : ""}
+              </span>{" "}
+              ·{" "}
               <button
                 className="notice-btn"
-                onClick={() => setScan({ ...scan, threads: scan.threads + 10 })}
+                onClick={() => setScan({ threads: 10, attempt: scan.attempt + 1 })}
                 disabled={own.isFetching}
               >
-                {own.isFetching ? "loading…" : "load 10 more"}
+                {own.isFetching ? "loading…" : "refresh"}
               </button>
+              {/* Scanning the timeline is an Owned Read per post, so asking for
+                  more threads is a purchase, not a page turn. */}
+              {ownList && ownList.cost.billable > 0 && (
+                <span role="status"> · scan {formatUsd(ownList.cost.usd, false)}</span>
+              )}
             </p>
-          )}
-        </>
-      )}
+            <ul className="conversations">
+              {ownList?.items.map((item) => (
+                <li
+                  key={item.root.id}
+                  onClick={(e) => {
+                    if ((e.target as HTMLElement).closest("a, button")) return;
+                    onOpenPost(item.root.id);
+                  }}
+                >
+                  <PostView post={item.root} quoted={ownList.quoted} />
+                  <div className="post-meta inbox-meta">
+                    <FetchCost loaded={item.loaded} replyCount={item.root.metrics.replies} />
+                    {item.ownPostCount > 1 && <>thread of {item.ownPostCount} · </>}
+                    {item.root.metrics.replies}{" "}
+                    {item.root.metrics.replies === 1 ? "reply" : "replies"}
+                  </div>
+                </li>
+              ))}
+            </ul>
+            {ownList?.items.length === 0 && <p className="notice">no recent posts found</p>}
+            {ownList?.hasMore && (
+              <p className="notice">
+                <button
+                  className="notice-btn"
+                  onClick={() => setScan({ ...scan, threads: scan.threads + 10 })}
+                  disabled={own.isFetching}
+                >
+                  {own.isFetching ? "loading…" : "load 10 more"}
+                </button>
+              </p>
+            )}
+          </>
+        )}
+      </div>
     </div>
   );
 }

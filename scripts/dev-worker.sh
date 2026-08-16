@@ -22,13 +22,14 @@ fi
 # wrangler, so read it here and hand the values over via the process
 # environment instead.
 if [[ -p .env ]]; then
-  content=$(timeout 15 cat .env 2>/dev/null || true)
-  if [[ -n "$content" ]]; then
-    set -a
-    eval "$content"
-    set +a
-    export CLOUDFLARE_INCLUDE_PROCESS_ENV=true
+  if ! content=$(scripts/read-fifo.sh .env 15 2>/dev/null); then
+    echo "Could not read the .env named pipe; the Worker was not started." >&2
+    exit 1
   fi
+  set -a
+  eval "$content"
+  set +a
+  export CLOUDFLARE_INCLUDE_PROCESS_ENV=true
 fi
 
-exec npx wrangler dev --port "${WORKER_PORT:-8788}"
+exec bunx wrangler dev --port "${WORKER_PORT:-8788}"

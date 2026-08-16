@@ -179,36 +179,85 @@ interface Graph {
 }
 
 /**
- * Turn the linked id graph into nodes, top-down, carrying the reply context
- * each post's text is stripped against. Done in one recursion because the
- * context flows from ancestors while the nodes assemble from the leaves up.
+ * Add one node's handles to the shared path context, returning only the handles
+ * this frame owns. A duplicate belongs to an ancestor and must remain visible
+ * when this frame leaves.
  */
-function materialize(id: string, context: ReadonlySet<string>, graph: Graph): ThreadNode {
-  const kids = graph.childIds.get(id) ?? [];
-  const gap = graph.gaps.get(id);
-  if (gap) {
-    const childContext = new Set(context).add(UNKNOWN_HANDLE);
-    return {
-      kind: "gap",
-      id,
-      createdAt: gap.createdAt,
-      placementInferred: gap.placementInferred,
-      children: kids.map((kid) => materialize(kid, childContext, graph)),
-    };
+function enterContext(context: Set<string>, handles: readonly string[]): string[] {
+  const added: string[] = [];
+  for (const handle of handles) {
+    const normalized = handle.toLowerCase();
+    if (context.has(normalized)) continue;
+    context.add(normalized);
+    added.push(normalized);
   }
-  const post = graph.posts.get(id)!;
-  const childContext = new Set(context);
-  childContext.add(post.authorHandle.toLowerCase());
-  for (const mention of post.text.matchAll(ANY_MENTION)) {
-    childContext.add(mention[1]!.toLowerCase());
+  return added;
+}
+
+function leaveContext(context: Set<string>, added: readonly string[]): void {
+  for (let i = added.length - 1; i >= 0; i--) context.delete(added[i]!);
+}
+
+type MaterializeFrame =
+  | { readonly kind: "enter"; readonly id: string; readonly into: ThreadNode[] }
+  | { readonly kind: "leave"; readonly added: readonly string[] };
+
+/**
+ * Turn the linked id graph into nodes, top-down, carrying the reply context
+ * each post's text is stripped against. The explicit DFS stack keeps the
+ * 10,000-deep-chain guarantee independent of the JavaScript call stack. Its
+ * one mutable context set follows the same enter/leave frames: every node adds
+ * its handles before its children and removes them before a sibling is
+ * visited, so storage is proportional to path depth rather than the sum of
+ * every ancestor-prefix copy.
+ */
+function materialize(id: string, graph: Graph): ThreadNode {
+  const context = new Set<string>();
+  const roots: ThreadNode[] = [];
+  const stack: MaterializeFrame[] = [{ kind: "enter", id, into: roots }];
+
+  while (stack.length > 0) {
+    const frame = stack.pop()!;
+    if (frame.kind === "leave") {
+      leaveContext(context, frame.added);
+      continue;
+    }
+
+    const kids = graph.childIds.get(frame.id) ?? [];
+    const children: ThreadNode[] = [];
+    const gap = graph.gaps.get(frame.id);
+    let childHandles: string[];
+    if (gap) {
+      childHandles = [UNKNOWN_HANDLE];
+      frame.into.push({
+        kind: "gap",
+        id: frame.id,
+        createdAt: gap.createdAt,
+        placementInferred: gap.placementInferred,
+        children,
+      });
+    } else {
+      const post = graph.posts.get(frame.id)!;
+      childHandles = [post.authorHandle];
+      for (const mention of post.text.matchAll(ANY_MENTION)) {
+        childHandles.push(mention[1]!);
+      }
+      frame.into.push({
+        kind: "post",
+        id: frame.id,
+        post,
+        displayText: stripContextMentions(post.text, context),
+        children,
+      });
+    }
+
+    stack.push({ kind: "leave", added: enterContext(context, childHandles) });
+    for (let i = kids.length - 1; i >= 0; i--) {
+      stack.push({ kind: "enter", id: kids[i]!, into: children });
+    }
   }
-  return {
-    kind: "post",
-    id,
-    post,
-    displayText: stripContextMentions(post.text, context),
-    children: kids.map((kid) => materialize(kid, childContext, graph)),
-  };
+
+  return roots[0]!;
 }
 
 /**
@@ -329,7 +378,7 @@ export function buildThread(
     list.sort((a, b) => createdAtOf(a).localeCompare(createdAtOf(b)));
   }
 
-  const root = materialize(rootId, new Set<string>(), { posts: byPost, gaps, childIds });
+  const root = materialize(rootId, { posts: byPost, gaps, childIds });
   // Unreachable: rootId names a real post, so it never materializes as a gap.
   if (root.kind !== "post") return null;
 

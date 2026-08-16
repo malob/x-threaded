@@ -15,6 +15,7 @@ import { formatUsd } from "../shared/pricing";
 import { xPostUrl } from "../shared/urls";
 import { HELP } from "./thread/keymap";
 import { applyKey, isModifierKey, normalizeKey, type Command, type ViewState } from "./thread/keys";
+import { cancelPendingKey, cancelPendingKeyOnPointer } from "./thread/pending";
 import {
   buildThread,
   emptyKeyModel,
@@ -584,7 +585,7 @@ export function Thread({
     // A navigation also discards any half-typed key sequence: a `z` pressed
     // before following a link must not turn the first keystroke afterwards
     // into `za` (Codex review of 7fa77ae, finding 2).
-    pendingRef.current = null;
+    cancelPendingKey(pendingRef);
     // Resetting the view is the whole point of this effect: a different
     // conversation must start from its own folds and cursor. The rule wants
     // that expressed as a remount key, which is the caller's decision to make,
@@ -740,7 +741,11 @@ export function Thread({
       // not inside an input rather than a reason to give up on the event.
       const target = e.target;
       const typing = target instanceof Element && target.closest("input, textarea, select") !== null;
-      if (typing || e.metaKey || e.ctrlKey || e.altKey) return;
+      if (typing) {
+        cancelPendingKey(pendingRef);
+        return;
+      }
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
       if (isModifierKey(e.key)) return;
       // A focused control keeps its native activation: Enter on a tabbed-to
       // fold mark must press THAT mark, and Enter on a tabbed-to link must
@@ -753,8 +758,10 @@ export function Thread({
         (e.key === "Enter" &&
           (focused instanceof HTMLButtonElement || focused instanceof HTMLAnchorElement)) ||
         (e.key === " " && focused instanceof HTMLButtonElement)
-      )
+      ) {
+        cancelPendingKey(pendingRef);
         return;
+      }
       const { view: current, model, onSetRead: setRead } = latest.current;
       const { state, commands, handled } = applyKey(
         { ...current, pending: pendingRef.current },
@@ -773,8 +780,12 @@ export function Thread({
       if (handled) e.preventDefault();
     };
 
+    const stopCancelingOnPointer = cancelPendingKeyOnPointer(window, pendingRef);
     window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    return () => {
+      stopCancelingOnPointer();
+      window.removeEventListener("keydown", onKey);
+    };
   }, []);
 
   /* See ThreadCtx.focusFold. A ref, not state: recording intent must not
@@ -820,7 +831,12 @@ export function Thread({
     [model, cursorId, unread, folds],
   );
 
-  if (!model) return <p className="error">Root post missing from data.</p>;
+  if (!model)
+    return (
+      <p className="error" role="alert">
+        Root post missing from data.
+      </p>
+    );
   const { layout } = model;
 
   // Refresh and resume share one lock per conversation upstream (see
@@ -865,7 +881,7 @@ export function Thread({
               {refreshing ? "refreshing…" : "refresh"}
             </button>
             {!refreshing && newCount !== null && (
-              <span className={newCount > 0 ? "new-badge" : undefined}>
+              <span className={newCount > 0 ? "new-badge" : undefined} role="status">
                 {" "}
                 {newCount > 0 ? `+${newCount} new` : "· up to date"}
               </span>

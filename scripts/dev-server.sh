@@ -13,8 +13,10 @@ load_env_file() {
   [[ -e "$file" ]] || return 0
   if [[ -p "$file" ]]; then
     local content
-    content=$(timeout 15 cat "$file" 2>/dev/null || true)
-    [[ -n "$content" ]] || return 0
+    if ! content=$(scripts/read-fifo.sh "$file" 15 2>/dev/null); then
+      echo "Could not read the .env named pipe; the server was not started." >&2
+      exit 1
+    fi
     set -a
     eval "$content"
     set +a

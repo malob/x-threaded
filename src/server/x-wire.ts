@@ -119,6 +119,11 @@ export type MeResponse = v.InferOutput<typeof MeResponseSchema>;
 
 export const BookmarkFoldersSchema = v.object({
   data: v.optional(v.array(v.object({ id: v.string(), name: v.string() }))),
+  meta: v.optional(v.object({ next_token: v.optional(v.string()) })),
+  // Folder selection has no partial-list UI: if X reports any per-resource
+  // errors, the caller must fail instead of presenting this page as the whole
+  // set of folders.
+  errors: v.optional(v.array(LookupErrorSchema)),
 });
 export type BookmarkFolders = v.InferOutput<typeof BookmarkFoldersSchema>;
 
@@ -129,6 +134,10 @@ export type BookmarkFolders = v.InferOutput<typeof BookmarkFoldersSchema>;
 export const BookmarkFolderPageSchema = v.object({
   data: v.optional(v.array(v.object({ id: v.string() }))),
   meta: v.optional(v.object({ next_token: v.optional(v.string()) })),
+  // X can return a successful 2xx envelope with per-resource errors. Unlike
+  // lookup hydration, an error here means the folder enumeration is not an
+  // authoritative list and therefore cannot be used to remove saved items.
+  errors: v.optional(v.array(LookupErrorSchema)),
 });
 export type BookmarkFolderPage = v.InferOutput<typeof BookmarkFolderPageSchema>;
 

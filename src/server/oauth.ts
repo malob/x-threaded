@@ -52,6 +52,20 @@ export interface OAuthConfig {
   clientSecret: string;
 }
 
+/**
+ * One coherently observed grant: the access token a request may use, the
+ * refresh token that owns any cached profile beside it, and that profile.
+ * Keeping these together prevents a fresh login between two reads from
+ * pairing one account's access token with another account's identity row.
+ */
+export interface UserGrantSnapshot {
+  accessToken: string;
+  refreshToken: string;
+  userId: string | null;
+  username: string | null;
+  displayName: string | null;
+}
+
 export class OAuthError extends Error {}
 
 function base64url(bytes: ArrayBuffer | Uint8Array): string {
@@ -267,7 +281,17 @@ async function refresh(
  * — the lease below is what actually decides who talks to X, and it is the
  * one that holds when the callers are in different isolates.
  */
-const refreshesInFlight = new WeakMap<Storage, Promise<string>>();
+const refreshesInFlight = new WeakMap<Storage, Promise<UserGrantSnapshot>>();
+
+function grantSnapshot(tokens: OAuthTokens): UserGrantSnapshot {
+  return {
+    accessToken: tokens.accessToken,
+    refreshToken: tokens.refreshToken,
+    userId: tokens.userId ?? null,
+    username: tokens.username ?? null,
+    displayName: tokens.displayName ?? null,
+  };
+}
 
 /** State transitions, for reading the protocol back out of the logs. */
 function logTransition(from: string, to: string, detail: string): void {
@@ -293,9 +317,9 @@ function sleep(ms: number): Promise<void> {
 /**
  * Refresh under a held lease, then persist conditionally.
  *
- * Returns the new access token, or null when the lease turned out to be lost —
- * in which case this caller has written nothing and must re-read, exactly as
- * if it had never won.
+ * Returns the newly persisted grant snapshot, or null when the lease turned
+ * out to be lost — in which case this caller has written nothing and must
+ * re-read, exactly as if it had never won.
  *
  * The refresh response covers the token pair alone: X never echoes the user ID
  * and omits `scope` when it hasn't changed, so both are carried forward from
@@ -309,7 +333,7 @@ async function refreshUnderLease(
   leaseId: string,
   timings: TokenTimings,
   isRecovery: boolean,
-): Promise<string | null> {
+): Promise<UserGrantSnapshot | null> {
   let rotated: OAuthTokens;
   try {
     rotated = await refresh(config, row.refreshToken, timings.fetchTimeoutMs);
@@ -352,17 +376,18 @@ async function refreshUnderLease(
   // any earlier converts a database blip shorter than the lease into a
   // spent-token recovery and a forced re-login. Past the window the CAS
   // would lose anyway, so the deadline is the protocol's own.
+  const next: OAuthTokens = {
+    ...rotated,
+    scope: rotated.scope || row.scope,
+    userId: row.userId,
+    username: row.username,
+    displayName: row.displayName,
+  };
   const finalizeDeadline = Date.now() + timings.leaseMs + timings.graceMs;
   let landed: boolean;
   for (;;) {
     try {
-      landed = await store.finalizeTokenLease(SELF_ID, leaseId, row.refreshToken, {
-        ...rotated,
-        scope: rotated.scope || row.scope,
-        userId: row.userId,
-        username: row.username,
-        displayName: row.displayName,
-      });
+      landed = await store.finalizeTokenLease(SELF_ID, leaseId, row.refreshToken, next);
       break;
     } catch (error) {
       if (Date.now() >= finalizeDeadline) throw error;
@@ -377,19 +402,23 @@ async function refreshUnderLease(
     return null;
   }
   logTransition("refreshing", "ready", isRecovery ? "rotated by recovery" : "rotated");
-  return rotated.accessToken;
+  return grantSnapshot(next);
 }
 
 /**
- * Drive the stored grant to a usable access token, coordinating with every
- * other caller through the row itself.
+ * Drive the stored grant to a usable coherent snapshot, coordinating with
+ * every other caller through the row itself.
  *
  * Each pass reads the row and does the one thing that row permits: use it,
  * claim it, wait on it, recover it, or give up on it. Every write is
  * conditional on what was read, so a pass that loses a race simply reads
  * again — no caller ever acts on a row it no longer owns.
  */
-async function renew(store: Storage, config: OAuthConfig, timings: TokenTimings): Promise<string> {
+async function renew(
+  store: Storage,
+  config: OAuthConfig,
+  timings: TokenTimings,
+): Promise<UserGrantSnapshot> {
   // Long enough to wait out a lapsed lease and run the recovery it permits.
   const deadline = Date.now() + timings.leaseMs + timings.graceMs + timings.fetchTimeoutMs;
 
@@ -398,7 +427,7 @@ async function renew(store: Storage, config: OAuthConfig, timings: TokenTimings)
     if (!row) throw new OAuthError("the stored grant disappeared — visit /auth/login");
     if (row.state === "broken") throw brokenError(row.brokenReason ?? "unknown");
     // A live token means someone else's refresh landed (or a fresh login did).
-    if (isLive(row)) return row.accessToken;
+    if (isLive(row)) return grantSnapshot(row);
 
     if (row.state === "ready") {
       const leaseId = randomToken();
@@ -410,8 +439,8 @@ async function renew(store: Storage, config: OAuthConfig, timings: TokenTimings)
       );
       if (!claimed) continue; // Someone else got there first; read again.
       logTransition("ready", "refreshing", "lease claimed");
-      const token = await refreshUnderLease(store, config, row, leaseId, timings, false);
-      if (token !== null) return token;
+      const grant = await refreshUnderLease(store, config, row, leaseId, timings, false);
+      if (grant !== null) return grant;
       continue; // Lease lost mid-flight: carry on as one of the losers.
     }
 
@@ -442,26 +471,27 @@ async function renew(store: Storage, config: OAuthConfig, timings: TokenTimings)
     );
     if (!recovered) continue;
     logTransition("refreshing", "refreshing", "abandoned lease recovered (one attempt only)");
-    const token = await refreshUnderLease(store, config, row, leaseId, timings, true);
-    if (token !== null) return token;
+    const grant = await refreshUnderLease(store, config, row, leaseId, timings, true);
+    if (grant !== null) return grant;
   }
 
   throw new OAuthError("timed out waiting for the token refresh to settle — try again");
 }
 
 /**
- * A valid user-context access token, refreshing when it's close to expiry.
- * Returns null when the deployment has no user tokens configured, which
- * callers report as the feature being unavailable — there is no app-only
- * fallback, because no user-context endpoint accepts the app-only bearer.
- * Throws when the grant is broken: only `/auth/login` fixes that, and
- * pretending otherwise would send the caller off to make a doomed API call.
+ * A coherent snapshot of a valid user-context grant, refreshing when its
+ * access token is close to expiry. Returns null when the deployment has no
+ * user tokens configured, which callers report as the feature being
+ * unavailable — there is no app-only fallback, because no user-context
+ * endpoint accepts the app-only bearer. Throws when the grant is broken: only
+ * `/auth/login` fixes that, and pretending otherwise would send the caller off
+ * to make a doomed API call.
  */
-export async function getUserAccessToken(
+export async function getUserGrantSnapshot(
   store: Storage,
   config: OAuthConfig | null,
   timings: Partial<TokenTimings> = {},
-): Promise<string | null> {
+): Promise<UserGrantSnapshot | null> {
   if (!config) return null;
 
   // Only /auth/login mints a grant; with no stored row the deployment has
@@ -469,7 +499,7 @@ export async function getUserAccessToken(
   const tokens = await store.getOAuthTokens(SELF_ID);
   if (!tokens) return null;
   if (tokens.state === "broken") throw brokenError(tokens.brokenReason ?? "unknown");
-  if (isLive(tokens)) return tokens.accessToken;
+  if (isLive(tokens)) return grantSnapshot(tokens);
 
   const pending = refreshesInFlight.get(store);
   if (pending) return await pending;
@@ -483,3 +513,11 @@ export async function getUserAccessToken(
   }
 }
 
+/** Token-only compatibility for callers that do not also resolve identity. */
+export async function getUserAccessToken(
+  store: Storage,
+  config: OAuthConfig | null,
+  timings: Partial<TokenTimings> = {},
+): Promise<string | null> {
+  return (await getUserGrantSnapshot(store, config, timings))?.accessToken ?? null;
+}

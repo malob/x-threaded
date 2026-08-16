@@ -461,6 +461,35 @@ describe("what a dying run carries out", () => {
       restore();
     }
   });
+
+  it("runs the ownership check before every 100-id lookup request", async () => {
+    let requests = 0;
+    const restore = withMockFetch(() => {
+      requests += 1;
+      return new Response(searchPage({ count: 100 }, 0));
+    });
+    try {
+      const ids = Array.from({ length: 150 }, (_, i) =>
+        snowflakeId(Date.parse(ROOT_AT) + (i + 1) * 1000),
+      );
+      let checks = 0;
+      const error = await new XApi("bearer")
+        .getPostsByIds(ids, {
+          beforeRequest: () => {
+            checks += 1;
+            if (checks === 2) throw new Error("lease moved before batch two");
+          },
+        })
+        .catch((caught: unknown) => caught);
+
+      expect(error).toBeInstanceOf(Error);
+      expect(checks).toBe(2);
+      expect(requests).toBe(1);
+      expect(spentOnFailure(error)).toEqual({ reads: 100, ownedReads: 0, userReads: 0 });
+    } finally {
+      restore();
+    }
+  });
 });
 
 describe("getPostsByIds hydration loss", () => {
@@ -537,10 +566,15 @@ interface FolderPage {
  * tests is which pages get asked for. IDs in `unavailable` enumerate like any
  * bookmark but hydrate as a partial error, the way a deleted post's would.
  */
-function serveFolderPages(pages: FolderPage[], unavailable: string[] = []): () => void {
+function serveFolderPages(
+  pages: FolderPage[],
+  unavailable: string[] = [],
+  onRequest: () => void = () => {},
+): () => void {
   let served = 0;
   const withheld = new Set(unavailable);
   return withMockFetch((url) => {
+    onRequest();
     const parsed = new URL(url);
     if (parsed.pathname === "/2/tweets") {
       const ids = (parsed.searchParams.get("ids") ?? "").split(",").filter(Boolean);
@@ -571,7 +605,164 @@ function serveFolderPages(pages: FolderPage[], unavailable: string[] = []): () =
 
 const folderId = (n: number): string => snowflakeId(Date.parse(ROOT_AT) + n * 60_000);
 
+describe("getBookmarkFolders pagination", () => {
+  it("follows pagination tokens until the folder list is exhausted", async () => {
+    const urls: URL[] = [];
+    const pages = [
+      { data: [{ id: "folder-1", name: "First" }], meta: { next_token: "page-2" } },
+      { data: [{ id: "folder-2", name: "Second" }], meta: {} },
+    ];
+    const restore = withMockFetch((url) => {
+      urls.push(new URL(url));
+      const page = pages.shift();
+      if (!page) throw new Error(`unexpected bookmark-folder page request: ${url}`);
+      return new Response(JSON.stringify(page));
+    });
+    try {
+      const { value, receipt } = await new XApi("bearer", {
+        pageDelayMs: 0,
+      }).getBookmarkFolders("user-token", "u1");
+
+      expect(value).toEqual([
+        { id: "folder-1", name: "First" },
+        { id: "folder-2", name: "Second" },
+      ]);
+      expect(urls.map((url) => url.searchParams.get("max_results"))).toEqual(["100", "100"]);
+      expect(urls.map((url) => url.searchParams.get("pagination_token"))).toEqual([
+        null,
+        "page-2",
+      ]);
+      expect(receipt).toEqual({ reads: 0, ownedReads: 0, userReads: 0 });
+    } finally {
+      restore();
+    }
+  });
+
+  it("rejects a 2xx folder list carrying enumeration errors", async () => {
+    const restore = withMockFetch(
+      () =>
+        new Response(
+          JSON.stringify({
+            data: [{ id: "folder-1", name: "First" }],
+            errors: [{ title: "Authorization Error", detail: "One folder was unavailable." }],
+            meta: {},
+          }),
+        ),
+    );
+    try {
+      await expect(
+        new XApi("bearer", { pageDelayMs: 0 }).getBookmarkFolders("user-token", "u1"),
+      ).rejects.toThrow(/incomplete bookmark folder list/);
+    } finally {
+      restore();
+    }
+  });
+
+  it("fails instead of returning a false complete list at the page cap", async () => {
+    let served = 0;
+    const restore = withMockFetch(() => {
+      served += 1;
+      return new Response(
+        JSON.stringify({
+          data: [{ id: `folder-${served}`, name: `Folder ${served}` }],
+          meta: { next_token: `page-${served + 1}` },
+        }),
+      );
+    });
+    try {
+      await expect(
+        new XApi("bearer", { pageDelayMs: 0 }).getBookmarkFolders("user-token", "u1"),
+      ).rejects.toThrow(/10-page safety limit/);
+      expect(served).toBe(10);
+    } finally {
+      restore();
+    }
+  });
+});
+
 describe("getBookmarksByFolder completeness", () => {
+  it("checks ownership before every folder page and hydration batch", async () => {
+    const ids = Array.from({ length: 150 }, (_, index) => folderId(index + 1));
+    let requests = 0;
+    const restore = serveFolderPages(
+      [
+        { ids: ids.slice(0, 100), nextToken: "p2" },
+        { ids: ids.slice(100) },
+      ],
+      [],
+      () => {
+        requests += 1;
+      },
+    );
+    try {
+      const checkedBeforeRequest: number[] = [];
+      const { value } = await new XApi("bearer", {
+        pageDelayMs: 0,
+      }).getBookmarksByFolder("user-token", "u1", "folder1", {
+        beforeRequest: () => {
+          checkedBeforeRequest.push(requests);
+        },
+      });
+
+      expect(value.ids).toHaveLength(150);
+      expect(requests).toBe(4);
+      expect(checkedBeforeRequest).toEqual([0, 1, 2, 3]);
+    } finally {
+      restore();
+    }
+  });
+
+  it("rechecks ownership before an automatic retry fetch", async () => {
+    let requests = 0;
+    const restore = withMockFetch(() => {
+      requests += 1;
+      return new Response("temporary", { status: 503 });
+    });
+    try {
+      let checks = 0;
+      const error = await new XApi("bearer", { pageDelayMs: 0 })
+        .getBookmarksByFolder("user-token", "u1", "folder1", {
+          beforeRequest: () => {
+            checks += 1;
+            if (checks === 2) throw new Error("bookmark owner moved before retry");
+          },
+        })
+        .catch((caught: unknown) => caught);
+
+      expect(error).toBeInstanceOf(Error);
+      expect(checks).toBe(2);
+      expect(requests).toBe(1);
+    } finally {
+      restore();
+    }
+  });
+
+  it("treats a valid error-only page as incomplete", async () => {
+    const restore = withMockFetch(
+      () =>
+        new Response(
+          JSON.stringify({
+            errors: [
+              {
+                title: "Authorization Error",
+                detail: "The requested folder could not be fully enumerated.",
+              },
+            ],
+          }),
+        ),
+    );
+    try {
+      const { value: result, receipt } = await new XApi("bearer", {
+        pageDelayMs: 0,
+      }).getBookmarksByFolder("user-token", "u1", "folder1");
+
+      expect(result).toEqual({ posts: [], ids: [], missing: [], complete: false });
+      expect(receipt).toEqual({ reads: 0, ownedReads: 0, userReads: 0 });
+    } finally {
+      restore();
+    }
+  });
+
   it("reports incomplete when the page cap cuts the enumeration short", async () => {
     const restore = serveFolderPages([
       { ids: [folderId(1)], nextToken: "p2" },
@@ -579,7 +770,9 @@ describe("getBookmarksByFolder completeness", () => {
     ]);
     try {
       const api = new XApi("bearer", { pageDelayMs: 0 });
-      const { value: result } = await api.getBookmarksByFolder("user-token", "u1", "folder1", 2);
+      const { value: result } = await api.getBookmarksByFolder("user-token", "u1", "folder1", {
+        maxPages: 2,
+      });
       expect(result.posts.map((p) => p.id)).toEqual([folderId(1), folderId(2)]);
       expect(result.complete).toBe(false);
     } finally {
@@ -598,7 +791,7 @@ describe("getBookmarksByFolder completeness", () => {
         "user-token",
         "u1",
         "folder1",
-        10,
+        { maxPages: 10 },
       );
       expect(result.posts.map((p) => p.id)).toEqual([folderId(1), folderId(2)]);
       expect(result.complete).toBe(true);

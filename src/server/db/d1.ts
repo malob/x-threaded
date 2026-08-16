@@ -1,5 +1,5 @@
 import type { D1Database, D1PreparedStatement } from "@cloudflare/workers-types";
-import { MAX_SQL_PARAMS, type SqlDriver, type SqlStatement } from "./driver";
+import type { SqlDriver, SqlRunResult, SqlStatement } from "./driver";
 
 /**
  * SqlDriver over Cloudflare D1, for the Worker. The schema comes from
@@ -19,8 +19,6 @@ export function d1Driver(db: D1Database): SqlDriver {
   };
 
   return {
-    maxParams: MAX_SQL_PARAMS,
-
     async first<T>(sql: string, params: unknown[] = []): Promise<T | null> {
       return await prepare(sql, params).first<T>();
     },
@@ -35,9 +33,10 @@ export function d1Driver(db: D1Database): SqlDriver {
       return { rowsAffected: meta.changes };
     },
 
-    async batch(statements: SqlStatement[]): Promise<void> {
-      if (statements.length === 0) return;
-      await db.batch(statements.map(({ sql, params }) => prepare(sql, params)));
+    async batch(statements: SqlStatement[]): Promise<SqlRunResult[]> {
+      if (statements.length === 0) return [];
+      const results = await db.batch(statements.map(({ sql, params }) => prepare(sql, params)));
+      return results.map(({ meta }) => ({ rowsAffected: meta.changes }));
     },
   };
 }

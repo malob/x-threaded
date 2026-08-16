@@ -40,7 +40,11 @@ export default {
 
     if (!env.X_BEARER_TOKEN) {
       return Response.json(
-        { error: "X_BEARER_TOKEN secret is not set — run: wrangler secret put X_BEARER_TOKEN" },
+        {
+          error:
+            "X_BEARER_TOKEN secret is not set — run: " +
+            "bunx wrangler secret put X_BEARER_TOKEN",
+        },
         { status: 500 },
       );
     }

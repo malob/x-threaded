@@ -74,7 +74,50 @@ export function describeStorageContract(name: string, makeStore: MakeStore): voi
       it("answers null and false for a conversation it has never seen", async () => {
         const store = await makeStore();
         expect(await store.getConversationMeta(meta.rootId)).toBeNull();
+        expect(await store.getConversationResponseSnapshot(meta.rootId)).toBeNull();
         expect(await store.hasConversation(meta.rootId)).toBe(false);
+      });
+
+      it("reads response status and ordered posts from one storage snapshot", async () => {
+        const store = await makeStore();
+        const root = makePost({ id: meta.rootId });
+        const reply = makePost({
+          conversationId: root.id,
+          parentId: root.id,
+          createdAt: new Date(Date.parse(root.createdAt) + 60_000).toISOString(),
+        });
+        await store.upsertConversation(meta);
+        await store.upsertPosts([reply, root]);
+
+        expect(await store.getConversationResponseSnapshot(meta.rootId)).toEqual({
+          status: "complete",
+          posts: [root, reply],
+        });
+
+        expect(
+          await store.claimConversationRun(
+            meta.rootId,
+            "snapshot-run",
+            "2024-06-02T00:00:00.000Z",
+            5000,
+            1000,
+            false,
+          ),
+        ).not.toBeNull();
+        expect(await store.getConversationResponseSnapshot(meta.rootId)).toEqual({
+          status: "partial",
+          posts: [root, reply],
+        });
+      });
+
+      it("returns an empty post snapshot for a lifecycle row with no posts", async () => {
+        const store = await makeStore();
+        await store.upsertConversation(meta);
+
+        expect(await store.getConversationResponseSnapshot(meta.rootId)).toEqual({
+          status: "complete",
+          posts: [],
+        });
       });
 
       /**
@@ -125,11 +168,20 @@ export function describeStorageContract(name: string, makeStore: MakeStore): voi
         );
       });
 
-      describe("openConversation", () => {
-        it("creates a partial row with no full read and a blank root", async () => {
+      describe("conversation run lease", () => {
+        it("claims a new row as partial and rejects a second active owner", async () => {
           const store = await makeStore();
 
-          await store.openConversation(meta.rootId, "2024-06-01T00:00:00.000Z");
+          expect(
+            await store.claimConversationRun(
+              meta.rootId,
+              "run-a",
+              "2024-06-01T00:00:00.000Z",
+              5000,
+              1000,
+              false,
+            ),
+          ).toEqual({ prior: null });
 
           expect(await store.getConversationMeta(meta.rootId)).toEqual({
             rootAuthorHandle: "",
@@ -140,23 +192,153 @@ export function describeStorageContract(name: string, makeStore: MakeStore): voi
             fullReadAt: null,
           });
           expect(await store.hasConversation(meta.rootId)).toBe(true);
+          expect(
+            await store.claimConversationRun(
+              meta.rootId,
+              "run-b",
+              "2024-06-01T00:00:01.000Z",
+              6000,
+              2000,
+              false,
+            ),
+          ).toBeNull();
         });
 
-        /** The blanks are a placeholder, not an answer: the run fills them. */
-        it("lets the finishing write fill in the root it left blank", async () => {
+        it("returns the coherent prior row and lets only its owner finish", async () => {
           const store = await makeStore();
-          await store.openConversation(meta.rootId, "2024-05-30T00:00:00.000Z");
-
           await store.upsertConversation(meta);
+          expect(
+            await store.claimConversationRun(
+              meta.rootId,
+              "run-a",
+              "2024-06-02T00:00:00.000Z",
+              5000,
+              1000,
+              false,
+            ),
+          ).toEqual({ prior: stored() });
 
+          expect(await store.finishConversationRun("run-b", meta)).toBe(false);
+          expect(
+            await store.finishConversationRun("run-a", {
+              ...meta,
+              fetchedAt: "2024-06-02T00:00:00.000Z",
+              status: "partial",
+              fullReadAt: null,
+            }),
+          ).toBe(true);
+
+          expect(await store.getConversationMeta(meta.rootId)).toEqual(
+            stored({ fetchedAt: "2024-06-02T00:00:00.000Z", status: "partial" }),
+          );
+        });
+
+        it("renews a live owner so the original expiry cannot be recovered", async () => {
+          const store = await makeStore();
+          await store.upsertConversation(meta);
+          await store.claimConversationRun(
+            meta.rootId,
+            "run-a",
+            "2024-06-02T00:00:00.000Z",
+            5000,
+            1000,
+            false,
+          );
+
+          expect(await store.renewConversationRun(meta.rootId, "run-a", 15_000, false)).toBe(true);
+          expect(
+            await store.claimConversationRun(
+              meta.rootId,
+              "run-b",
+              "2024-06-02T00:00:10.000Z",
+              20_000,
+              10_000,
+              false,
+            ),
+          ).toBeNull();
+          expect(
+            await store.claimConversationRun(
+              meta.rootId,
+              "run-b",
+              "2024-06-02T00:00:16.000Z",
+              30_000,
+              15_001,
+              false,
+            ),
+          ).not.toBeNull();
+        });
+
+        it("preserves the original snapshot across recovery of a write-less owner", async () => {
+          const store = await makeStore();
+          await store.upsertConversation(meta);
+          await store.claimConversationRun(
+            meta.rootId,
+            "run-a",
+            "2024-06-02T00:00:00.000Z",
+            5000,
+            1000,
+            false,
+          );
+
+          expect(
+            await store.claimConversationRun(
+              meta.rootId,
+              "run-b",
+              "2024-06-02T00:00:06.000Z",
+              20_000,
+              5001,
+              false,
+            ),
+          ).toEqual({ prior: stored() });
+          expect(await store.abortConversationRun(meta.rootId, "run-b")).toBe(true);
+          expect(await store.abortConversationRun(meta.rootId, "run-a")).toBe(false);
           expect(await store.getConversationMeta(meta.rootId)).toEqual(stored());
         });
 
-        it("marks an existing conversation partial, keeping everything else", async () => {
+        it("keeps recovery partial once the expired owner may have written posts", async () => {
           const store = await makeStore();
           await store.upsertConversation(meta);
+          await store.claimConversationRun(
+            meta.rootId,
+            "run-a",
+            "2024-06-02T00:00:00.000Z",
+            5000,
+            1000,
+            false,
+          );
+          expect(await store.renewConversationRun(meta.rootId, "run-a", 6000, true)).toBe(true);
 
-          await store.openConversation(meta.rootId, "2024-07-01T00:00:00.000Z");
+          expect(
+            await store.claimConversationRun(
+              meta.rootId,
+              "run-b",
+              "2024-06-02T00:00:07.000Z",
+              20_000,
+              6001,
+              false,
+            ),
+          ).toEqual({ prior: stored({ status: "partial" }) });
+          expect(await store.abortConversationRun(meta.rootId, "run-b")).toBe(true);
+          expect(await store.getConversationMeta(meta.rootId)).toEqual(stored({ status: "partial" }));
+        });
+
+        it("keeps an active run safe from an unleased administrative write", async () => {
+          const store = await makeStore();
+          await store.upsertConversation(meta);
+          await store.claimConversationRun(
+            meta.rootId,
+            "run-a",
+            "2024-06-02T00:00:00.000Z",
+            5000,
+            1000,
+            false,
+          );
+
+          await store.upsertConversation({
+            ...meta,
+            fetchedAt: "2030-01-01T00:00:00.000Z",
+            status: "complete",
+          });
 
           expect(await store.getConversationMeta(meta.rootId)).toEqual(
             stored({ status: "partial" }),
@@ -583,6 +765,252 @@ export function describeStorageContract(name: string, makeStore: MakeStore): voi
           }),
         );
       });
+
+      it("refuses to write a profile after a fresh grant replaced the observed one", async () => {
+        const store = await makeStore();
+        await store.putOAuthTokens("self", tokens);
+        await store.putOAuthTokens("self", {
+          ...tokens,
+          accessToken: "access-b",
+          refreshToken: "refresh-b",
+        });
+
+        expect(
+          await store.putUserProfile("self", tokens.refreshToken, {
+            userId: "user-a",
+            username: "account-a",
+            displayName: "Account A",
+          }),
+        ).toBe(false);
+        expect(await store.getOAuthTokens("self")).toEqual(
+          readyRow({ accessToken: "access-b", refreshToken: "refresh-b" }),
+        );
+      });
+
+      describe("first-profile lease", () => {
+        const profile = {
+          userId: "42",
+          username: "someone",
+          displayName: "Some One",
+        };
+
+        it("elects one owner and lets only that owner atomically cache the profile", async () => {
+          const store = await makeStore();
+          await store.putOAuthTokens("self", tokens);
+
+          const claims = await Promise.all([
+            store.claimUserProfileLease("self", tokens.refreshToken, "lease-a", 5000, 1000),
+            store.claimUserProfileLease("self", tokens.refreshToken, "lease-b", 5000, 1000),
+          ]);
+          expect([...claims].sort()).toEqual([false, true]);
+          const winner = claims[0] ? "lease-a" : "lease-b";
+          const loser = claims[0] ? "lease-b" : "lease-a";
+
+          expect(
+            await store.finishUserProfileLease("self", tokens.refreshToken, loser, {
+              userId: "wrong",
+              username: "wrong",
+              displayName: "Wrong",
+            }),
+          ).toBe(false);
+          expect(await store.finishUserProfileLease("self", tokens.refreshToken, winner, profile)).toBe(
+            true,
+          );
+          expect(await store.getOAuthTokens("self")).toEqual(readyRow(profile));
+          expect(
+            await store.claimUserProfileLease("self", tokens.refreshToken, "lease-c", 6000, 2000),
+          ).toBe(false);
+        });
+
+        it("releases a failed owner's lease without touching its grant", async () => {
+          const store = await makeStore();
+          await store.putOAuthTokens("self", tokens);
+          expect(
+            await store.claimUserProfileLease("self", tokens.refreshToken, "lease-a", 5000, 1000),
+          ).toBe(true);
+
+          expect(
+            await store.releaseUserProfileLease("self", tokens.refreshToken, "lease-wrong"),
+          ).toBe(false);
+          expect(
+            await store.claimUserProfileLease("self", tokens.refreshToken, "lease-b", 6000, 2000),
+          ).toBe(false);
+          expect(
+            await store.releaseUserProfileLease("self", tokens.refreshToken, "lease-a"),
+          ).toBe(true);
+          expect(await store.getOAuthTokens("self")).toEqual(readyRow());
+          expect(
+            await store.claimUserProfileLease("self", tokens.refreshToken, "lease-b", 6000, 2000),
+          ).toBe(true);
+        });
+
+        it("recovers an expired holder and fences that holder's late result", async () => {
+          const store = await makeStore();
+          await store.putOAuthTokens("self", tokens);
+          expect(
+            await store.claimUserProfileLease("self", tokens.refreshToken, "lease-old", 5000, 1000),
+          ).toBe(true);
+          expect(
+            await store.claimUserProfileLease("self", tokens.refreshToken, "lease-new", 9000, 4999),
+          ).toBe(false);
+          expect(
+            await store.claimUserProfileLease("self", tokens.refreshToken, "lease-new", 9000, 5000),
+          ).toBe(true);
+
+          expect(
+            await store.finishUserProfileLease("self", tokens.refreshToken, "lease-old", {
+              userId: "stale",
+              username: "stale",
+              displayName: "Stale",
+            }),
+          ).toBe(false);
+          expect(
+            await store.releaseUserProfileLease("self", tokens.refreshToken, "lease-old"),
+          ).toBe(false);
+          expect(
+            await store.finishUserProfileLease(
+              "self",
+              tokens.refreshToken,
+              "lease-new",
+              profile,
+            ),
+          ).toBe(true);
+          expect(await store.getOAuthTokens("self")).toEqual(readyRow(profile));
+        });
+
+        it("invalidates a stale holder when a fresh login replaces the grant", async () => {
+          const store = await makeStore();
+          await store.putOAuthTokens("self", tokens);
+          expect(
+            await store.claimUserProfileLease("self", tokens.refreshToken, "lease-a", 5000, 1000),
+          ).toBe(true);
+
+          const replacement = {
+            ...tokens,
+            accessToken: "access-b",
+            refreshToken: "refresh-b",
+          };
+          await store.putOAuthTokens("self", replacement);
+          expect(
+            await store.finishUserProfileLease("self", tokens.refreshToken, "lease-a", {
+              userId: "account-a",
+              username: "account-a",
+              displayName: "Account A",
+            }),
+          ).toBe(false);
+          expect(
+            await store.claimUserProfileLease(
+              "self",
+              replacement.refreshToken,
+              "lease-b",
+              6000,
+              2000,
+            ),
+          ).toBe(true);
+          expect(
+            await store.finishUserProfileLease(
+              "self",
+              replacement.refreshToken,
+              "lease-b",
+              profile,
+            ),
+          ).toBe(true);
+          expect(await store.getOAuthTokens("self")).toEqual(
+            readyRow({ ...replacement, ...profile }),
+          );
+        });
+
+        it("lets a rotated grant replace the old grant's active profile lease", async () => {
+          const store = await makeStore();
+          await store.putOAuthTokens("self", tokens);
+          expect(
+            await store.claimUserProfileLease("self", tokens.refreshToken, "profile-old", 5000, 1000),
+          ).toBe(true);
+          expect(await store.claimTokenLease("self", tokens.refreshToken, "token-lease", 5000)).toBe(
+            true,
+          );
+          const rotated = {
+            ...tokens,
+            accessToken: "access-rotated",
+            refreshToken: "refresh-rotated",
+          };
+          expect(
+            await store.finalizeTokenLease("self", "token-lease", tokens.refreshToken, rotated),
+          ).toBe(true);
+
+          expect(
+            await store.claimUserProfileLease(
+              "self",
+              rotated.refreshToken,
+              "profile-new",
+              6000,
+              2000,
+            ),
+          ).toBe(true);
+          expect(
+            await store.finishUserProfileLease(
+              "self",
+              tokens.refreshToken,
+              "profile-old",
+              {
+                userId: "stale",
+                username: "stale",
+                displayName: "Stale",
+              },
+            ),
+          ).toBe(false);
+          expect(
+            await store.finishUserProfileLease(
+              "self",
+              rotated.refreshToken,
+              "profile-new",
+              profile,
+            ),
+          ).toBe(true);
+          expect(await store.getOAuthTokens("self")).toEqual(
+            readyRow({ ...rotated, ...profile }),
+          );
+        });
+
+        it("does not let refresh finalization erase a profile that landed after its snapshot", async () => {
+          const store = await makeStore();
+          await store.putOAuthTokens("self", tokens);
+          // The refresher observed the null profile before either lease began.
+          const refreshSnapshot = { ...tokens };
+          expect(await store.claimTokenLease("self", tokens.refreshToken, "token-lease", 5000)).toBe(
+            true,
+          );
+          expect(
+            await store.claimUserProfileLease(
+              "self",
+              tokens.refreshToken,
+              "profile-lease",
+              5000,
+              1000,
+            ),
+          ).toBe(true);
+          expect(
+            await store.finishUserProfileLease(
+              "self",
+              tokens.refreshToken,
+              "profile-lease",
+              profile,
+            ),
+          ).toBe(true);
+
+          const rotated = {
+            ...refreshSnapshot,
+            accessToken: "access-rotated",
+            refreshToken: "refresh-rotated",
+          };
+          expect(
+            await store.finalizeTokenLease("self", "token-lease", tokens.refreshToken, rotated),
+          ).toBe(true);
+          expect(await store.getOAuthTokens("self")).toEqual(
+            readyRow({ ...rotated, ...profile }),
+          );
+        });
+      });
     });
 
     /**
@@ -829,6 +1257,175 @@ export function describeStorageContract(name: string, makeStore: MakeStore): voi
         // Empty string is how "no folder selected" is written; not null.
         await store.setSetting("bookmark_folder_id", "");
         expect(await store.getSetting("bookmark_folder_id")).toBe("");
+      });
+
+      it("stores the folder pair together and supersedes an older scan", async () => {
+        const store = await makeStore();
+        await store.setBookmarkFolder("folder1", "Reading");
+        expect(await store.getBookmarkFolder()).toEqual({ id: "folder1", name: "Reading" });
+        expect(await store.getSetting("bookmark_folder_id")).toBe("folder1");
+        expect(await store.getSetting("bookmark_folder_name")).toBe("Reading");
+        expect(await store.beginBookmarkSync("wrong-folder", "run-wrong", 5000, 1000)).toBe(false);
+        expect(await store.beginBookmarkSync("folder1", "run-old", 5000, 1000)).toBe(true);
+
+        await store.setBookmarkFolder("folder2", "Later");
+        expect(
+          await store.finishBookmarkSync(
+            "folder1",
+            "run-old",
+            [makePost({ id: "old", createdAt: "2024-01-01T00:00:00.000Z" })],
+            ["old"],
+            true,
+            "2024-01-01T00:00:00.000Z",
+          ),
+        ).toEqual({ applied: false, added: 0, removed: 0 });
+        expect(await store.listSavedItems()).toEqual([]);
+        expect(await store.getPost("old")).toBeNull();
+        expect(await store.getSetting("bookmark_folder_id")).toBe("folder2");
+        expect(await store.getSetting("bookmark_folder_name")).toBe("Later");
+      });
+
+      it("single-flights a live scan and fences it after exact-expiry recovery", async () => {
+        const store = await makeStore();
+        const stalePost = makePost({ text: "stale owner" });
+        const currentPost = makePost({ text: "recovered owner" });
+        await store.setBookmarkFolder("folder1", "Reading");
+
+        expect(await store.beginBookmarkSync("folder1", "run-old", 2000, 1000)).toBe(true);
+        expect(await store.beginBookmarkSync("folder1", "run-new", 4000, 1999)).toBe(false);
+        // At equality the crash lease is recoverable.
+        expect(await store.beginBookmarkSync("folder1", "run-new", 4000, 2000)).toBe(true);
+
+        expect(await store.renewBookmarkSync("folder1", "run-old", 5000)).toBe(false);
+        expect(await store.abortBookmarkSync("folder1", "run-old")).toBe(false);
+        expect(
+          await store.finishBookmarkSync(
+            "folder1",
+            "run-old",
+            [stalePost],
+            [stalePost.id],
+            true,
+            "2024-01-01T00:00:00.000Z",
+          ),
+        ).toEqual({ applied: false, added: 0, removed: 0 });
+        expect(await store.getPost(stalePost.id)).toBeNull();
+
+        expect(await store.renewBookmarkSync("folder1", "run-new", 6000)).toBe(true);
+        expect(
+          await store.finishBookmarkSync(
+            "folder1",
+            "run-new",
+            [currentPost],
+            [currentPost.id],
+            true,
+            "2024-01-01T00:00:01.000Z",
+          ),
+        ).toEqual({ applied: true, added: 1, removed: 0 });
+        expect((await store.listSavedItems()).map((item) => item.postId)).toEqual([
+          currentPost.id,
+        ]);
+      });
+
+      it("lets an unreplaced owner renew after expiry and releases handled failures", async () => {
+        const store = await makeStore();
+        await store.setBookmarkFolder("folder1", "Reading");
+        expect(await store.beginBookmarkSync("folder1", "run-old", 2000, 1000)).toBe(true);
+
+        // Expiry opens the recovery race; it does not itself change owner.
+        expect(await store.renewBookmarkSync("folder1", "run-old", 5000)).toBe(true);
+        expect(await store.beginBookmarkSync("folder1", "run-new", 6000, 3000)).toBe(false);
+        expect(await store.abortBookmarkSync("folder1", "run-wrong")).toBe(false);
+        expect(await store.abortBookmarkSync("folder1", "run-old")).toBe(true);
+        expect(await store.beginBookmarkSync("folder1", "run-new", 6000, 3000)).toBe(true);
+      });
+
+      it("recovers a legacy or malformed bookmark-run setting", async () => {
+        const store = await makeStore();
+        await store.setBookmarkFolder("folder1", "Reading");
+        await store.setSetting("bookmark_sync_run", "legacy-run-id");
+        expect(await store.beginBookmarkSync("folder1", "run-json", 5000, 1000)).toBe(true);
+        expect(await store.abortBookmarkSync("folder1", "run-json")).toBe(true);
+
+        await store.setSetting("bookmark_sync_run", "{");
+        expect(await store.beginBookmarkSync("folder1", "run-json-2", 5000, 1000)).toBe(true);
+      });
+
+      it("invalidates a scan when a fresh OAuth grant lands", async () => {
+        const store = await makeStore();
+        const post = makePost();
+        await store.setBookmarkFolder("folder1", "Reading");
+        expect(await store.beginBookmarkSync("folder1", "run-old-account", 5000, 1000)).toBe(true);
+
+        await store.putOAuthTokens("self", {
+          accessToken: "access-b",
+          refreshToken: "refresh-b",
+          expiresAt: 1_770_000_000_000,
+          scope: "tweet.read users.read bookmark.read",
+          userId: "account-b",
+        });
+
+        expect(
+          await store.finishBookmarkSync(
+            "folder1",
+            "run-old-account",
+            [post],
+            [post.id],
+            true,
+            "2024-01-01T00:00:00.000Z",
+          ),
+        ).toEqual({ applied: false, added: 0, removed: 0 });
+        expect(await store.getPost(post.id)).toBeNull();
+        expect(await store.listSavedItems()).toEqual([]);
+      });
+
+      it("reconciles the newest complete scan atomically without touching manual rows", async () => {
+        const store = await makeStore();
+        await store.addSavedItems([
+          savedItem("manual"),
+          savedItem("gone", { source: "bookmark" }),
+        ]);
+        await store.setBookmarkFolder("folder1", "Reading");
+        expect(await store.beginBookmarkSync("folder1", "run-current", 5000, 1000)).toBe(true);
+
+        expect(
+          await store.finishBookmarkSync(
+            "folder1",
+            "run-current",
+            [
+              makePost({ id: "manual", createdAt: "2024-01-01T00:00:00.000Z" }),
+              makePost({ id: "new", createdAt: "2024-01-01T00:00:01.000Z" }),
+            ],
+            ["manual", "new"],
+            true,
+            "2024-01-01T00:00:00.000Z",
+          ),
+        ).toEqual({ applied: true, added: 1, removed: 1 });
+        expect((await store.listSavedItems()).map(({ postId, source }) => ({ postId, source }))).toEqual([
+          { postId: "manual", source: "manual" },
+          { postId: "new", source: "bookmark" },
+        ]);
+      });
+
+      it("commits a maximal 1,000-post folder scan as one owned transaction", async () => {
+        const store = await makeStore();
+        const posts = Array.from({ length: 1_000 }, (_, index) =>
+          makePost({ text: `bookmark ${index}` }),
+        );
+        await store.setBookmarkFolder("folder1", "Reading");
+        expect(await store.beginBookmarkSync("folder1", "run-max", 5000, 1000)).toBe(true);
+
+        expect(
+          await store.finishBookmarkSync(
+            "folder1",
+            "run-max",
+            posts,
+            posts.map((post) => post.id),
+            true,
+            "2024-01-01T00:00:00.000Z",
+          ),
+        ).toEqual({ applied: true, added: 1_000, removed: 0 });
+        expect(await store.listSavedItems()).toHaveLength(1_000);
+        expect(await store.getPostsByIds(posts.map((post) => post.id))).toHaveLength(1_000);
       });
     });
 

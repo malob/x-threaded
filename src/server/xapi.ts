@@ -30,6 +30,8 @@ const EXPANSIONS =
   "author_id,referenced_tweets.id,referenced_tweets.id.author_id,attachments.media_keys";
 const USER_FIELDS = "name,username,profile_image_url";
 const MEDIA_FIELDS = "type,url,preview_image_url,width,height";
+/** Bound token-chasing; at the endpoint's maximum page size this covers 1,000 folders. */
+const MAX_BOOKMARK_FOLDER_PAGES = 10;
 /** Largest page we ask /tweets/search/all for. */
 export const SEARCH_PAGE_SIZE = 100;
 /** Smallest page /tweets/search/all accepts; asking for less is a 400. */
@@ -124,6 +126,18 @@ export interface SearchPageOptions {
    * is set — that already bounds the range, and the two can't both apply.
    */
   startTime?: string;
+}
+
+export interface PostLookupOptions {
+  /** Durable ownership/progress check immediately before each 100-id request. */
+  beforeRequest?: () => void | Promise<void>;
+}
+
+export interface BookmarkFolderLookupOptions {
+  /** Bound enumeration even if X keeps returning pagination tokens. */
+  maxPages?: number;
+  /** Durable ownership check before every enumeration and hydration request. */
+  beforeRequest?: () => void | Promise<void>;
 }
 
 /**
@@ -299,12 +313,14 @@ export class XApi {
     schema: TSchema,
     params: Record<string, string>,
     token?: string,
+    beforeRequest?: () => void | Promise<void>,
   ): Promise<v.InferOutput<TSchema>> {
     const url = new URL(`${API_BASE}${path}`);
     for (const [key, value] of Object.entries(params)) {
       url.searchParams.set(key, value);
     }
     const headers = { Authorization: `Bearer ${token ?? this.bearerToken}` };
+    await beforeRequest?.();
     let response = await fetch(url, { headers });
     // Exactly one retry, and a bounded wait. Once, because a call that fails
     // twice is a condition that won't clear inside a page load, and each
@@ -320,6 +336,7 @@ export class XApi {
             : 5000
           : 2000;
       await sleep(Math.min(waitMs, 60_000));
+      await beforeRequest?.();
       response = await fetch(url, { headers });
     }
     if (!response.ok) {
@@ -394,13 +411,33 @@ export class XApi {
     accessToken: string,
     userId: string,
   ): Promise<Billed<{ id: string; name: string }[]>> {
-    const result = await this.get(
-      `/users/${userId}/bookmarks/folders`,
-      BookmarkFoldersSchema,
-      {},
-      accessToken,
+    const folders: { id: string; name: string }[] = [];
+    let paginationToken: string | undefined;
+    for (let page = 0; page < MAX_BOOKMARK_FOLDER_PAGES; page++) {
+      const params: Record<string, string> = { max_results: "100" };
+      if (paginationToken) {
+        params.pagination_token = paginationToken;
+      }
+      const result = await this.get(
+        `/users/${userId}/bookmarks/folders`,
+        BookmarkFoldersSchema,
+        params,
+        accessToken,
+      );
+      // Unlike bookmark-item sync, this route has nowhere to represent an
+      // incomplete result. Returning the data beside errors would make a
+      // partial page look like the user's complete folder picker.
+      if ((result.errors?.length ?? 0) > 0) {
+        throw new XApiError("X returned an incomplete bookmark folder list", 502);
+      }
+      folders.push(...(result.data ?? []));
+      paginationToken = result.meta?.next_token;
+      if (!paginationToken) return { value: folders, receipt: NO_READS };
+    }
+    throw new XApiError(
+      `bookmark folder list exceeded the ${MAX_BOOKMARK_FOLDER_PAGES}-page safety limit`,
+      502,
     );
-    return { value: result.data ?? [], receipt: NO_READS };
   }
 
   /**
@@ -425,13 +462,15 @@ export class XApi {
     accessToken: string,
     userId: string,
     folderId: string,
-    maxPages = 10,
+    opts: BookmarkFolderLookupOptions = {},
   ): Promise<
     Billed<{ posts: Post[]; ids: string[]; missing: MissingPost[]; complete: boolean }>
   > {
+    const maxPages = opts.maxPages ?? 10;
     const ids: string[] = [];
     let paginationToken: string | undefined;
     let complete = false;
+    let sawEnumerationError = false;
     try {
       for (let page = 0; page < maxPages; page++) {
         const params: Record<string, string> = { max_results: "100" };
@@ -441,11 +480,17 @@ export class XApi {
           BookmarkFolderPageSchema,
           params,
           accessToken,
+          opts.beforeRequest,
         );
+        // A 2xx response can contain data and errors together, or only
+        // errors. Keep any IDs it did enumerate so additions can still make
+        // progress, but never call the overall scan complete: missing IDs
+        // are not affirmative evidence that the user un-bookmarked them.
+        sawEnumerationError ||= (result.errors?.length ?? 0) > 0;
         ids.push(...(result.data ?? []).map((t) => t.id));
         paginationToken = result.meta?.next_token;
         if (!paginationToken) {
-          complete = true;
+          complete = !sawEnumerationError;
           break;
         }
       }
@@ -456,7 +501,7 @@ export class XApi {
       // `missing` names those drops so callers can report them.
       const hydrated =
         ids.length > 0
-          ? await this.getPostsByIds(ids)
+          ? await this.getPostsByIds(ids, { beforeRequest: opts.beforeRequest })
           : { value: { posts: [], missing: [] }, receipt: NO_READS };
       return {
         value: { ...hydrated.value, ids, complete },
@@ -498,7 +543,10 @@ export class XApi {
    * given and absence-from-data is the backstop for the rest
    * (docs/x-api-notes.md N12).
    */
-  async getPostsByIds(ids: string[]): Promise<Billed<{ posts: Post[]; missing: MissingPost[] }>> {
+  async getPostsByIds(
+    ids: string[],
+    opts: PostLookupOptions = {},
+  ): Promise<Billed<{ posts: Post[]; missing: MissingPost[] }>> {
     const posts: Post[] = [];
     const reasons = new Map<string, string | undefined>();
     try {
@@ -509,7 +557,7 @@ export class XApi {
           expansions: EXPANSIONS,
           "user.fields": USER_FIELDS,
           "media.fields": MEDIA_FIELDS,
-        });
+        }, undefined, opts.beforeRequest);
         const users = new Map((page.includes?.users ?? []).map((u) => [u.id, u]));
         const media = mediaMap(page.includes);
         const fetchedAt = new Date().toISOString();

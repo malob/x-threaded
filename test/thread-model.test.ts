@@ -612,6 +612,29 @@ describe("display text", () => {
     expect(node.displayText).toBe("done");
   });
 
+  it("keeps ancestor context while not leaking branch-local handles into siblings", () => {
+    const t = conversation([
+      { name: "root", author: "A", handle: "alice", text: "root" },
+      {
+        name: "left",
+        author: "B",
+        handle: "bob",
+        parent: "root",
+        text: "left @alice @carol",
+      },
+      {
+        name: "right",
+        author: "D",
+        handle: "dan",
+        parent: "root",
+        text: "@alice @bob @carol only alice strips",
+      },
+    ]);
+    const node = t.node("right");
+    if (node.kind !== "post") throw new Error("expected a post");
+    expect(node.displayText).toBe("@bob @carol only alice strips");
+  });
+
   it("strips a leading @i under a gap — the last trace of the fake placeholder Post", () => {
     // A QUIRK, preserved: the placeholder Post this union replaced carried the
     // handle "i" (x.com's stand-in for an unnamed author), and that handle
@@ -744,6 +767,20 @@ function chain(n: number): { readonly ids: readonly string[]; readonly posts: re
   return { ids, posts };
 }
 
+function countSetAdditions<T>(run: () => T): { readonly value: T; readonly additions: number } {
+  const originalAdd = Set.prototype.add;
+  let additions = 0;
+  Set.prototype.add = function <T>(this: Set<T>, value: T): Set<T> {
+    additions += 1;
+    return originalAdd.call(this, value);
+  };
+  try {
+    return { value: run(), additions };
+  } finally {
+    Set.prototype.add = originalAdd;
+  }
+}
+
 describe("deep chains", () => {
   it("scopes every post of a long chain to the chain below it", () => {
     const { ids, posts } = chain(200);
@@ -783,5 +820,39 @@ describe("deep chains", () => {
     expect(model?.subtreeSize(ids[0]!)).toBe(10_000);
     expect(model?.allOrder.length).toBe(10_000);
     expect(elapsed).toBeLessThan(300);
+  });
+
+  it("retains one mutable path context for deep unique authors and mentions", () => {
+    const n = 2_000;
+    const ids: string[] = [];
+    const posts: Post[] = [];
+    for (let i = 0; i < n; i++) {
+      const createdAt = at(i);
+      const id = snowflakeId(createdAt);
+      ids.push(id);
+      posts.push(
+        makePost({
+          id,
+          createdAt,
+          authorId: `user${i}`,
+          authorHandle: `a${i}`,
+          parentId: i === 0 ? null : ids[i - 1]!,
+          text: i === 0 ? "root @m0" : `@a0 body @m${i}`,
+        }),
+      );
+    }
+
+    // Set construction uses Set.prototype.add for every copied entry. Counting
+    // those calls makes this a deterministic allocation-shape lock: cloning
+    // the ancestor context at every node costs ~n² calls, while push/pop adds
+    // each unique author and mention once along this single path.
+    const { value: model, additions } = countSetAdditions(() =>
+      buildThread(ids[0]!, posts, { truncated: true }),
+    );
+    const tail = model?.byId.get(ids[n - 1]!);
+
+    expect(tail?.kind === "post" ? tail.displayText : null).toBe(`body @m${n - 1}`);
+    expect(model?.allOrder.length).toBe(n);
+    expect(additions).toBeLessThanOrEqual(3 * n);
   });
 });

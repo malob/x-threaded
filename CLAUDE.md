@@ -29,8 +29,10 @@ versions of the code. Don't take its `file:line` references as current.
 ## Specific to this repo
 
 **Run the gates before calling anything done** — all five, listed in
-CONTRIBUTING.md. `bun test` alone is not enough: `test:d1` is the leg that
-catches what D1 rejects and `bun:sqlite` accepts.
+CONTRIBUTING.md. `bun test` alone is not enough: `test:d1` exercises real
+workerd D1 API shapes, batch behaviour, and the migrated schema. The default
+fake-D1 suite owns the service-only 100-bound-parameter limit, which local
+workerd does not enforce.
 
 **Don't improvise the deploy order.** DEPLOYING.md step 4 exists because a
 deployed Worker with no gate lets anyone spend the owner's money, and the
@@ -38,7 +40,8 @@ first-deploy sequence in step 3 exists because D1 isn't provisioned until the
 first `wrangler deploy`.
 
 **The money invariant is the one to hold on to.** Every `XApi` method returns
-its value with a cost receipt attached, and config that caps spending fails
-closed rather than degrading. CONTRIBUTING.md has the detail; the thing to
-remember here is that a change which quietly loosens either is wrong even when
-it looks tidier.
+its value with a cost receipt attached, and the config that bounds main
+search-result spending fails closed rather than degrading. It is not a total
+spend cap; referenced and follow-up lookups remain separately metered.
+CONTRIBUTING.md has the detail. A change that quietly loosens either the
+accounting or the main-result bound is wrong even when it looks tidier.

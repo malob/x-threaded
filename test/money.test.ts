@@ -89,7 +89,7 @@ describe("a conversation fetch — what actually bills", () => {
     expect(methods(app.xapi)).toEqual(["searchConversationPage"]);
   });
 
-  it("bills nothing for a second ingest the same day", async () => {
+  it("credits every post in a repeated plain-page ingest on the same day", async () => {
     const app = await makeTestApp();
     const root = makePost();
     const posts = [root, replyTo(root)];
@@ -425,7 +425,8 @@ describe("POST /api/conversations/:rootId/refresh — the UTC-day fork", () => {
     expect(response.status).toBe(200);
     expect(xapi.count("searchConversationPage")).toBe(1);
     expect(sinceIdOf(xapi)).toBeUndefined();
-    // A same-day re-read is free, which is the whole reason this branch exists.
+    // This fixture has only one already-stored page post and no ancillary
+    // lookups, so the same-day page credit makes its billable count zero.
     expect(((await response.json()) as RefreshResponse).cost).toMatchObject({ billable: 0 });
     // The row's timestamp advances, so the branch stays reachable today.
     expect((await store.getConversationMeta(root.id))?.fetchedAt).toBe(
@@ -451,15 +452,16 @@ describe("POST /api/conversations/:rootId/refresh — the UTC-day fork", () => {
 
   /**
    * The cross-day branch used to leave `fetchedAt` where it was, because that
-   * one column had to answer both "when did we last look" and "is a full
-   * re-read free today" — and advancing it would have made the next refresh
-   * buy a whole conversation believing it free (2026-07-30 review, H2).
+   * one column had to answer both "when did we last look" and "does a full
+   * reread get today's page credit" — and advancing it would have made the next
+   * refresh buy a whole conversation believing those posts were credited
+   * (2026-07-30 review, H2).
    *
    * Two columns, two answers: this branch advances the freshness one and
    * leaves the full-read one alone, so metrics stop rotting without the trap
    * coming back.
    */
-  it("advances fetchedAt on the cross-day branch, but not the free-re-read clock", async () => {
+  it("advances fetchedAt on the cross-day branch, but not the page-credit clock", async () => {
     const { app, store, xapi, root } = await seedAt(SAME_DAY);
     const laterDay = "2024-06-03T09:00:00.000Z";
     setSystemTime(new Date(laterDay));

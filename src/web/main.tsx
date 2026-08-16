@@ -24,7 +24,7 @@ class ErrorBoundary extends Component<{ children: ReactNode }, { message: string
     if (this.state.message === null) return this.props.children;
     return (
       <main>
-        <div className="error">
+        <div className="error" role="alert">
           <p>Something went wrong displaying this page — {this.state.message}</p>
           <button onClick={() => location.reload()}>Reload</button>
         </div>

@@ -14,7 +14,7 @@
     "typecheck": "tsc -b --force",
     "db:migrate": "wrangler d1 migrations apply DB --local",
     "db:migrate:remote": "wrangler d1 migrations apply DB --remote",
-    "deploy": "wrangler d1 migrations apply DB --remote && wrangler deploy"
+    "deploy": "bun run build && wrangler d1 migrations apply DB --remote && wrangler deploy"
   },
   "cloudflare": {
     "bindings": {

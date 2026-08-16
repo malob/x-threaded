@@ -2,6 +2,7 @@ export { createQueryClient } from "./client";
 export {
   conversationKey,
   conversationQueryOptions,
+  fetchStoredConversation,
   useConversation,
   useConversationWrites,
   useLoadConversation,

@@ -3,7 +3,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import type { ConversationResponse } from "../shared/types";
 import { resolvePost } from "./api";
 import {
-  conversationQueryOptions,
+  fetchStoredConversation,
   useConversation,
   useConversationWrites,
   useLoadConversation,
@@ -139,10 +139,7 @@ export function App() {
       // Read the stored conversation now rather than serve the slot's contents:
       // it is free, and a slot filled by an earlier refresh still carries that
       // refresh's cost receipt, which this open did not incur.
-      const cached = await queryClient.fetchQuery({
-        ...conversationQueryOptions(resolved),
-        staleTime: 0,
-      });
+      const cached = await fetchStoredConversation(queryClient, resolved);
       if (epoch !== navigation.current) return;
       setRootId(resolved);
       setFocusId(postId === resolved ? null : postId);
@@ -171,7 +168,7 @@ export function App() {
     const epoch = ++navigation.current;
     setError(null);
     try {
-      const response = await load.mutateAsync(postId);
+      const response = await load.mutateAsync({ url: postId, ownerRootId: rootId });
       if (epoch !== navigation.current) return;
       showLoaded(response, push);
     } catch (e) {
@@ -222,10 +219,10 @@ export function App() {
     setError(null);
     setNewCount(null);
     try {
-      const response = await load.mutateAsync(url);
+      const response = await load.mutateAsync({ url, ownerRootId: rootId });
       if (epoch !== navigation.current) return;
       showLoaded(response, true);
-      if (response.fromCache) writes.refresh(response.rootId);
+      if (response.fromCache && !response.refreshCovered) writes.refresh(response.rootId);
     } catch (e) {
       if (epoch !== navigation.current) return;
       setError((e as Error).message);
@@ -245,6 +242,7 @@ export function App() {
         }}
       >
         <input
+          aria-label="X post URL"
           value={url}
           onChange={(e) => setUrl(e.target.value)}
           placeholder="Paste an x.com post URL"
@@ -260,7 +258,11 @@ export function App() {
         <ThemeToggle />
       </form>
 
-      {errorMessage && <div className="error">{errorMessage}</div>}
+      {errorMessage && (
+        <div className="error" role="alert">
+          {errorMessage}
+        </div>
+      )}
 
       {pending ? (
         <div className="load-prompt">

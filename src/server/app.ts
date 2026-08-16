@@ -20,7 +20,7 @@ import type {
   SyncResponse,
 } from "../shared/types";
 import { parsePostUrl } from "../shared/urls";
-import { runConversationFetch } from "./conversation-fetch";
+import { ConversationRunConflictError, runConversationFetch } from "./conversation-fetch";
 import { conversationResponse } from "./conversations";
 import { SpendMeter } from "./meter";
 import {
@@ -35,13 +35,13 @@ import {
 import { jsonBody } from "./request";
 import { getQuotedFor, type Storage } from "./storage";
 import { groupOwnThreads } from "./threads";
-import { userContext } from "./user-context";
+import { UserContextConflictError, userContext } from "./user-context";
 import { spentOnFailure, XApiError, XApiShapeError, type XApiClient } from "./xapi";
 
 export interface AppDeps {
   store: Storage;
   xapi: XApiClient;
-  /** Safety cap on posts fetched per conversation load. */
+  /** Main conversation-search results allowed per load. */
   maxPosts: number;
   /** Null when the deployment has no OAuth user context configured. */
   oauth?: OAuthConfig | null;
@@ -50,13 +50,32 @@ export interface AppDeps {
 /** Where every "you need to (re)connect" answer points. */
 const LOGIN_URL = "/auth/login";
 
-const BOOKMARK_FOLDER_KEY = "bookmark_folder_id";
-const BOOKMARK_FOLDER_NAME_KEY = "bookmark_folder_name";
-
 /** How many of the user's threads /api/me/posts returns when it isn't told. */
 const DEFAULT_THREADS = 10;
 /** Every extra thread asked for is more timeline to page through, and pages bill. */
 const MAX_THREADS = 50;
+
+/**
+ * One outbound X operation can include a bounded 60-second retry wait. Two
+ * minutes gives it headroom while still letting a later request recover a
+ * Worker that vanished. Every further outbound boundary renews this lease.
+ */
+export const BOOKMARK_SYNC_LEASE_MS = 2 * 60_000;
+/** Ten folder pages plus ten 100-id hydration batches, with no hidden overrun. */
+export const BOOKMARK_SYNC_MAX_OWNERSHIP_CHECKS = 20;
+/**
+ * 20 ownership statements + 11 finish statements + the profile resolver's
+ * bounded 16 + folder read/claim + same-day credit = D1 Free's conservative 50.
+ */
+const BOOKMARK_SYNC_FINISH_STATEMENT_BUDGET = 11;
+
+/** A bookmark scan lost its durable owner and must make no further X calls. */
+export class BookmarkSyncConflictError extends Error {
+  constructor(message = "bookmark sync ownership changed; retry") {
+    super(message);
+    this.name = "BookmarkSyncConflictError";
+  }
+}
 
 /**
  * X statuses that mean something to the client and so travel unchanged:
@@ -142,6 +161,15 @@ export function buildApp({ store, xapi, maxPosts, oauth = null }: AppDeps): ApiA
     if (failed && meter) meter.absorb(failed);
     const spent: { cost?: FetchCost } = meter?.spent ? { cost: meter.cost() } : {};
 
+    if (err instanceof ConversationRunConflictError) {
+      return c.json({ error: err.message, ...spent } satisfies ApiError, 409);
+    }
+    if (err instanceof UserContextConflictError) {
+      return c.json({ error: err.message, ...spent } satisfies ApiError, 409);
+    }
+    if (err instanceof BookmarkSyncConflictError) {
+      return c.json({ error: err.message, ...spent } satisfies ApiError, 409);
+    }
     if (err instanceof XApiError) {
       console.error(`X API error (${err.status}): ${err.message}`);
       return c.json(
@@ -223,9 +251,10 @@ export function buildApp({ store, xapi, maxPosts, oauth = null }: AppDeps): ApiA
   });
 
   app.get("/api/settings", async (c) => {
+    const folder = await store.getBookmarkFolder();
     return c.json({
-      bookmarkFolderId: await store.getSetting(BOOKMARK_FOLDER_KEY),
-      bookmarkFolderName: await store.getSetting(BOOKMARK_FOLDER_NAME_KEY),
+      bookmarkFolderId: folder.id,
+      bookmarkFolderName: folder.name,
     } satisfies SettingsResponse);
   });
 
@@ -234,12 +263,12 @@ export function buildApp({ store, xapi, maxPosts, oauth = null }: AppDeps): ApiA
     if (!parsed.ok) return c.json({ error: parsed.error } satisfies ApiError, 400);
     const body = parsed.body;
     if (body.bookmarkFolderId !== undefined) {
-      await store.setSetting(BOOKMARK_FOLDER_KEY, body.bookmarkFolderId ?? "");
-      await store.setSetting(BOOKMARK_FOLDER_NAME_KEY, body.bookmarkFolderName ?? "");
+      await store.setBookmarkFolder(body.bookmarkFolderId ?? "", body.bookmarkFolderName ?? "");
     }
+    const folder = await store.getBookmarkFolder();
     return c.json({
-      bookmarkFolderId: await store.getSetting(BOOKMARK_FOLDER_KEY),
-      bookmarkFolderName: await store.getSetting(BOOKMARK_FOLDER_NAME_KEY),
+      bookmarkFolderId: folder.id,
+      bookmarkFolderName: folder.name,
     } satisfies SettingsResponse);
   });
 
@@ -255,54 +284,96 @@ export function buildApp({ store, xapi, maxPosts, oauth = null }: AppDeps): ApiA
    * treating everything it didn't reach as un-bookmarked.
    */
   app.post("/api/bookmarks/sync", async (c) => {
-    const folderId = await store.getSetting(BOOKMARK_FOLDER_KEY);
+    const folderId = (await store.getBookmarkFolder()).id;
     if (!folderId) {
       return c.json({ error: "no bookmark folder selected" } satisfies ApiError, 400);
     }
-    const meter = meterOf(c);
-    const { token, userId } = await userContext(store, xapi, oauth, meter);
-    const { posts, ids, missing, complete } = meter.charge(
-      await xapi.getBookmarksByFolder(token, userId, folderId),
-    );
-    // Before the upsert, which overwrites fetched_at: hydrating a post read
-    // earlier on the same UTC calendar day is the part X's dedup covers. The
-    // folder pages themselves are not credited — they enumerate rather than
-    // return posts, and whether that dedups is exactly the soft part of the
-    // rule (docs/x-api-notes.md N2, N8).
-    meter.credit(postReads((await store.postIdsReadToday(posts.map((p) => p.id))).size));
-    await store.upsertPosts(posts);
+    const runId = crypto.randomUUID();
+    const startedAt = Date.now();
+    const leaseUntil = startedAt + BOOKMARK_SYNC_LEASE_MS;
+    if (
+      !(await store.beginBookmarkSync(
+        folderId,
+        runId,
+        leaseUntil,
+        startedAt,
+      ))
+    ) {
+      return c.json({ error: "bookmark sync already active; retry shortly" } satisfies ApiError, 409);
+    }
+    let ownershipChecks = 0;
+    const renew = async () => {
+      ownershipChecks += 1;
+      if (ownershipChecks > BOOKMARK_SYNC_MAX_OWNERSHIP_CHECKS) {
+        throw new BookmarkSyncConflictError("bookmark sync exceeded its safe request budget; retry");
+      }
+      const owned = await store.renewBookmarkSync(
+        folderId,
+        runId,
+        Date.now() + BOOKMARK_SYNC_LEASE_MS,
+      );
+      if (!owned) throw new BookmarkSyncConflictError();
+    };
 
-    // Identity comes from the enumerated folder IDs, not the hydrated posts:
-    // hydration drops posts that went private or were deleted, and those are
-    // still bookmarks — not removals.
-    const inFolder = new Set(ids);
-    const existing = await store.listSavedItems();
-    const known = new Set(existing.map((i) => i.postId));
+    try {
+      const meter = meterOf(c);
+      const { token, userId } = await userContext(store, xapi, oauth, meter);
+      const { posts, ids, missing, complete } = meter.charge(
+        await xapi.getBookmarksByFolder(token, userId, folderId, { beforeRequest: renew }),
+      );
+      // Before the upsert, which overwrites fetched_at: hydrating a post read
+      // earlier on the same UTC calendar day is the part X's dedup covers. The
+      // folder pages themselves are not credited — they enumerate rather than
+      // return posts, and whether that dedups is exactly the soft part of the
+      // rule (docs/x-api-notes.md N2, N8).
+      meter.credit(postReads((await store.postIdsReadToday(posts.map((p) => p.id))).size));
+      // Identity comes from the enumerated folder IDs, not the hydrated posts:
+      // hydration drops posts that went private or were deleted, and those are
+      // still bookmarks — not removals.
+      const committed = await store.finishBookmarkSync(
+        folderId,
+        runId,
+        posts,
+        ids,
+        complete,
+        new Date().toISOString(),
+        BOOKMARK_SYNC_FINISH_STATEMENT_BUDGET,
+      );
+      if (committed.budgetExceeded) {
+        throw new BookmarkSyncConflictError(
+          "bookmark sync exceeded its safe database budget; retry a smaller scan",
+        );
+      }
+      if (!committed.applied) {
+        return c.json(
+          {
+            error: "bookmark sync was superseded; saved items were not changed",
+            cost: meter.cost(),
+          } satisfies ApiError,
+          409,
+        );
+      }
 
-    const fresh = posts.filter((p) => !known.has(p.id));
-    await store.addSavedItems(
-      fresh.map((p) => ({ postId: p.id, source: "bookmark", addedAt: new Date().toISOString() })),
-    );
-
-    // Removing is only safe once the whole folder has been enumerated: on a
-    // partial scan the unread tail is indistinguishable from un-bookmarking,
-    // so a large folder would delete its own live entries. Adding is safe
-    // either way, so an incomplete sync still makes progress.
-    const gone = complete
-      ? existing.filter((i) => i.source === "bookmark" && !inFolder.has(i.postId))
-      : [];
-    await store.removeSavedItems(gone.map((i) => i.postId));
-
-    return c.json({
-      synced: posts.length,
-      added: fresh.length,
-      removed: gone.length,
-      // Bookmarks whose posts X wouldn't return get no saved row — there is
-      // nothing to render — but they are counted rather than silently absent.
-      unavailable: missing.length,
-      complete,
-      cost: meter.cost(),
-    } satisfies SyncResponse);
+      return c.json({
+        synced: posts.length,
+        added: committed.added,
+        removed: committed.removed,
+        // Bookmarks whose posts X wouldn't return get no saved row — there is
+        // nothing to render — but they are counted rather than silently absent.
+        unavailable: missing.length,
+        complete,
+        cost: meter.cost(),
+      } satisfies SyncResponse);
+    } catch (error) {
+      // Never mask the actual route failure. If storage is unavailable too,
+      // expiry is the bounded crash-recovery path.
+      try {
+        await store.abortBookmarkSync(folderId, runId);
+      } catch {
+        // Best effort only.
+      }
+      throw error;
+    }
   });
 
   /** The saved queue: bookmarked and manually added posts, newest first. */
@@ -552,8 +623,9 @@ export function buildApp({ store, xapi, maxPosts, oauth = null }: AppDeps): ApiA
     const meter = meterOf(c);
     const before = await store.existingPostIds(rootId);
     // Post reads deduplicate within a UTC calendar day, so a full re-read on
-    // the same day as the last *full read* is free and refreshes metrics;
-    // otherwise fetch only new posts via since_id.
+    // the same day as the last *full read* credits already-stored page results
+    // while refreshing metrics. Ancillary media/root/quote lookups can still
+    // bill; otherwise fetch only new posts via since_id.
     //
     // The fork reads full_read_at rather than fetched_at because they answer
     // different questions. X's dedup is keyed on the posts we actually read,

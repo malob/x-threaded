@@ -31,7 +31,7 @@ import {
  */
 
 export interface ConversationFetchOptions {
-  /** Cap on posts this run may read; the API's 10-result floor rounds it down. */
+  /** Main search-result cap; includes and follow-up lookups do not consume it. */
   maxPosts: number;
   /** Only posts newer than this: a refresh looking for replies that arrived. */
   sinceId?: string;
@@ -63,8 +63,52 @@ export interface ConversationRun {
   root: Post;
 }
 
+/** A second request tried to spend on a conversation whose durable run is active. */
+export class ConversationRunConflictError extends Error {}
+
+/**
+ * A crashed Worker heals without manual intervention after this. Live runs
+ * renew conditionally before every outbound X boundary and before their first
+ * post write; the 90-second window below covers X's bounded 60-second retry
+ * without spending one D1 query per ordinary page.
+ */
+export const CONVERSATION_RUN_LEASE_MS = 5 * 60_000;
+
+/** Renew with enough room for X's one retry and its capped 60-second wait. */
+const CONVERSATION_RUN_RENEW_WINDOW_MS = 90_000;
+
 /** How many empty pages in a row a run follows before giving up on the token. */
 const MAX_CONSECUTIVE_EMPTY_PAGES = 3;
+
+interface RunLease {
+  until: number;
+  wrotePosts: boolean;
+}
+
+async function ensureRunLease(
+  store: Storage,
+  rootId: string,
+  runId: string,
+  lease: RunLease,
+  willWritePosts: boolean,
+): Promise<void> {
+  const now = Date.now();
+  const needsWriteMark = willWritePosts && !lease.wrotePosts;
+  if (!needsWriteMark && lease.until - now > CONVERSATION_RUN_RENEW_WINDOW_MS) return;
+
+  const nextUntil = now + CONVERSATION_RUN_LEASE_MS;
+  const renewed = await store.renewConversationRun(
+    rootId,
+    runId,
+    nextUntil,
+    willWritePosts,
+  );
+  if (!renewed) {
+    throw new ConversationRunConflictError("conversation fetch ownership changed; retry");
+  }
+  lease.until = nextUntil;
+  if (willWritePosts) lease.wrotePosts = true;
+}
 
 /**
  * Read a conversation into the store and leave its row honest about how much
@@ -72,10 +116,11 @@ const MAX_CONSECUTIVE_EMPTY_PAGES = 3;
  *
  * A run with neither bound is a *full read*: it starts at the newest post and,
  * if it exhausts the search, has seen everything — the one thing that may set
- * `full_read_at`, which is what makes the next same-day re-read free. A
- * `since_id` run only ever learns that nothing newer is missing, so exhausting
- * it says nothing about the history before its bound and leaves the status
- * where it was.
+ * `full_read_at`, which makes the next same-day page results eligible for the
+ * store's read credit. It does not make ancillary media/root/quote lookups free.
+ * A `since_id` run only ever learns that nothing newer is missing, so exhausting
+ * it says nothing about the history before its bound and leaves the status where
+ * it was.
  */
 export async function runConversationFetch(
   store: Storage,
@@ -84,36 +129,37 @@ export async function runConversationFetch(
   rootId: string,
   opts: ConversationFetchOptions,
 ): Promise<ConversationRun> {
-  // Read before opening: opening declares the fetch in flight and marks the
-  // row partial, which is exactly the state a bounded run has to restore.
-  const prior = await store.getConversationMeta(rootId);
-  await store.openConversation(rootId, new Date().toISOString());
+  const runId = crypto.randomUUID();
+  const claimedAt = Date.now();
+  const leaseUntil = claimedAt + CONVERSATION_RUN_LEASE_MS;
+  // This conditional write is the spend gate. It is deliberately before the
+  // first search/root/media call: a losing request returns 409 without asking
+  // X for anything, including across Worker isolates.
+  const claim = await store.claimConversationRun(
+    rootId,
+    runId,
+    new Date(claimedAt).toISOString(),
+    leaseUntil,
+    claimedAt,
+    opts.callerPersisted === true,
+  );
+  if (!claim) throw new ConversationRunConflictError("conversation fetch already in progress");
+  const prior = claim.prior;
+  const lease: RunLease = { until: leaseUntil, wrotePosts: opts.callerPersisted === true };
 
-  const written = { posts: opts.callerPersisted === true };
   try {
-    return await fetchAndClose(store, xapi, meter, rootId, opts, prior, written);
+    return await fetchAndClose(store, xapi, meter, rootId, runId, lease, opts, prior);
   } catch (error) {
-    // The open above stamped the row partial. A run that then died without
-    // persisting a single post proved nothing, so the stamp comes back off —
-    // for a conversation that was complete, leaving it would un-earn the full
-    // read and offer to sell back history that isn't missing. A run that DID
-    // write stays partial: what it holds really is unfinished business until
-    // a later run closes it.
-    //
-    // NOT concurrency-safe: `prior` is this run's snapshot, so with two
-    // overlapping runs on one conversation a write-less death here can lay
-    // its stale snapshot over the other run's newer lifecycle state (Codex
-    // review of b1543e6, finding 4). Guarding the restore can't fix that —
-    // nothing in the row identifies which run last touched it. The
-    // per-conversation run lease (CONTRIBUTING.md, "Known gaps") is the real
-    // answer, and this restore should become lease-holder-only when it lands.
-    if (!written.posts && prior !== null) {
-      try {
-        await store.upsertConversation({ rootId, ...prior });
-      } catch {
-        // The fetch error is the one worth reporting; a failed restore must
-        // not replace it.
-      }
+    // The claim stamped the row partial and durably captured the values it
+    // changed. A write-less failure asks to restore those values; a run that
+    // persisted paid posts leaves partial standing. Both paths clear the lease
+    // only if this run still owns it. If it expired and another Worker
+    // recovered, the stale cleanup is a no-op rather than a metadata rollback.
+    try {
+      await store.abortConversationRun(rootId, runId);
+    } catch {
+      // The fetch error is the one worth reporting; a failed cleanup must not
+      // replace it.
     }
     throw error;
   }
@@ -121,17 +167,18 @@ export async function runConversationFetch(
 
 /**
  * The run itself, from first page to closed row — split from the wrapper
- * above so it can restore the row when this dies having written nothing.
- * `written.posts` flips the moment any post lands in the store.
+ * above so it can restore the row when this dies having written nothing. That
+ * answer is durable in the lease row rather than invocation-local state.
  */
 async function fetchAndClose(
   store: Storage,
   xapi: XApiClient,
   meter: SpendMeter,
   rootId: string,
+  runId: string,
+  lease: RunLease,
   opts: ConversationFetchOptions,
   prior: Omit<ConversationMeta, "rootId"> | null,
-  written: { posts: boolean },
 ): Promise<ConversationRun> {
   const startTime = conversationStartTime(rootId);
   const posts: Post[] = [];
@@ -142,13 +189,14 @@ async function fetchAndClose(
   let emptyPages = 0;
 
   for (;;) {
-    // Ask for no more than the budget allows: checking the cap only after a
-    // full 100-post page would bill for up to 99 posts past it. The API won't
-    // serve a page smaller than MIN_SEARCH_PAGE_SIZE, so a budget with less
-    // than that left ends the run short rather than overshooting.
+    // Ask for no more main results than the configured bound allows: checking
+    // only after a full 100-post page would bill for up to 99 main results past
+    // it. The API will not serve a page below MIN_SEARCH_PAGE_SIZE, so less than
+    // that remaining ends the run short rather than overshooting.
     const remaining = opts.maxPosts - posts.length;
     if (remaining < MIN_SEARCH_PAGE_SIZE) break;
 
+    await ensureRunLease(store, rootId, runId, lease, false);
     const page = meter.charge(
       await xapi.searchConversationPage(rootId, {
         maxResults: Math.min(SEARCH_PAGE_SIZE, remaining),
@@ -164,8 +212,11 @@ async function fetchAndClose(
     // Before the next request, which is the one that can fail: what this page
     // billed for is in the store either way.
     const landed = [...page.posts, ...page.referenced];
+    // Set the durable write bit before the post batch. If the Worker dies in
+    // the batch, recovery must conservatively keep partial rather than restore
+    // complete over a page that may have landed.
+    await ensureRunLease(store, rootId, runId, lease, landed.length > 0);
     await persistFetchedPosts(store, meter, landed);
-    if (landed.length > 0) written.posts = true;
 
     nextToken = page.nextToken;
     if (!nextToken) {
@@ -196,10 +247,14 @@ async function fetchAndClose(
   if (toRefetch.length > 0) {
     // Ids the lookup couldn't return are dropped: the post already rendered
     // from the search response, it just keeps its media unresolved.
-    const refetched = meter.charge(await xapi.getPostsByIds(toRefetch)).posts;
+    const refetched = meter.charge(
+      await xapi.getPostsByIds(toRefetch, {
+        beforeRequest: () => ensureRunLease(store, rootId, runId, lease, false),
+      }),
+    ).posts;
     for (const post of refetched) referencedById.set(post.id, post);
+    await ensureRunLease(store, rootId, runId, lease, refetched.length > 0);
     await store.upsertPosts(refetched);
-    if (refetched.length > 0) written.posts = true;
   }
 
   // What the pages returned wins over what the caller brought: a `known` post
@@ -213,18 +268,19 @@ async function fetchAndClose(
 
   // The root last, and cheapest first: a search pages newest to oldest, so a
   // capped or bounded run may never have seen the conversation's own root.
-  const root =
-    byId.get(rootId) ??
-    (await store.getPost(rootId)) ??
-    meter.charge(await xapi.getPost(rootId));
+  let root = byId.get(rootId) ?? (await store.getPost(rootId));
+  if (!root) {
+    await ensureRunLease(store, rootId, runId, lease, false);
+    root = meter.charge(await xapi.getPost(rootId));
+  }
   byId.set(rootId, root);
   // Only what the pages didn't already store, which they did as they landed.
   const extras = new Map<string, Post>();
   for (const post of [root, ...(opts.known ?? [])]) {
     if (!fromPages.has(post.id)) extras.set(post.id, post);
   }
+  await ensureRunLease(store, rootId, runId, lease, extras.size > 0);
   await store.upsertPosts([...extras.values()]);
-  if (extras.size > 0) written.posts = true;
 
   // Running out of pages means nothing more is there — except for a since_id
   // run, which only ever learns that about the posts newer than its bound and
@@ -236,12 +292,23 @@ async function fetchAndClose(
       : (prior?.status ?? "partial");
   const finishedAt = new Date().toISOString();
   const fullRead = opts.sinceId === undefined && opts.untilId === undefined;
-  // Closed here, before the quotes: how much of the conversation we hold is
-  // settled by its own pages. A quoted post belongs to some other thread, and
-  // failing to look one up leaves a link unrendered — not a conversation with
-  // history missing, which is what `partial` would then send someone back to
-  // buy.
-  await store.upsertConversation({
+  // Keep ownership through quote resolution too: it can make several paid
+  // 100-id lookups. A quote failure still closes the conversation—its own
+  // history is settled—but the lease is released only after that paid work is
+  // done, so another run cannot overlap it.
+  let quoteFailure: { error: unknown } | null = null;
+  try {
+    await resolveQuotedPosts(store, xapi, meter, [...byId.values()], byId, {
+      beforeRequest: () => ensureRunLease(store, rootId, runId, lease, false),
+      beforePersist: (fetched) =>
+        ensureRunLease(store, rootId, runId, lease, fetched.length > 0),
+    });
+  } catch (error) {
+    quoteFailure = { error };
+  }
+
+  await ensureRunLease(store, rootId, runId, lease, false);
+  const closed = await store.finishConversationRun(runId, {
     rootId,
     rootAuthorHandle: root.authorHandle,
     rootText: root.text,
@@ -250,8 +317,10 @@ async function fetchAndClose(
     status,
     fullReadAt: fullRead && exhausted ? finishedAt : null,
   });
-
-  await resolveQuotedPosts(store, xapi, meter, [...byId.values()], byId);
+  if (!closed) {
+    throw new ConversationRunConflictError("conversation fetch ownership changed; retry");
+  }
+  if (quoteFailure) throw quoteFailure.error;
 
   return { status, root };
 }

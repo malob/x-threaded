@@ -1,31 +1,48 @@
-import { queryOptions, skipToken, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  queryOptions,
+  skipToken,
+  useMutation,
+  useQuery,
+  useQueryClient,
+  type QueryClient,
+} from "@tanstack/react-query";
 import { useRef, useState } from "react";
 import type { ConversationResponse, RefreshResponse } from "../../shared/types";
 import {
   getConversation,
   loadConversation,
-  markConversationRead,
   refreshConversation,
   resumeConversation,
   setReadState,
 } from "../api";
+import {
+  conversationKey,
+  runConversationLoadWrite,
+  runConversationMarkAllRead,
+  runConversationReadWrite,
+  runConversationResponseWrite,
+} from "./conversation-cache";
+
+export { conversationKey } from "./conversation-cache";
 
 /**
- * One cache slot per conversation. Everything that produces a conversation
- * writes to the slot named by the rootId it was asked about, which is what
- * stops a slow response from painting itself over whatever the reader has
- * since navigated to: a late answer lands in its own slot, unobserved.
+ * Cache-only query options. Conversation network reads are explicit ownership
+ * operations below; a query observer may subscribe to this slot but cannot
+ * start an unversioned refetch of it.
  */
-export const conversationKey = (rootId: string) => ["conversation", rootId] as const;
-
 export function conversationQueryOptions(rootId: string) {
-  return queryOptions({
+  return queryOptions<ConversationResponse>({
     queryKey: conversationKey(rootId),
-    // Reading a stored conversation costs nothing — it never touches X — so
-    // this one can take TanStack's signal and be abandoned mid-flight when the
-    // reader moves on.
-    queryFn: ({ signal }) => getConversation(rootId, signal),
+    queryFn: skipToken,
   });
+}
+
+/** Read the server's stored snapshot in the same known-root FIFO as writers. */
+export function fetchStoredConversation(
+  queryClient: QueryClient,
+  rootId: string,
+): Promise<ConversationResponse> {
+  return runConversationResponseWrite(queryClient, rootId, () => getConversation(rootId));
 }
 
 /**
@@ -34,38 +51,7 @@ export function conversationQueryOptions(rootId: string) {
  * open conversation is served from the slot rather than re-read here.
  */
 export function useConversation(rootId: string | null) {
-  const options = conversationQueryOptions(rootId ?? "");
-  return useQuery({
-    ...options,
-    queryFn: rootId === null ? skipToken : options.queryFn,
-  });
-}
-
-/** Apply a read/unread change to a cached conversation. */
-function withReadState(
-  conversation: ConversationResponse,
-  ids: string[],
-  read: boolean,
-): ConversationResponse {
-  const unread = new Set(conversation.unreadIds);
-  for (const id of ids) {
-    if (read) unread.delete(id);
-    else unread.add(id);
-  }
-  return { ...conversation, unreadIds: [...unread] };
-}
-
-/**
- * The subset of `ids` the conversation still contains.
- *
- * A rollback puts read-state back, and read-state only exists for posts that
- * are there: an id the conversation no longer has would become an unread that
- * nothing can display and nobody can clear, while still counting in the "N
- * unread" badge.
- */
-function stillPresent(conversation: ConversationResponse, ids: string[]): string[] {
-  const posts = new Set(conversation.posts.map((post) => post.id));
-  return ids.filter((id) => posts.has(id));
+  return useQuery(conversationQueryOptions(rootId ?? ""));
 }
 
 /**
@@ -75,15 +61,13 @@ function stillPresent(conversation: ConversationResponse, ids: string[]): string
 export function useLoadConversation() {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (url: string) => loadConversation(url),
-    onSuccess: (conversation) => {
-      // Seed the slot before the caller shows it, so the query that renders it
-      // finds fresh data and doesn't re-read what we were just handed.
-      queryClient.setQueryData<ConversationResponse>(
-        conversationKey(conversation.rootId),
-        conversation,
-      );
-    },
+    mutationFn: ({ url, ownerRootId }: { url: string; ownerRootId: string | null }) =>
+      runConversationLoadWrite(
+        queryClient,
+        ownerRootId,
+        () => loadConversation(url),
+        (rootId) => getConversation(rootId),
+      ),
   });
 }
 
@@ -135,22 +119,21 @@ export function useConversationWrites({ onRefreshed, onError }: ConversationWrit
   };
 
   const refreshMutation = useMutation({
-    mutationFn: (rootId: string) => refreshConversation(rootId),
-    onSuccess: (fresh, rootId) => {
-      // Written to its own rootId's slot, so a refresh that lands after the
-      // reader has left cannot resurrect the conversation they left.
-      queryClient.setQueryData<ConversationResponse>(conversationKey(rootId), fresh);
-      onRefreshed(rootId, fresh);
-    },
+    mutationFn: (rootId: string) =>
+      runConversationResponseWrite(
+        queryClient,
+        rootId,
+        () => refreshConversation(rootId),
+        { coversRefresh: true },
+      ),
+    onSuccess: (fresh, rootId) => onRefreshed(rootId, fresh),
     onError: (error) => onError(error.message),
     onSettled: (_data, _error, rootId) => release(rootId),
   });
 
   const resumeMutation = useMutation({
-    mutationFn: (rootId: string) => resumeConversation(rootId),
-    onSuccess: (older, rootId) => {
-      queryClient.setQueryData<ConversationResponse>(conversationKey(rootId), older);
-    },
+    mutationFn: (rootId: string) =>
+      runConversationResponseWrite(queryClient, rootId, () => resumeConversation(rootId)),
     onError: (error) => onError(error.message),
     onSettled: (_data, _error, rootId) => release(rootId),
   });
@@ -187,85 +170,40 @@ export interface SetReadVariables {
 /**
  * Mark posts read or unread, optimistically.
  *
- * The POST lives in `mutationFn`, not inside a state updater: React is allowed
- * to run an updater more than once, and this one used to fire a request from
- * inside it. The change is undone if the write fails, so a dot that came back
- * doesn't lie about what the server thinks.
- *
- * The undo is surgical, and has to be. The snapshot taken in `onMutate` is a
- * record of what these ids' read-state was, not a checkpoint of the
- * conversation: a refresh or a resume can land in the slot between the
- * optimistic change and the failure, and restoring a whole snapshotted
- * conversation over it would throw away posts the reader has just paid for.
- * So the rollback edits whatever is in the cache at the time it runs.
+ * Both read-write hooks share the per-conversation queue in
+ * `conversation-cache.ts`. Registration applies the intent optimistically;
+ * the HTTP request waits for every earlier read write on that conversation,
+ * and settlement replays the remaining intentions over the latest server
+ * response. That makes a rollback operation-owned rather than snapshot-owned.
  */
 export function useSetRead({ onError }: { onError: (message: string) => void }) {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: ({ ids, read }: SetReadVariables) => setReadState(ids, read),
-    onMutate: async ({ rootId, ids, read }) => {
-      // Nothing refetches conversations in the background, so this is belt and
-      // braces — but an in-flight read would otherwise overwrite the change.
-      await queryClient.cancelQueries({ queryKey: conversationKey(rootId) });
-      const previous = queryClient.getQueryData<ConversationResponse>(conversationKey(rootId));
-      queryClient.setQueryData<ConversationResponse>(conversationKey(rootId), (current) =>
-        current ? withReadState(current, ids, read) : current,
+    mutationFn: ({ rootId, ids, read }: SetReadVariables) => {
+      const requestedIds = [...ids];
+      return runConversationReadWrite(
+        queryClient,
+        rootId,
+        { kind: "set", ids: requestedIds, read },
+        () => setReadState(requestedIds, read),
       );
-      // Which of the touched ids were unread beforehand — enough to undo this
-      // change and nothing more. Nothing cached means nothing was changed.
-      if (!previous) return { wasUnread: null };
-      const unread = new Set(previous.unreadIds);
-      return { wasUnread: ids.filter((id) => unread.has(id)) };
     },
-    onError: (error, { rootId, ids }, context) => {
-      const wasUnread = context?.wasUnread;
-      if (wasUnread) {
-        const restoreUnread = new Set(wasUnread);
-        queryClient.setQueryData<ConversationResponse>(conversationKey(rootId), (current) => {
-          if (!current) return current;
-          const touched = stillPresent(current, ids);
-          return withReadState(
-            withReadState(current, touched.filter((id) => restoreUnread.has(id)), false),
-            touched.filter((id) => !restoreUnread.has(id)),
-            true,
-          );
-        });
-      }
-      onError(error.message);
-    },
+    onError: (error) => onError(error.message),
   });
 }
 
 /**
  * Mark every post in a conversation read, optimistically.
  *
- * Same rollback rule as `useSetRead`: on failure the posts that were unread go
- * back to unread inside whatever conversation is cached by then, rather than
- * the whole conversation reverting to the one that was on screen when the
- * request left.
+ * Uses the same queue and overlay as `useSetRead`, so a targeted operation
+ * invoked immediately after this one is already visible while this request is
+ * still on the wire, and remains visible if this request fails.
  */
 export function useMarkAllRead({ onError }: { onError: (message: string) => void }) {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (rootId: string) => markConversationRead(rootId),
-    onMutate: async (rootId) => {
-      await queryClient.cancelQueries({ queryKey: conversationKey(rootId) });
-      const previous = queryClient.getQueryData<ConversationResponse>(conversationKey(rootId));
-      queryClient.setQueryData<ConversationResponse>(conversationKey(rootId), (current) =>
-        current ? { ...current, unreadIds: [] } : current,
-      );
-      return { wasUnread: previous?.unreadIds ?? null };
-    },
-    onError: (error, rootId, context) => {
-      const wasUnread = context?.wasUnread;
-      if (wasUnread) {
-        queryClient.setQueryData<ConversationResponse>(conversationKey(rootId), (current) =>
-          // A union, not a replacement: anything the conversation has learned
-          // is unread since — new replies from a refresh — stays unread too.
-          current ? withReadState(current, stillPresent(current, wasUnread), false) : current,
-        );
-      }
-      onError(error.message);
-    },
+    mutationFn: (rootId: string) =>
+      runConversationMarkAllRead(queryClient, rootId, (ids) => setReadState([...ids], true)),
+    onError: (error) => onError(error.message),
   });
 }
