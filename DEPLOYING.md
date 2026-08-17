@@ -99,6 +99,46 @@ turning off the deployment gate remains a separate, explicit operation.
 403 with a message about having no gate. That's step 4 talking, and it means
 everything up to here worked.
 
+### Updating an existing button deployment
+
+The button created an independent GitHub repository for your deployment.
+Workers Builds watches that repository's production branch; it does not copy
+later changes from `malob/x-threaded` automatically.
+
+Add the original project as an upstream remote, then merge its current `main`
+into your production branch and push:
+
+```bash
+git remote add upstream https://github.com/malob/x-threaded.git
+git fetch upstream
+git switch main
+git merge upstream/main
+git push origin main
+```
+
+The first command is needed only once. If Workers Builds uses a production
+branch other than `main`, substitute that branch in the `switch` and `push`
+commands. If you have local changes, review the merge rather than discarding
+them.
+
+When resolving a conflict in `wrangler.jsonc`, keep the Cloudflare-generated
+values from your deployed copy — especially its D1 `database_id` and any
+customized Worker or resource names. Do not replace them with values from
+another deployment.
+
+The push makes Workers Builds run this repository's `deploy` script. That
+script builds the app, applies pending D1 migrations, and only then deploys the
+new Worker, so a failed migration stops the rollout before the new code goes
+live. Migration `0007` only adds columns to the existing database; it does not
+delete rows or wipe saved items, cached conversations, read state, or the
+connected X account. Worker secrets and Cloudflare Access configuration also
+survive the deployment.
+
+If you deployed manually from a direct clone of this repository, update that
+checkout instead: pull `main`, run `bun install`, then run `bun run deploy`.
+That uses the same migration-before-Worker order; do not repeat the exceptional
+first-bootstrap sequence.
+
 ## 4. Put a gate in front of it
 
 **Do this before you use the deployment, and before you give anyone the URL.**

@@ -1,8 +1,13 @@
-# Stabilization Plan
+# August 2026 Stabilization Record
 
-Status: stabilization implementation and verification complete; account lifecycle resolved, remaining product decisions deferred
-Baseline: `1b4783c3f24dc150d9dbe6494def81142e35a877`
-Branch: `codex/stabilization`
+- Status: completed, deployed, and merged to `main` on 2026-08-16
+- Baseline: `1b4783c3f24dc150d9dbe6494def81142e35a877`
+- Landed commits: `bf6aeb920021c0c9bf2a08b5e0b2ad02ff67b389`, `a123c6ab93268a2cb218ccbcc0feb8ab53424c22`
+
+> This is a point-in-time execution and verification record, not an active
+> roadmap or a source of current operating instructions. Unchecked items and
+> decisions 1–6 were deliberately deferred as follow-up work or product
+> choices; they do not mean the stabilization release was unfinished.
 
 ## Goal
 
@@ -46,7 +51,7 @@ Make the existing feature set safe and dependable before adding features. Preser
 - **Documented, not changed:** simultaneous requests for the same entirely unseen post can each buy its initial `$0.005` lookup; after the root resolves, the durable conversation lease stops every loser before search.
 - **Bounded, not exhaustive:** a Your posts request reads at most four 50-post timeline pages and returns at most 50 threads. It can truthfully return fewer items with `hasMore` when filtering or that safe boundary leaves more timeline to scan.
 
-### Unresolved or product-dependent
+### Deferred product decisions at closure
 
 - Whether to expand the current main-search-result cap into an enrichment or USD ceiling.
 - Whether app-only conversation work that loses its consumer should cancel or finish and cache. Account-owned OAuth work is already generation-fenced and is no longer part of this question.
@@ -54,7 +59,10 @@ Make the existing feature set safe and dependable before adding features. Preser
 - Visual treatment for accessible contrast and the keyboard-operable inbox-card affordance.
 - OAuth token-refresh abandoned-lease recovery policy.
 - Applicability of X's multiple-app policy to independent personal forks.
-- Whether any external database exists from an intermediate folded-migration version.
+
+The migration-history question was closed before release: the owner confirmed
+that no external deployment existed while the intermediate pre-fold migration
+sequence mattered, so no compatibility bridge was required.
 
 ## Execution phases
 
@@ -96,7 +104,7 @@ Make the existing feature set safe and dependable before adding features. Preser
 - [x] Resolve account/folder lifecycle decision 8 and fence account-owned work at disconnect boundaries.
 - [ ] Resolve the remaining user decisions before changing automatic-spend or public-distribution semantics.
 - [ ] Split route/controller responsibilities only after behavioral coverage exists.
-- [ ] Inventory links before moving historical design material.
+- [x] Inventory links before moving historical design material.
 - [x] Run the final lint, typecheck, unit, isolated D1, production build, Worker dry-run, browser, and diff checks.
 
 ## User decisions
@@ -110,7 +118,7 @@ entries remain here as the product-decision record.
 4. Visible accessibility treatment and inbox-card interaction design.
 5. OAuth token-refresh abandoned-lease recovery semantics.
 6. Public self-deployment posture and X policy risk.
-7. Any production deployment, live migration, or external data inspection.
+7. Future production deployments, live migrations, and external data inspection still require explicit approval. This stabilization's production migration, deployment, and authenticated smoke check were explicitly authorized and completed before the changes landed on `main`.
 8. **Resolved:** Reconnect accepts only the same X account and preserves its folder and library; a different account requires Disconnect first. Stop syncing and Disconnect each require an explicit keep/remove choice for bookmark imports. Disconnect revokes at X before terminal local cleanup. After it succeeds, the next login is fresh, accepts any account, and inherits no folder or bookmark-owned queue rows (items kept earlier remain ordinary local saves).
 
 ## Verification record
@@ -130,6 +138,10 @@ entries remain here as the product-decision record.
 - Final lint, forced multi-project typecheck, Vite production build, Worker deploy dry-run, and `git diff --check` all passed.
 - A real Bun entrypoint probe bound only to `127.0.0.1`, served the empty saved queue, and shut down cleanly.
 - The production build passed an isolated in-app-browser lifecycle walkthrough: confirmation focus and copy, incomplete and complete folder switching, manual-save preservation, Your Posts, and Disconnect-with-retention all behaved as designed against Fake X and an in-memory database, with no browser-console messages.
+- After explicit authorization, the production migration and Worker deployment completed, the authenticated production app passed its smoke check, `main` was fast-forwarded to the two stabilization commits, and GitHub Actions run `31997766611` passed.
 - Two orphaned Bun test processes from the review were detected after the user reported high CPU, terminated explicitly, and followed by a clean Bun/Workerd/Wrangler process check after the final gates.
 
-Retain this record until the remaining listed product decisions are resolved; after that, it can be reduced to a short durable stabilization record. The account-switch outcome in decision 8 is now a durable invariant, not an open question.
+This file is retained as historical evidence, not an active plan. The deferred
+product decisions remain recorded for deliberate future work, while the
+account-switch outcome in decision 8 is a durable invariant rather than an open
+question.

@@ -115,11 +115,10 @@ the point where they happen. Before "fixing" one, read the comment next to it:
   resolve its media is billed even when the same post was read minutes earlier.
   The estimate is meant to lean high.
 - **Opening a cached conversation currently auto-refreshes** it. That is an
-  explicit code path, not accidental query invalidation, but whether the product
-  should keep automatically spending there remains user decision 3 in
-  `PLANS.md`. An empty cross-day `since_id` page normally bills nothing, but a
-  same-day full reread or missing media/root/quote hydration can still produce a
-  charge.
+  explicit code path, not accidental query invalidation. Changing that automatic
+  spending behavior is a deferred product decision, not a bug fix. An empty
+  cross-day `since_id` page normally bills nothing, but a same-day full reread or
+  missing media/root/quote hydration can still produce a charge.
 - Protected accounts' replies stay as **"unavailable post" placeholders**.
   Full-archive search accepts the app-only bearer *only* (see x-api-notes N5),
   so conversation trees can never run as the signed-in user.

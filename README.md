@@ -55,6 +55,10 @@ your laptop.
 The button clones this repo into your GitHub, provisions a Worker and a D1
 database on the free tiers (no card), asks for your X token, and deploys.
 
+Already deployed with the button? Your generated repository does not receive
+upstream changes automatically; see
+[Updating an existing button deployment](DEPLOYING.md#updating-an-existing-button-deployment).
+
 **[`DEPLOYING.md`](DEPLOYING.md) is the full procedure** — the button, the
 manual route, the Access gate, and connecting an X account for the Your posts
 tab and bookmark sync. Using Claude Code? Ask it to deploy this and point it
@@ -67,8 +71,10 @@ said explicitly that you don't want one.** Localhost is never gated.
 
 ## Configuration
 
-Deployment configuration is per-deployment and is not committed.
-`.env.example` documents each environment value and what it unlocks.
+Secrets are per-deployment and are not committed. This public template omits
+deployment-specific resource IDs; a button-created copy may contain the
+non-secret IDs Cloudflare generated for that deployment. `.env.example`
+documents each environment value and what it unlocks.
 `X_BEARER_TOKEN` is the only credential required to run locally; a deployed
 Worker also requires the Access pair or an explicit `ALLOW_UNGATED` choice.
 OAuth is optional, and tuning values have working defaults.
@@ -251,9 +257,10 @@ Known and deliberate, as of this writing:
 - [`docs/design/`](docs/design/README.md) — the design record for the thread
   view: the "avatar graph" grammar, the rulings behind it, and three
   self-contained mockups you can open in a browser.
-- [`docs/history/`](docs/history/README.md) — superseded work kept for its
-  reasoning, including a seven-reviewer architecture audit and the adversarial
-  dialogue that settled its roadmap. Describes older code, not this one.
+- [`docs/history/`](docs/history/README.md) — completed and superseded
+  point-in-time records kept as historical evidence rather than current
+  operating documentation, including the August 2026 stabilization and its
+  seven-reviewer predecessor.
 
 ## License
 
