@@ -38,5 +38,13 @@ export function d1Driver(db: D1Database): SqlDriver {
       const results = await db.batch(statements.map(({ sql, params }) => prepare(sql, params)));
       return results.map(({ meta }) => ({ rowsAffected: meta.changes }));
     },
+
+    async batchFirst<T>(statements: SqlStatement[], query: SqlStatement): Promise<T | null> {
+      const results = await db.batch(
+        [...statements, query].map(({ sql, params }) => prepare(sql, params)),
+      );
+      const rows = results.at(-1)?.results as T[] | undefined;
+      return rows?.[0] ?? null;
+    },
   };
 }

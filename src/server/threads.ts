@@ -40,6 +40,10 @@ export async function groupOwnThreads(
   meter: SpendMeter,
   posts: Post[],
   userId: string,
+  accountBoundary: {
+    beforeRequest?: () => void | Promise<void>;
+    persistPosts?: (posts: Post[]) => Promise<void>;
+  } = {},
 ): Promise<OwnThread[]> {
   const byConversation = new Map<string, Post[]>();
   for (const post of posts) {
@@ -64,7 +68,11 @@ export async function groupOwnThreads(
   // thread grouped without one, same as before the fetch.
   const missing = wanted.filter((id) => !roots.has(id));
   if (missing.length > 0) {
-    await store.upsertPosts(meter.charge(await xapi.getPostsByIds(missing)).posts);
+    const found = meter.charge(
+      await xapi.getPostsByIds(missing, { beforeRequest: accountBoundary.beforeRequest }),
+    ).posts;
+    if (accountBoundary.persistPosts) await accountBoundary.persistPosts(found);
+    else await store.upsertPosts(found);
     for (const post of await store.getPostsByIds(missing)) roots.set(post.id, post);
   }
 

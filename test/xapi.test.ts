@@ -7,7 +7,7 @@ import { spentOnFailure, XApi, XApiError, XApiShapeError } from "../src/server/x
 import { snowflakeMs } from "../src/shared/snowflake";
 import type { FetchCost, Post } from "../src/shared/types";
 import { makePost, snowflakeId } from "./fixtures";
-import { makeBookmarkApp } from "./harness";
+import { accountRequest, makeBookmarkApp } from "./harness";
 import type { Storage } from "../src/server/storage";
 import { withMockFetch } from "./setup";
 
@@ -840,7 +840,9 @@ describe("POST /api/bookmarks/sync reconciliation", () => {
     const { app, store } = await makeBookmarkApp([inFolder], false);
     const beyondTheCap = await seedUnseenBookmark(store);
 
-    const response = await app.request("/api/bookmarks/sync", { method: "POST" });
+    const response = await accountRequest(app, store, "/api/bookmarks/sync", {
+      method: "POST",
+    });
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({ complete: false, added: 1, removed: 0 });
 
@@ -854,7 +856,9 @@ describe("POST /api/bookmarks/sync reconciliation", () => {
     const { app, store } = await makeBookmarkApp([inFolder], true);
     const unbookmarked = await seedUnseenBookmark(store);
 
-    const response = await app.request("/api/bookmarks/sync", { method: "POST" });
+    const response = await accountRequest(app, store, "/api/bookmarks/sync", {
+      method: "POST",
+    });
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({ complete: true, added: 1, removed: 1 });
 
@@ -878,7 +882,9 @@ describe("POST /api/bookmarks/sync hydration loss", () => {
       { postId: goneId, source: "bookmark", addedAt: new Date().toISOString() },
     ]);
 
-    const response = await app.request("/api/bookmarks/sync", { method: "POST" });
+    const response = await accountRequest(app, store, "/api/bookmarks/sync", {
+      method: "POST",
+    });
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({ removed: 1, complete: true, unavailable: 1 });
 
@@ -892,7 +898,9 @@ describe("POST /api/bookmarks/sync hydration loss", () => {
     const ghostId = snowflakeId("2025-07-07T07:07:07.000Z");
     const { app, store } = await makeBookmarkApp([postA], true, "u1", [postA.id, ghostId]);
 
-    const response = await app.request("/api/bookmarks/sync", { method: "POST" });
+    const response = await accountRequest(app, store, "/api/bookmarks/sync", {
+      method: "POST",
+    });
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({ added: 1, removed: 0, unavailable: 1 });
 

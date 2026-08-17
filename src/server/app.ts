@@ -2,11 +2,13 @@ import { Hono, type Context } from "hono";
 import * as v from "valibot";
 import { clamp, parseIntStrict } from "../shared/num";
 import { ownedReads, postReads } from "../shared/pricing";
+import { ACCOUNT_GENERATION_HEADER, MAX_OWN_POST_THREADS } from "../shared/types";
 import type {
   ApiError,
   AuthRequiredError,
   AuthStatus,
   ConversationResponse,
+  DisconnectResponse,
   FetchCost,
   FoldersResponse,
   OkResponse,
@@ -26,14 +28,23 @@ import { SpendMeter } from "./meter";
 import {
   authorizeUrl,
   createPkce,
-  exchangeCode,
+  exchangeCodeForTokens,
   newState,
+  OAuthCodeExchangeError,
   OAuthError,
+  OAuthGrantConflictError,
+  OAuthRevocationError,
+  revokeOAuthGrant,
   SELF_ID,
   type OAuthConfig,
 } from "./oauth";
 import { jsonBody } from "./request";
-import { getQuotedFor, type Storage } from "./storage";
+import {
+  getQuotedFor,
+  type BookmarkDisposition,
+  type OAuthTokens,
+  type Storage,
+} from "./storage";
 import { groupOwnThreads } from "./threads";
 import { UserContextConflictError, userContext } from "./user-context";
 import { spentOnFailure, XApiError, XApiShapeError, type XApiClient } from "./xapi";
@@ -52,8 +63,15 @@ const LOGIN_URL = "/auth/login";
 
 /** How many of the user's threads /api/me/posts returns when it isn't told. */
 const DEFAULT_THREADS = 10;
-/** Every extra thread asked for is more timeline to page through, and pages bill. */
-const MAX_THREADS = 50;
+/**
+ * Four 50-post pages leave room for worst-case first-profile polling, one
+ * root-lookup per page, guarded writes, and response reads inside D1 Free's
+ * conservative 50-statement invocation budget. A still-paginated result says
+ * hasMore rather than buying a fifth page the invocation cannot persist.
+ */
+const OWN_POSTS_MAX_PAGES = 4;
+/** Timeline plus root-lookup request boundaries across those four pages. */
+const OWN_POSTS_MAX_OWNERSHIP_CHECKS = 8;
 
 /**
  * One outbound X operation can include a bounded 60-second retry wait. Two
@@ -68,6 +86,9 @@ export const BOOKMARK_SYNC_MAX_OWNERSHIP_CHECKS = 20;
  * bounded 16 + folder read/claim + same-day credit = D1 Free's conservative 50.
  */
 const BOOKMARK_SYNC_FINISH_STATEMENT_BUDGET = 11;
+/** Revocation itself has a 60-second network bound upstream; leave recovery headroom. */
+const OAUTH_DISCONNECT_LEASE_MS = 2 * 60_000;
+const OAUTH_CALLBACK_LEASE_MS = 2 * 60_000;
 
 /** A bookmark scan lost its durable owner and must make no further X calls. */
 export class BookmarkSyncConflictError extends Error {
@@ -108,6 +129,34 @@ function meterOf(c: Context<AppEnv>): SpendMeter {
   return meter;
 }
 
+function expectedAccountGeneration(c: Context<AppEnv>): string {
+  const generation = c.req.header(ACCOUNT_GENERATION_HEADER)?.trim();
+  if (!generation) {
+    throw new UserContextConflictError("X account state is stale; reload before retrying");
+  }
+  return generation;
+}
+
+function authLoginPath(accountGeneration: string): string {
+  return `/auth/login?${new URLSearchParams({ accountGeneration })}`;
+}
+
+function clearPkceCookie(c: Context<AppEnv>): void {
+  c.header("Set-Cookie", "x_pkce=; HttpOnly; Secure; SameSite=Lax; Path=/auth; Max-Age=0");
+}
+
+/** Stable browser redirect carrying the same receipt fields as FetchCost. */
+function authNoticePath(notice: string, meter?: SpendMeter): string {
+  const params = new URLSearchParams({ authNotice: notice });
+  if (meter?.spent) {
+    const cost = meter.cost();
+    params.set("authCostPosts", String(cost.posts));
+    params.set("authCostBillable", String(cost.billable));
+    params.set("authCostUsd", String(cost.usd));
+  }
+  return `/?${params}`;
+}
+
 /** What POST /api/conversations accepts; `url` is validated by parsePostUrl. */
 const ConversationRequest = v.object({
   url: v.optional(v.string()),
@@ -122,6 +171,16 @@ const ConversationRequest = v.object({
 const SettingsPatch = v.object({
   bookmarkFolderId: v.optional(v.nullable(v.string())),
   bookmarkFolderName: v.optional(v.string()),
+  bookmarkDisposition: v.optional(v.union([v.literal("keep"), v.literal("remove")])),
+});
+
+const BookmarkFolderSwitchRequest = v.object({
+  bookmarkFolderId: v.string(),
+  bookmarkFolderName: v.string(),
+});
+
+const DisconnectRequest = v.object({
+  bookmarkDisposition: v.union([v.literal("keep"), v.literal("remove")]),
 });
 
 const ReadStateRequest = v.object({
@@ -170,6 +229,9 @@ export function buildApp({ store, xapi, maxPosts, oauth = null }: AppDeps): ApiA
     if (err instanceof BookmarkSyncConflictError) {
       return c.json({ error: err.message, ...spent } satisfies ApiError, 409);
     }
+    if (err instanceof OAuthGrantConflictError) {
+      return c.json({ error: err.message, ...spent } satisfies ApiError, 409);
+    }
     if (err instanceof XApiError) {
       console.error(`X API error (${err.status}): ${err.message}`);
       return c.json(
@@ -180,6 +242,10 @@ export function buildApp({ store, xapi, maxPosts, oauth = null }: AppDeps): ApiA
     if (err instanceof XApiShapeError) {
       // The full issue list is for us; the client gets the endpoint only.
       console.error(`X API shape error on ${err.path}: ${err.issues}`);
+      return c.json({ error: err.message, ...spent } satisfies ApiError, 502);
+    }
+    if (err instanceof OAuthRevocationError) {
+      console.error(err);
       return c.json({ error: err.message, ...spent } satisfies ApiError, 502);
     }
     if (err instanceof OAuthError) {
@@ -205,12 +271,18 @@ export function buildApp({ store, xapi, maxPosts, oauth = null }: AppDeps): ApiA
    */
   app.get("/auth/login", async (c) => {
     if (!oauth) return c.json({ error: "OAuth is not configured" } satisfies ApiError, 400);
+    const status = await store.getOAuthStatusSnapshot(SELF_ID, crypto.randomUUID());
+    const requestedGeneration = c.req.query("accountGeneration")?.trim();
+    if (requestedGeneration && requestedGeneration !== status.accountGeneration) {
+      return c.redirect(authNoticePath("account-state-changed"));
+    }
+    const accountGeneration = requestedGeneration || status.accountGeneration;
     const { verifier, challenge } = await createPkce();
     const state = newState();
     const redirectUri = new URL("/auth/callback", c.req.url).toString();
     c.header(
       "Set-Cookie",
-      `x_pkce=${verifier}.${state}; HttpOnly; Secure; SameSite=Lax; Path=/auth; Max-Age=600`,
+      `x_pkce=${verifier}.${state}.${accountGeneration}; HttpOnly; Secure; SameSite=Lax; Path=/auth; Max-Age=600`,
     );
     return c.redirect(authorizeUrl(oauth, redirectUri, state, challenge));
   });
@@ -226,24 +298,327 @@ export function buildApp({ store, xapi, maxPosts, oauth = null }: AppDeps): ApiA
     if (!code || !state) return c.json({ error: "missing code or state" } satisfies ApiError, 400);
 
     const cookie = /(?:^|;\s*)x_pkce=([^;]+)/.exec(c.req.header("Cookie") ?? "")?.[1];
-    const [verifier, expectedState] = (cookie ?? "").split(".");
-    if (!verifier || !expectedState || expectedState !== state) {
+    const [verifier, expectedState, expectedGeneration] = (cookie ?? "").split(".");
+    if (!verifier || !expectedState || !expectedGeneration || expectedState !== state) {
       return c.json({ error: "state mismatch — restart the login" } satisfies ApiError, 400);
     }
 
+    // The authorization code is one-shot; no callback outcome should leave a
+    // reusable verifier/state cookie behind, including account mismatch.
+    clearPkceCookie(c);
     const redirectUri = new URL("/auth/callback", c.req.url).toString();
-    await exchangeCode(store, oauth, code, verifier, redirectUri);
-    c.header("Set-Cookie", "x_pkce=; HttpOnly; Secure; SameSite=Lax; Path=/auth; Max-Age=0");
-    // Back to the app rather than a JSON dump; the inbox reflects the new state.
-    return c.redirect("/");
+    const callbackStatus = await store.getOAuthStatusForGeneration(
+      SELF_ID,
+      expectedGeneration,
+    );
+    if (!callbackStatus) return c.redirect(authNoticePath("account-state-changed"));
+    const observed = callbackStatus.tokens;
+    let callbackLeaseId: string;
+    let meter: SpendMeter | undefined;
+    let oldUserId: string | null = null;
+    let observedRefreshToken: string | null = null;
+
+    // Resolve the old account before exchanging the code. Issuing the new
+    // grant first can invalidate the only token capable of identifying a
+    // legacy row whose user_id has not been cached yet.
+    if (observed) {
+      if (observed.state === "disconnecting") {
+        return c.redirect(authNoticePath("reauthorization-conflict"));
+      }
+      oldUserId = observed.userId;
+      observedRefreshToken = observed.refreshToken;
+      if (!oldUserId) {
+        if (observed.state === "broken" || observed.state === "reauthorizing") {
+          return c.redirect(authNoticePath("disconnect-first"));
+        }
+        meter = meterOf(c);
+        const current = await userContext(store, xapi, oauth, meter, expectedGeneration);
+        oldUserId = current.userId;
+        observedRefreshToken = current.refreshToken;
+      }
+      callbackLeaseId = crypto.randomUUID();
+      const now = Date.now();
+      if (
+        !(await store.claimOAuthReauthorization(
+          SELF_ID,
+          observedRefreshToken,
+          callbackLeaseId,
+          now + OAUTH_CALLBACK_LEASE_MS,
+          now,
+          expectedGeneration,
+        ))
+      ) {
+        return c.redirect(authNoticePath("reauthorization-conflict", meter));
+      }
+    } else {
+      callbackLeaseId = crypto.randomUUID();
+      const now = Date.now();
+      if (
+        !(await store.claimFreshOAuthInstall(
+          SELF_ID,
+          callbackLeaseId,
+          now + OAUTH_CALLBACK_LEASE_MS,
+          now,
+          expectedGeneration,
+        ))
+      ) {
+        return c.redirect(authNoticePath("reauthorization-conflict"));
+      }
+    }
+
+    let next: OAuthTokens;
+    try {
+      next = await exchangeCodeForTokens(oauth, code, verifier, redirectUri);
+    } catch (error) {
+      try {
+        if (!observed) {
+          await store.releaseOAuthCallbackLease(SELF_ID, callbackLeaseId);
+        } else if (error instanceof OAuthCodeExchangeError && error.outcome === "refused") {
+          // A 4xx token-endpoint refusal proves no replacement was issued, so
+          // restoring the exact displaced state is safe. A recovery callback
+          // displaced `reauthorizing`, not `ready`, and therefore stays fenced.
+          await store.restoreOAuthReauthorization(
+            SELF_ID,
+            observedRefreshToken!,
+            callbackLeaseId,
+          );
+        } else {
+          await store.settleOAuthReauthorizationPending(
+            SELF_ID,
+            observedRefreshToken!,
+            callbackLeaseId,
+            "reauthorization exchange outcome is unknown; retry Reconnect or disconnect X",
+          );
+        }
+      } catch (transitionError) {
+        // The row was fenced before the provider call. Preserve the provider
+        // error; a failed settlement leaves that durable fence in place.
+        console.error("could not settle a failed OAuth callback", transitionError);
+      }
+      throw error;
+    }
+
+    // A first authorization deliberately defers /users/me. Installation is
+    // insert-only so two callbacks cannot silently turn the loser into an
+    // account switch; orphaned bookmark rows are detached in the same batch.
+    if (!observed) {
+      if (await store.finishFreshOAuthInstall(SELF_ID, callbackLeaseId, next)) {
+        return c.redirect("/");
+      }
+      try {
+        await revokeOAuthGrant(oauth, next.refreshToken);
+      } catch (error) {
+        console.error("could not revoke a fresh OAuth callback that lost its install race", error);
+      }
+      return c.redirect(authNoticePath("reauthorization-conflict"));
+    }
+
+    meter ??= meterOf(c);
+
+    let me: { id: string; username: string; name: string };
+    try {
+      me = meter.charge(await xapi.getMe(next.accessToken));
+    } catch (error) {
+      try {
+        await revokeOAuthGrant(oauth, next.refreshToken);
+      } catch (cleanupError) {
+        console.error("could not revoke a replacement grant after identity lookup failed", cleanupError);
+      }
+      try {
+        await store.settleOAuthReauthorizationPending(
+          SELF_ID,
+          observedRefreshToken!,
+          callbackLeaseId,
+          "replacement grant was issued but its account could not be verified; retry Reconnect or disconnect X",
+        );
+      } catch (transitionError) {
+        // Preserve the identity failure; the already-written row fence remains.
+        console.error("could not settle an unidentified replacement grant", transitionError);
+      }
+      throw error;
+    }
+
+    if (me.id !== oldUserId) {
+      let notice = "different-account";
+      try {
+        await revokeOAuthGrant(oauth, next.refreshToken);
+      } catch (error) {
+        notice = "different-account-revoke-failed";
+        console.error("could not revoke the rejected different-account OAuth grant", error);
+      }
+      const restored = await store.restoreOAuthReauthorization(
+        SELF_ID,
+        observedRefreshToken!,
+        callbackLeaseId,
+      );
+      if (!restored) {
+        return c.redirect(authNoticePath("reauthorization-conflict", meter));
+      }
+      return c.redirect(authNoticePath(notice, meter));
+    }
+
+    let replaced: boolean;
+    try {
+      replaced = await store.replaceOAuthTokensIfCurrent(
+        SELF_ID,
+        observedRefreshToken!,
+        {
+          ...next,
+          userId: me.id,
+          username: me.username,
+          displayName: me.name,
+        },
+        callbackLeaseId,
+      );
+    } catch (error) {
+      let promotion: Awaited<ReturnType<Storage["probeOAuthReauthorizationPromotion"]>>;
+      try {
+        promotion = await store.probeOAuthReauthorizationPromotion(
+          SELF_ID,
+          observedRefreshToken!,
+          next.refreshToken,
+          callbackLeaseId,
+        );
+      } catch (probeError) {
+        // Do not revoke on read ambiguity: the failed write may actually have
+        // committed, in which case `next` is the locally installed winner.
+        console.error("could not probe an ambiguous replacement promotion", probeError);
+        throw error;
+      }
+      if (promotion === "promoted") {
+        return c.redirect(authNoticePath("reauthorized", meter));
+      }
+      try {
+        await revokeOAuthGrant(oauth, next.refreshToken);
+      } catch (cleanupError) {
+        console.error("could not revoke a replacement grant after promotion failed", cleanupError);
+      }
+      if (promotion === "owned-pending") {
+        try {
+          await store.settleOAuthReauthorizationPending(
+            SELF_ID,
+            observedRefreshToken!,
+            callbackLeaseId,
+            "same-account replacement was issued but local promotion failed; retry Reconnect or disconnect X",
+          );
+        } catch (transitionError) {
+          console.error("could not settle a failed replacement promotion", transitionError);
+        }
+        throw error;
+      }
+      return c.redirect(authNoticePath("reauthorization-conflict", meter));
+    }
+    if (!replaced) {
+      try {
+        await revokeOAuthGrant(oauth, next.refreshToken);
+      } catch (error) {
+        console.error("could not revoke a replacement OAuth grant after its CAS lost", error);
+      }
+      try {
+        await store.settleOAuthReauthorizationPending(
+          SELF_ID,
+          observedRefreshToken!,
+          callbackLeaseId,
+          "same-account replacement lost local ownership; retry Reconnect or disconnect X",
+        );
+      } catch (transitionError) {
+        console.error("could not settle a replacement that lost ownership", transitionError);
+      }
+      return c.redirect(authNoticePath("reauthorization-conflict", meter));
+    }
+    return c.redirect(authNoticePath("reauthorized", meter));
+  });
+
+  app.post("/api/auth/disconnect", async (c) => {
+    if (!oauth) return c.json({ error: "OAuth is not configured" } satisfies ApiError, 400);
+    const parsed = await jsonBody(c.req.raw, DisconnectRequest);
+    if (!parsed.ok) return c.json({ error: parsed.error } satisfies ApiError, 400);
+    const expectedGeneration = expectedAccountGeneration(c);
+    const disposition = parsed.body.bookmarkDisposition satisfies BookmarkDisposition;
+    const status = await store.getOAuthStatusForGeneration(SELF_ID, expectedGeneration);
+    if (!status) throw new UserContextConflictError("X account changed; reload before retrying");
+    const observed = status.tokens;
+    if (!observed) {
+      // This also repairs legacy/orphan folder state without pretending a
+      // provider credential existed to revoke.
+      const accountGeneration = await store.finishOAuthDisconnectWithoutGrant(
+        disposition,
+        expectedGeneration,
+      );
+      if (!accountGeneration) {
+        return c.json(
+          { error: "X account transition already active; retry shortly" } satisfies ApiError,
+          409,
+        );
+      }
+      return c.json({ ok: true, accountGeneration } satisfies DisconnectResponse);
+    }
+
+    const leaseId = crypto.randomUUID();
+    const now = Date.now();
+    const claimed = await store.claimOAuthDisconnect(
+      SELF_ID,
+      observed.refreshToken,
+      leaseId,
+      now + OAUTH_DISCONNECT_LEASE_MS,
+      now,
+      expectedGeneration,
+    );
+    if (!claimed) {
+      return c.json(
+        { error: "X account transition already active; retry shortly" } satisfies ApiError,
+        409,
+      );
+    }
+
+    try {
+      await revokeOAuthGrant(oauth, observed.refreshToken);
+    } catch (error) {
+      try {
+        await store.releaseOAuthDisconnect(SELF_ID, observed.refreshToken, leaseId);
+      } catch {
+        // Do not replace the provider error; lease expiry is recovery.
+      }
+      throw error;
+    }
+
+    const accountGeneration = await store.finishOAuthDisconnect(
+      SELF_ID,
+      observed.refreshToken,
+      leaseId,
+      disposition,
+    );
+    if (!accountGeneration) {
+      return c.json(
+        {
+          error: "X grant was revoked but local account cleanup was superseded; retry",
+        } satisfies ApiError,
+        409,
+      );
+    }
+    return c.json({ ok: true, accountGeneration } satisfies DisconnectResponse);
   });
 
   /** Bookmark folders, for choosing which one feeds the saved tab. */
   app.get("/api/bookmarks/folders", async (c) => {
+    const expectedGeneration = expectedAccountGeneration(c);
     const meter = meterOf(c);
-    const { token, userId } = await userContext(store, xapi, oauth, meter);
+    const { token, userId, refreshToken } = await userContext(
+      store,
+      xapi,
+      oauth,
+      meter,
+      expectedGeneration,
+    );
+    const beforeRequest = async () => {
+      if (
+        !(await store.isOAuthGrantCurrent(SELF_ID, refreshToken, expectedGeneration))
+      ) {
+        throw new UserContextConflictError("X account changed during the request; stopped");
+      }
+    };
     return c.json({
-      folders: meter.charge(await xapi.getBookmarkFolders(token, userId)),
+      folders: meter.charge(await xapi.getBookmarkFolders(token, userId, { beforeRequest })),
       // Folders are free, but the first-ever call here pays a getMe to learn
       // who "the user" is — spend that would otherwise leave no trace.
       ...(meter.spent ? { cost: meter.cost() } : {}),
@@ -251,7 +626,9 @@ export function buildApp({ store, xapi, maxPosts, oauth = null }: AppDeps): ApiA
   });
 
   app.get("/api/settings", async (c) => {
-    const folder = await store.getBookmarkFolder();
+    const expectedGeneration = expectedAccountGeneration(c);
+    const folder = await store.getBookmarkFolderForGeneration(expectedGeneration);
+    if (!folder) throw new UserContextConflictError("X account changed; reload before retrying");
     return c.json({
       bookmarkFolderId: folder.id,
       bookmarkFolderName: folder.name,
@@ -261,15 +638,167 @@ export function buildApp({ store, xapi, maxPosts, oauth = null }: AppDeps): ApiA
   app.patch("/api/settings", async (c) => {
     const parsed = await jsonBody(c.req.raw, SettingsPatch);
     if (!parsed.ok) return c.json({ error: parsed.error } satisfies ApiError, 400);
+    const expectedGeneration = expectedAccountGeneration(c);
     const body = parsed.body;
     if (body.bookmarkFolderId !== undefined) {
-      await store.setBookmarkFolder(body.bookmarkFolderId ?? "", body.bookmarkFolderName ?? "");
+      if (body.bookmarkFolderId !== null) {
+        return c.json(
+          { error: "use /api/bookmarks/switch to select a folder safely" } satisfies ApiError,
+          409,
+        );
+      }
+      if (!body.bookmarkDisposition) {
+        return c.json(
+          { error: "bookmarkDisposition must be keep or remove when clearing a folder" } satisfies ApiError,
+          400,
+        );
+      }
+      if (!(await store.clearBookmarkFolder(body.bookmarkDisposition, expectedGeneration))) {
+        return c.json(
+          { error: "X account transition already active; retry shortly" } satisfies ApiError,
+          409,
+        );
+      }
+    } else if (body.bookmarkDisposition !== undefined) {
+      return c.json(
+        { error: "bookmarkDisposition requires bookmarkFolderId: null" } satisfies ApiError,
+        400,
+      );
     }
-    const folder = await store.getBookmarkFolder();
+    const folder = await store.getBookmarkFolderForGeneration(expectedGeneration);
+    if (!folder) throw new UserContextConflictError("X account changed; reload before retrying");
     return c.json({
       bookmarkFolderId: folder.id,
       bookmarkFolderName: folder.name,
     } satisfies SettingsResponse);
+  });
+
+  /**
+   * Replace the active bookmark source only after the target folder has been
+   * read completely. Until the guarded finish transaction lands, both the
+   * selection and every bookmark-owned queue row still describe the source.
+   */
+  app.post("/api/bookmarks/switch", async (c) => {
+    const parsed = await jsonBody(c.req.raw, BookmarkFolderSwitchRequest);
+    if (!parsed.ok) return c.json({ error: parsed.error } satisfies ApiError, 400);
+    const expectedGeneration = expectedAccountGeneration(c);
+    const targetFolderId = parsed.body.bookmarkFolderId;
+    const targetFolderName = parsed.body.bookmarkFolderName;
+    if (!targetFolderId || !targetFolderName) {
+      return c.json({ error: "bookmark folder id and name are required" } satisfies ApiError, 400);
+    }
+    const source = await store.getBookmarkFolderForGeneration(expectedGeneration);
+    if (!source) throw new UserContextConflictError("X account changed; reload before retrying");
+    if (source.id === targetFolderId) {
+      return c.json(
+        { error: "folder is already selected; use /api/bookmarks/sync" } satisfies ApiError,
+        409,
+      );
+    }
+
+    const runId = crypto.randomUUID();
+    const startedAt = Date.now();
+    if (
+      !(await store.beginBookmarkFolderSwitch(
+        source.id,
+        targetFolderId,
+        targetFolderName,
+        runId,
+        startedAt + BOOKMARK_SYNC_LEASE_MS,
+        startedAt,
+        expectedGeneration,
+      ))
+    ) {
+      return c.json({ error: "bookmark sync already active; retry shortly" } satisfies ApiError, 409);
+    }
+
+    let ownershipChecks = 0;
+    const renew = async () => {
+      ownershipChecks += 1;
+      if (ownershipChecks > BOOKMARK_SYNC_MAX_OWNERSHIP_CHECKS) {
+        throw new BookmarkSyncConflictError("bookmark sync exceeded its safe request budget; retry");
+      }
+      if (
+        !(await store.renewBookmarkFolderSwitch(
+          source.id,
+          targetFolderId,
+          targetFolderName,
+          runId,
+          Date.now() + BOOKMARK_SYNC_LEASE_MS,
+        ))
+      ) {
+        throw new BookmarkSyncConflictError();
+      }
+    };
+
+    try {
+      const meter = meterOf(c);
+      const { token, userId } = await userContext(
+        store,
+        xapi,
+        oauth,
+        meter,
+        expectedGeneration,
+      );
+      const { posts, ids, missing, complete } = meter.charge(
+        await xapi.getBookmarksByFolder(token, userId, targetFolderId, {
+          beforeRequest: renew,
+        }),
+      );
+      meter.credit(postReads((await store.postIdsReadToday(posts.map((post) => post.id))).size));
+      if (!complete) {
+        await store.abortBookmarkFolderSwitch(source.id, targetFolderId, runId);
+        return c.json(
+          {
+            error: "target folder scan was incomplete; previous selection was not changed",
+            cost: meter.cost(),
+          } satisfies ApiError,
+          409,
+        );
+      }
+
+      const committed = await store.finishBookmarkFolderSwitch(
+        source.id,
+        targetFolderId,
+        targetFolderName,
+        runId,
+        posts,
+        ids,
+        new Date().toISOString(),
+        BOOKMARK_SYNC_FINISH_STATEMENT_BUDGET,
+      );
+      if (committed.budgetExceeded) {
+        throw new BookmarkSyncConflictError(
+          "bookmark sync exceeded its safe database budget; retry a smaller scan",
+        );
+      }
+      if (!committed.applied) {
+        return c.json(
+          {
+            error: "bookmark switch was superseded; previous selection was not changed",
+            cost: meter.cost(),
+          } satisfies ApiError,
+          409,
+        );
+      }
+      return c.json({
+        synced: posts.length,
+        added: committed.added,
+        removed: committed.removed,
+        unavailable: missing.length,
+        complete: true,
+        cost: meter.cost(),
+        bookmarkFolderId: targetFolderId,
+        bookmarkFolderName: targetFolderName,
+      } satisfies SyncResponse & SettingsResponse);
+    } catch (error) {
+      try {
+        await store.abortBookmarkFolderSwitch(source.id, targetFolderId, runId);
+      } catch {
+        // Best effort; expiry is crash recovery.
+      }
+      throw error;
+    }
   });
 
   /**
@@ -284,7 +813,10 @@ export function buildApp({ store, xapi, maxPosts, oauth = null }: AppDeps): ApiA
    * treating everything it didn't reach as un-bookmarked.
    */
   app.post("/api/bookmarks/sync", async (c) => {
-    const folderId = (await store.getBookmarkFolder()).id;
+    const expectedGeneration = expectedAccountGeneration(c);
+    const folder = await store.getBookmarkFolderForGeneration(expectedGeneration);
+    if (!folder) throw new UserContextConflictError("X account changed; reload before retrying");
+    const folderId = folder.id;
     if (!folderId) {
       return c.json({ error: "no bookmark folder selected" } satisfies ApiError, 400);
     }
@@ -297,6 +829,7 @@ export function buildApp({ store, xapi, maxPosts, oauth = null }: AppDeps): ApiA
         runId,
         leaseUntil,
         startedAt,
+        expectedGeneration,
       ))
     ) {
       return c.json({ error: "bookmark sync already active; retry shortly" } satisfies ApiError, 409);
@@ -317,7 +850,13 @@ export function buildApp({ store, xapi, maxPosts, oauth = null }: AppDeps): ApiA
 
     try {
       const meter = meterOf(c);
-      const { token, userId } = await userContext(store, xapi, oauth, meter);
+      const { token, userId } = await userContext(
+        store,
+        xapi,
+        oauth,
+        meter,
+        expectedGeneration,
+      );
       const { posts, ids, missing, complete } = meter.charge(
         await xapi.getBookmarksByFolder(token, userId, folderId, { beforeRequest: renew }),
       );
@@ -438,10 +977,42 @@ export function buildApp({ store, xapi, maxPosts, oauth = null }: AppDeps): ApiA
     if (requestedThreads === null) {
       return c.json({ error: "threads must be an integer" } satisfies ApiError, 400);
     }
-    const target = clamp(requestedThreads, 1, MAX_THREADS);
+    const target = clamp(requestedThreads, 1, MAX_OWN_POST_THREADS);
+    const expectedGeneration = expectedAccountGeneration(c);
 
     const meter = meterOf(c);
-    const { token, userId } = await userContext(store, xapi, oauth, meter);
+    const { token, userId, refreshToken } = await userContext(
+      store,
+      xapi,
+      oauth,
+      meter,
+      expectedGeneration,
+    );
+    let ownershipChecks = 0;
+    const assertGrantCurrent = async () => {
+      ownershipChecks += 1;
+      if (ownershipChecks > OWN_POSTS_MAX_OWNERSHIP_CHECKS) {
+        throw new UserContextConflictError("own-post scan reached its safe request budget; retry");
+      }
+      if (
+        !(await store.isOAuthGrantCurrent(SELF_ID, refreshToken, expectedGeneration))
+      ) {
+        throw new UserContextConflictError("X account changed during the request; stopped");
+      }
+    };
+    const persistAccountPosts = async (accountPosts: Post[]) => {
+      if (
+        !(await store.upsertPostsIfOAuthGrantCurrent(
+          SELF_ID,
+          refreshToken,
+          accountPosts,
+          1,
+          expectedGeneration,
+        ))
+      ) {
+        throw new UserContextConflictError("X account changed during the request; wrote nothing");
+      }
+    };
     // Keep scanning until there are enough threads the user actually
     // started. Counting raw conversations would overshoot, because replies
     // into other people's threads get filtered out afterwards.
@@ -451,19 +1022,29 @@ export function buildApp({ store, xapi, maxPosts, oauth = null }: AppDeps): ApiA
     const posts: Post[] = [];
     let paginationToken: string | undefined;
     let items: OwnThread[];
+    let pagesRead = 0;
     for (;;) {
       const page = meter.charge(
-        await xapi.getOwnPosts(token, userId, { max: 50, paginationToken }),
+        await xapi.getOwnPosts(token, userId, {
+          max: 50,
+          paginationToken,
+          beforeRequest: assertGrantCurrent,
+        }),
       );
+      pagesRead += 1;
       posts.push(...page.posts);
       paginationToken = page.nextToken;
       // Credit before the upsert overwrites fetched_at — the same ordering
       // ingest depends on, and what makes the re-scan above actually cheap.
       meter.credit(ownedReads((await store.postIdsReadToday(page.posts.map((p) => p.id))).size));
-      await store.upsertPosts(page.posts);
-      items = await groupOwnThreads(store, xapi, meter, posts, userId);
+      await persistAccountPosts(page.posts);
+      items = await groupOwnThreads(store, xapi, meter, posts, userId, {
+        beforeRequest: assertGrantCurrent,
+        persistPosts: persistAccountPosts,
+      });
       if (items.length >= target || !paginationToken || page.posts.length === 0) break;
       if (posts.length >= MAX_SCAN) break;
+      if (pagesRead >= OWN_POSTS_MAX_PAGES) break;
     }
 
     const shown = items.slice(0, target);
@@ -486,21 +1067,35 @@ export function buildApp({ store, xapi, maxPosts, oauth = null }: AppDeps): ApiA
    * visit, and the old version paid a billable /2/users/me and could burn a
    * single-use refresh token to answer it (2026-07-30 review, H1). An expired
    * token still reads as authorized — renewing it is the next real request's
-   * job. A grant the token manager has given up on reads as `broken`, which
-   * is the one state the user has to act on, so it carries the login link and
-   * the reason with it.
-   */
+   * job. A grant the token manager has given up on, or a replacement whose
+   * provider outcome is ambiguous, reads as `broken` and carries the login
+   * link and reason. The latter remains recoverable `reauthorizing` storage
+   * state so it can never be mistaken for a usable old pair.
+  */
   app.get("/api/auth/status", async (c) => {
-    if (!oauth) return c.json({ state: "unconfigured" } satisfies AuthStatus);
-    const stored = await store.getOAuthTokens(SELF_ID);
-    if (!stored) {
-      return c.json({ state: "unauthorized", loginUrl: LOGIN_URL } satisfies AuthStatus);
+    const { accountGeneration, tokens: stored } = await store.getOAuthStatusSnapshot(
+      SELF_ID,
+      crypto.randomUUID(),
+    );
+    if (!oauth) {
+      return c.json({ state: "unconfigured", accountGeneration } satisfies AuthStatus);
     }
-    if (stored.state === "broken") {
+    if (!stored) {
+      return c.json({
+        state: "unauthorized",
+        loginUrl: authLoginPath(accountGeneration),
+        accountGeneration,
+      } satisfies AuthStatus);
+    }
+    if (stored.state === "disconnecting") {
+      return c.json({ state: "disconnecting", accountGeneration } satisfies AuthStatus);
+    }
+    if (stored.state === "broken" || stored.state === "reauthorizing") {
       return c.json({
         state: "broken",
         reason: stored.brokenReason ?? "unknown",
-        loginUrl: LOGIN_URL,
+        loginUrl: authLoginPath(accountGeneration),
+        accountGeneration,
       } satisfies AuthStatus);
     }
     return c.json({
@@ -511,6 +1106,7 @@ export function buildApp({ store, xapi, maxPosts, oauth = null }: AppDeps): ApiA
         : null,
       scopes: stored.scope ? stored.scope.split(" ") : [],
       expiresAt: stored.expiresAt,
+      accountGeneration,
     } satisfies AuthStatus);
   });
 

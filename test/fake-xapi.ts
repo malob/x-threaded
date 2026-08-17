@@ -110,34 +110,49 @@ export class FakeXApi implements XApiClient {
     );
   }
 
-  getMe(accessToken: string): Promise<Billed<{ id: string; username: string; name: string }>> {
+  async getMe(
+    accessToken: string,
+    opts: { beforeRequest?: () => void | Promise<void> } = {},
+  ): Promise<Billed<{ id: string; username: string; name: string }>> {
     // A User Read, not a post read — the unit the real client bills it in.
-    return this.record("getMe", this.onGetMe, [accessToken], () => userReads(1));
+    await opts.beforeRequest?.();
+    return await this.record("getMe", this.onGetMe, [accessToken, opts], () => userReads(1));
   }
 
   getOwnPosts(
     accessToken: string,
     userId: string,
-    opts: { max?: number; paginationToken?: string } = {},
+    opts: {
+      max?: number;
+      paginationToken?: string;
+      beforeRequest?: () => void | Promise<void>;
+    } = {},
   ): Promise<Billed<{ posts: Post[]; nextToken?: string }>> {
-    return this.record(
-      "getOwnPosts",
-      this.onGetOwnPosts,
-      [accessToken, userId, opts],
-      ({ posts }) => ownedReads(posts.length),
-    );
+    return (async () => {
+      await opts.beforeRequest?.();
+      return await this.record(
+        "getOwnPosts",
+        this.onGetOwnPosts,
+        [accessToken, userId, opts],
+        ({ posts }) => ownedReads(posts.length),
+      );
+    })();
   }
 
   getBookmarkFolders(
     accessToken: string,
     userId: string,
+    opts: { beforeRequest?: () => void | Promise<void> } = {},
   ): Promise<Billed<{ id: string; name: string }[]>> {
-    return this.record(
-      "getBookmarkFolders",
-      this.onGetBookmarkFolders,
-      [accessToken, userId],
-      () => NO_READS,
-    );
+    return (async () => {
+      await opts.beforeRequest?.();
+      return await this.record(
+        "getBookmarkFolders",
+        this.onGetBookmarkFolders,
+        [accessToken, userId, opts],
+        () => NO_READS,
+      );
+    })();
   }
 
   async getBookmarksByFolder(

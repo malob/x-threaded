@@ -20,6 +20,7 @@ import { FakeXApi } from "./fake-xapi";
 import {
   SELF_USER_ID,
   TEST_OAUTH,
+  accountRequest,
   fetchConversationRequest,
   searchPage,
   idsRequested,
@@ -28,6 +29,7 @@ import {
   methods,
   replyTo,
   seedConversation,
+  withAccountGeneration,
 } from "./harness";
 
 describe("POST /api/conversations — cache-first resolution", () => {
@@ -332,10 +334,10 @@ describe("GET /api/me/posts — threads param", () => {
   });
 
   it("honours an explicit threads", async () => {
-    const { app, xapi } = await makeAuthedApp();
+    const { app, store, xapi } = await makeAuthedApp();
     xapi.onGetOwnPosts = () => ({ posts: ownPage(8) });
 
-    const response = await app.request("/api/me/posts?threads=5");
+    const response = await accountRequest(app, store, "/api/me/posts?threads=5");
 
     expect(response.status).toBe(200);
     const body = (await response.json()) as OwnPostsResponse;
@@ -345,10 +347,10 @@ describe("GET /api/me/posts — threads param", () => {
   });
 
   it("defaults to 10 threads when the param is missing", async () => {
-    const { app, xapi } = await makeAuthedApp();
+    const { app, store, xapi } = await makeAuthedApp();
     xapi.onGetOwnPosts = () => ({ posts: ownPage(12) });
 
-    const response = await app.request("/api/me/posts");
+    const response = await accountRequest(app, store, "/api/me/posts");
 
     expect(response.status).toBe(200);
     const body = (await response.json()) as OwnPostsResponse;
@@ -357,14 +359,14 @@ describe("GET /api/me/posts — threads param", () => {
   });
 
   it("clamps threads into 1..50", async () => {
-    const { app, xapi } = await makeAuthedApp();
+    const { app, store, xapi } = await makeAuthedApp();
     xapi.onGetOwnPosts = () => ({ posts: ownPage(3) });
 
-    const low = await app.request("/api/me/posts?threads=0");
+    const low = await accountRequest(app, store, "/api/me/posts?threads=0");
     expect(low.status).toBe(200);
     expect(((await low.json()) as OwnPostsResponse).items).toHaveLength(1);
 
-    const high = await app.request("/api/me/posts?threads=999");
+    const high = await accountRequest(app, store, "/api/me/posts?threads=999");
     expect(high.status).toBe(200);
     expect(((await high.json()) as OwnPostsResponse).items).toHaveLength(3);
   });
@@ -426,7 +428,7 @@ describe("GET /api/me/posts — grouping into threads", () => {
     await seedConversation(store, cached);
     xapi.onGetOwnPosts = () => ({ posts: [cached, uncached] });
 
-    const body = (await (await app.request("/api/me/posts")).json()) as OwnPostsResponse;
+    const body = (await (await accountRequest(app, store, "/api/me/posts")).json()) as OwnPostsResponse;
 
     expect(body.items.map((i) => [i.root.id, i.loaded])).toEqual([
       [cached.id, true],
@@ -441,7 +443,7 @@ describe("GET /api/me/posts — grouping into threads", () => {
     await store.upsertPosts([root]);
     xapi.onGetOwnPosts = () => ({ posts: [continuation] });
 
-    const body = (await (await app.request("/api/me/posts")).json()) as OwnPostsResponse;
+    const body = (await (await accountRequest(app, store, "/api/me/posts")).json()) as OwnPostsResponse;
 
     expect(body.items.map((i) => [i.root.id, i.ownPostCount, i.latestAt])).toEqual([
       [root.id, 2, LATER],
@@ -451,7 +453,7 @@ describe("GET /api/me/posts — grouping into threads", () => {
   });
 
   it("buys a root neither the page nor the store has, once, in one batch", async () => {
-    const { app, xapi } = await makeAuthedApp();
+    const { app, store, xapi } = await makeAuthedApp();
     const root = makePost({ authorId: SELF_USER_ID, createdAt: EARLIER });
     const continuation = replyTo(root, { authorId: SELF_USER_ID, createdAt: LATER });
     xapi.onGetOwnPosts = () => ({ posts: [continuation] });
@@ -460,7 +462,7 @@ describe("GET /api/me/posts — grouping into threads", () => {
       missing: [],
     });
 
-    const body = (await (await app.request("/api/me/posts")).json()) as OwnPostsResponse;
+    const body = (await (await accountRequest(app, store, "/api/me/posts")).json()) as OwnPostsResponse;
 
     expect(idsRequested(xapi)).toEqual([[root.id]]);
     expect(body.items.map((i) => i.root.id)).toEqual([root.id]);
@@ -474,7 +476,7 @@ describe("GET /api/me/posts — grouping into threads", () => {
     await store.upsertPosts([theirs]);
     xapi.onGetOwnPosts = () => ({ posts: [ourReply, ours] });
 
-    const body = (await (await app.request("/api/me/posts")).json()) as OwnPostsResponse;
+    const body = (await (await accountRequest(app, store, "/api/me/posts")).json()) as OwnPostsResponse;
 
     expect(body.items.map((i) => i.root.id)).toEqual([ours.id]);
   });
@@ -518,6 +520,45 @@ describe("GET /api/auth/status — answered from the store", () => {
     expect(xapi.calls).toEqual([]);
   });
 
+  it("never combines a new account row with the prior account generation", async () => {
+    const { app, store } = await makeAuthedApp();
+    await store.putUserProfile(SELF_ID, "refresh", {
+      userId: SELF_USER_ID,
+      username: "account-a",
+      displayName: "Account A",
+    });
+    const generationA = await store.getOrCreateAccountGeneration(SELF_ID, "generation-a");
+    const snapshot = store.getOAuthStatusSnapshot.bind(store);
+    let transitioned = false;
+    store.getOAuthStatusSnapshot = async (id, candidate) => {
+      const observed = await snapshot(id, candidate);
+      await store.putOAuthTokens(SELF_ID, {
+        accessToken: "access-b",
+        refreshToken: "refresh-b",
+        expiresAt: Date.now() + 60_000,
+        scope: "tweet.read users.read",
+        userId: "200",
+        username: "account-b",
+        displayName: "Account B",
+      });
+      transitioned = true;
+      return observed;
+    };
+
+    expect(await authStatus(app)).toMatchObject({
+      state: "authorized",
+      accountGeneration: generationA,
+      user: { username: "account-a", name: "Account A" },
+    });
+    expect(transitioned).toBe(true);
+    const committed = await snapshot(SELF_ID, "generation-loser");
+    expect(committed.accountGeneration).not.toBe(generationA);
+    expect(committed.tokens).toMatchObject({
+      refreshToken: "refresh-b",
+      username: "account-b",
+    });
+  });
+
   it("still reports authorized when the stored token has expired", async () => {
     const { app, store, xapi } = await makeTestApp({ oauth: TEST_OAUTH });
     await store.putOAuthTokens(SELF_ID, {
@@ -538,25 +579,38 @@ describe("GET /api/auth/status — answered from the store", () => {
     const { app, store, xapi } = await makeAuthedApp();
     await store.markTokenBroken(SELF_ID, "refresh", "invalid_grant — token was invalid");
 
-    expect(await authStatus(app)).toEqual({
+    const body = await authStatus(app);
+    expect(body).toMatchObject({
       state: "broken",
       reason: "invalid_grant — token was invalid",
-      loginUrl: "/auth/login",
     });
+    expect(body.accountGeneration).toBeString();
+    if (body.state !== "broken") throw new Error("expected broken auth status");
+    expect(body.loginUrl).toBe(
+      `/auth/login?accountGeneration=${encodeURIComponent(body.accountGeneration)}`,
+    );
     expect(xapi.calls).toEqual([]);
   });
 
   it("offers the login URL when nothing is stored", async () => {
     const { app, xapi } = await makeTestApp({ oauth: TEST_OAUTH });
 
-    expect(await authStatus(app)).toEqual({ state: "unauthorized", loginUrl: "/auth/login" });
+    const body = await authStatus(app);
+    expect(body).toMatchObject({ state: "unauthorized" });
+    expect(body.accountGeneration).toBeString();
+    if (body.state !== "unauthorized") throw new Error("expected unauthorized auth status");
+    expect(body.loginUrl).toBe(
+      `/auth/login?accountGeneration=${encodeURIComponent(body.accountGeneration)}`,
+    );
     expect(xapi.calls).toEqual([]);
   });
 
   it("reports unconfigured when the deployment has no OAuth client", async () => {
     const { app, xapi } = await makeTestApp();
 
-    expect(await authStatus(app)).toEqual({ state: "unconfigured" });
+    const body = await authStatus(app);
+    expect(body).toMatchObject({ state: "unconfigured" });
+    expect(body.accountGeneration).toBeString();
     expect(xapi.calls).toEqual([]);
   });
 });
@@ -588,7 +642,7 @@ describe("the error contract", () => {
     const { app, store } = await makeAuthedApp();
     await store.markTokenBroken(SELF_ID, "refresh", "invalid_grant");
 
-    const response = await app.request("/api/bookmarks/folders");
+    const response = await accountRequest(app, store, "/api/bookmarks/folders");
 
     expect(response.status).toBe(401);
     const body = (await response.json()) as AuthRequiredError;
@@ -673,30 +727,36 @@ describe("request bodies", () => {
     expect(((await response.json()) as ApiError).error).toContain("bookmarkFolderId");
   });
 
-  it("still accepts the bodies the client actually sends", async () => {
+  it("accepts explicit folder-clear disposition and rejects unsafe direct selection", async () => {
     const { app, store } = await makeTestApp();
     const post = makePost();
     await store.upsertPosts([post]);
 
-    const settings = await send(
+    const unsafeSelection = await send(
       app,
       "/api/settings",
       "PATCH",
       JSON.stringify({ bookmarkFolderId: "folder1", bookmarkFolderName: "Reading" }),
     );
-    expect(settings.status).toBe(200);
-    expect(await settings.json()).toEqual({
-      bookmarkFolderId: "folder1",
-      bookmarkFolderName: "Reading",
-    } satisfies SettingsResponse);
+    expect(unsafeSelection.status).toBe(409);
+    await store.setBookmarkFolder("folder1", "Reading");
 
     // Clearing the folder sends an explicit null, not an absent field: the
     // route tells the two apart, so the schema has to accept both.
-    const cleared = await send(app, "/api/settings", "PATCH", '{"bookmarkFolderId":null}');
+    const cleared = await accountRequest(
+      app,
+      store,
+      "/api/settings",
+      {
+        method: "PATCH",
+        headers: JSON_HEADERS,
+        body: '{"bookmarkFolderId":null,"bookmarkDisposition":"keep"}',
+      },
+    );
     expect(cleared.status).toBe(200);
     expect(await cleared.json()).toEqual({
-      bookmarkFolderId: "",
-      bookmarkFolderName: "",
+      bookmarkFolderId: null,
+      bookmarkFolderName: null,
     } satisfies SettingsResponse);
 
     const readState = await send(
@@ -725,6 +785,10 @@ describe("userContext token writes", () => {
       scope: "tweet.read users.read bookmark.read",
       userId: null,
     });
+    const accountGeneration = await storeA.getOrCreateAccountGeneration(
+      SELF_ID,
+      crypto.randomUUID(),
+    );
 
     let firstStarted!: () => void;
     const started = new Promise<void>((resolve) => {
@@ -757,9 +821,15 @@ describe("userContext token writes", () => {
       return claimed;
     };
 
-    const first = appA.request("/api/bookmarks/folders");
+    const first = appA.request(
+      "/api/bookmarks/folders",
+      withAccountGeneration(accountGeneration),
+    );
     await started;
-    const second = appB.request("/api/bookmarks/folders");
+    const second = appB.request(
+      "/api/bookmarks/folders",
+      withAccountGeneration(accountGeneration),
+    );
     // Prove the second isolate lost the durable claim while the first was
     // still paying, rather than merely starting after the profile was cached.
     await secondReachedLease;
@@ -788,7 +858,7 @@ describe("userContext token writes", () => {
     });
   });
 
-  it("re-resolves account B instead of continuing with A after a fresh login", async () => {
+  it("stops before getMe when account B replaces A before the profile claim", async () => {
     const { app, store, xapi } = await makeTestApp({ oauth: TEST_OAUTH });
     await store.putOAuthTokens(SELF_ID, {
       accessToken: "access-a",
@@ -797,15 +867,13 @@ describe("userContext token writes", () => {
       scope: "tweet.read",
       userId: null,
     });
-
-    // OAuth observes A, then a fresh login installs B before that already-read
-    // row reaches userContext. The old token-only handoff followed this with a
-    // second row read; returning the observed A row recreates that gap while a
-    // coherent snapshot keeps A's refresh-token ownership attached.
-    const readTokens = store.getOAuthTokens.bind(store);
+    const accountGenerationA = await store.getOrCreateAccountGeneration(
+      SELF_ID,
+      crypto.randomUUID(),
+    );
+    const claimProfile = store.claimUserProfileLease.bind(store);
     let replaced = false;
-    store.getOAuthTokens = async (id) => {
-      const observed = await readTokens(id);
+    store.claimUserProfileLease = async (...args) => {
       if (!replaced) {
         replaced = true;
         await store.putOAuthTokens(SELF_ID, {
@@ -816,39 +884,29 @@ describe("userContext token writes", () => {
           userId: null,
         });
       }
-      return observed;
-    };
-    xapi.onGetMe = async (token) => {
-      if (token === "access-a") {
-        return { id: "user-a", username: "account-a", name: "Account A" };
-      }
-      expect(token).toBe("access-b");
-      return { id: "user-b", username: "account-b", name: "Account B" };
-    };
-    xapi.onGetBookmarkFolders = (token, userId) => {
-      expect([token, userId]).toEqual(["access-b", "user-b"]);
-      return [];
+      return await claimProfile(...args);
     };
 
-    const response = await app.request("/api/bookmarks/folders");
-    expect(response.status).toBe(200);
-    expect((await response.json()) as FoldersResponse).toMatchObject({
-      cost: { posts: 1, billable: 1, usd: USER_READ_USD },
+    const response = await app.request(
+      "/api/bookmarks/folders",
+      withAccountGeneration(accountGenerationA),
+    );
+    expect(response.status).toBe(409);
+    expect((await response.json()) as ApiError).toMatchObject({
+      error: expect.stringMatching(/account changed|retry/i),
     });
-    // B replaced A before the durable profile claim, so A is fenced before
-    // even paying for its identity rather than merely losing the later CAS.
-    expect(xapi.count("getMe")).toBe(1);
-    expect(xapi.count("getBookmarkFolders")).toBe(1);
+    // The generation guard is part of the durable profile-claim statement,
+    // so stale A cannot buy either A's or B's identity after B is installed.
+    expect(xapi.count("getMe")).toBe(0);
+    expect(xapi.count("getBookmarkFolders")).toBe(0);
     expect(await store.getOAuthTokens(SELF_ID)).toMatchObject({
       accessToken: "access-b",
       refreshToken: "refresh-b",
-      userId: "user-b",
-      username: "account-b",
-      displayName: "Account B",
+      userId: null,
     });
   });
 
-  it("returns a metered retryable 409 when the grant changes on both profile attempts", async () => {
+  it("returns a metered retryable 409 when the generation changes during getMe", async () => {
     const { app, store, xapi } = await makeTestApp({ oauth: TEST_OAUTH });
     await store.putOAuthTokens(SELF_ID, {
       accessToken: "access-a",
@@ -858,34 +916,30 @@ describe("userContext token writes", () => {
       userId: null,
     });
 
-    let account = 0;
     xapi.onGetMe = async (token) => {
-      const current = String.fromCharCode("a".charCodeAt(0) + account);
-      expect(token).toBe(`access-${current}`);
-      account += 1;
-      const next = String.fromCharCode("a".charCodeAt(0) + account);
+      expect(token).toBe("access-a");
       await store.putOAuthTokens(SELF_ID, {
-        accessToken: `access-${next}`,
-        refreshToken: `refresh-${next}`,
+        accessToken: "access-b",
+        refreshToken: "refresh-b",
         expiresAt: Date.now() + 60 * 60 * 1000,
         scope: "tweet.read",
         userId: null,
       });
-      return { id: `user-${current}`, username: `account-${current}`, name: `Account ${current}` };
+      return { id: "user-a", username: "account-a", name: "Account A" };
     };
 
-    const response = await app.request("/api/bookmarks/folders");
+    const response = await accountRequest(app, store, "/api/bookmarks/folders");
 
     expect(response.status).toBe(409);
     expect((await response.json()) as ApiError).toMatchObject({
       error: expect.stringMatching(/account changed|retry/i),
-      cost: { posts: 2, billable: 2, usd: 2 * USER_READ_USD },
+      cost: { posts: 1, billable: 1, usd: USER_READ_USD },
     });
-    expect(xapi.count("getMe")).toBe(2);
+    expect(xapi.count("getMe")).toBe(1);
     expect(xapi.count("getBookmarkFolders")).toBe(0);
     expect(await store.getOAuthTokens(SELF_ID)).toMatchObject({
-      accessToken: "access-c",
-      refreshToken: "refresh-c",
+      accessToken: "access-b",
+      refreshToken: "refresh-b",
       userId: null,
     });
   });
@@ -905,15 +959,26 @@ describe("userContext token writes", () => {
       if (!rotated) {
         expect(token).toBe("access");
         rotated = true;
-        // A rotation lands while getMe is in flight; writing the earlier
-        // snapshot back would revive the dead refresh token.
-        await store.putOAuthTokens(SELF_ID, {
-          accessToken: "access-rotated",
-          refreshToken: "refresh-rotated",
-          expiresAt: Date.now() + 2 * 60 * 60 * 1000,
-          scope: "tweet.read",
-          userId: null,
-        });
+        // A same-account token refresh lands while getMe is in flight. It
+        // preserves the durable account generation while replacing the
+        // single-use refresh token under its own lease.
+        expect(
+          await store.claimTokenLease(
+            SELF_ID,
+            "refresh-old",
+            "refresh-lease",
+            Date.now() + 60_000,
+          ),
+        ).toBe(true);
+        expect(
+          await store.finalizeTokenLease(SELF_ID, "refresh-lease", "refresh-old", {
+            accessToken: "access-rotated",
+            refreshToken: "refresh-rotated",
+            expiresAt: Date.now() + 2 * 60 * 60 * 1000,
+            scope: "tweet.read",
+            userId: null,
+          }),
+        ).toBe(true);
       } else {
         expect(token).toBe("access-rotated");
       }
@@ -924,7 +989,7 @@ describe("userContext token writes", () => {
       return [];
     };
 
-    const response = await app.request("/api/bookmarks/folders");
+    const response = await accountRequest(app, store, "/api/bookmarks/folders");
     expect(response.status).toBe(200);
 
     const stored = await store.getOAuthTokens(SELF_ID);
@@ -945,7 +1010,7 @@ describe("userContext token writes", () => {
     xapi.onGetMe = async () => ({ id: "42", username: "someone", name: "Some One" });
     xapi.onGetBookmarkFolders = () => [];
 
-    expect((await app.request("/api/bookmarks/folders")).status).toBe(200);
+    expect((await accountRequest(app, store, "/api/bookmarks/folders")).status).toBe(200);
 
     expect(await store.getOAuthTokens(SELF_ID)).toMatchObject({
       userId: "42",
@@ -953,7 +1018,7 @@ describe("userContext token writes", () => {
       displayName: "Some One",
     });
     // Resolved once and kept: the second call must not pay for another one.
-    expect((await app.request("/api/bookmarks/folders")).status).toBe(200);
+    expect((await accountRequest(app, store, "/api/bookmarks/folders")).status).toBe(200);
     expect(methods(xapi).filter((m) => m === "getMe")).toEqual(["getMe"]);
   });
 });

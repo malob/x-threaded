@@ -3,7 +3,10 @@ import type { OAuthTokens, Storage, StoredTokens } from "./storage";
 import { TokenResponseSchema, type TokenResponse } from "./x-wire";
 
 const TOKEN_URL = "https://api.x.com/2/oauth2/token";
+const REVOKE_URL = "https://api.x.com/2/oauth2/revoke";
 const AUTHORIZE_URL = "https://x.com/i/oauth2/authorize";
+/** Callback/disconnect network work must finish well inside its two-minute lease. */
+const OAUTH_MUTATION_TIMEOUT_MS = 60_000;
 /**
  * Scopes we ask for during interactive consent. Tokens generated in the
  * developer portal come with a fixed set that excludes bookmark.read, so the
@@ -31,7 +34,7 @@ export interface TokenTimings {
   leaseMs: number;
   /** Extra slack past a lapsed lease before anyone considers recovering it. */
   graceMs: number;
-  /** How often a caller waiting on someone else's refresh re-reads the row. */
+  /** How often an owned rotated pair retries a transient finalize write. */
   pollMs: number;
 }
 
@@ -67,6 +70,35 @@ export interface UserGrantSnapshot {
 }
 
 export class OAuthError extends Error {}
+
+export type OAuthCodeExchangeOutcome = "refused" | "ambiguous";
+
+/** Whether a failed code exchange proves X did not issue a replacement pair. */
+export class OAuthCodeExchangeError extends OAuthError {
+  constructor(
+    message: string,
+    readonly outcome: OAuthCodeExchangeOutcome,
+  ) {
+    super(message);
+    this.name = "OAuthCodeExchangeError";
+  }
+}
+
+/** X did not confirm that the requested remote grant was revoked. */
+export class OAuthRevocationError extends OAuthError {
+  constructor(message: string) {
+    super(message);
+    this.name = "OAuthRevocationError";
+  }
+}
+
+/** A durable grant transition is active; callers must not use or replace it. */
+export class OAuthGrantConflictError extends Error {
+  constructor(message = "X account disconnect is in progress; retry shortly") {
+    super(message);
+    this.name = "OAuthGrantConflictError";
+  }
+}
 
 function base64url(bytes: ArrayBuffer | Uint8Array): string {
   const view = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
@@ -110,32 +142,58 @@ export function newState(): string {
   return randomToken();
 }
 
-/** Exchange the authorization code for tokens and persist them. */
-export async function exchangeCode(
-  store: Storage,
+/** Exchange an authorization code without deciding which stored grant it may replace. */
+export async function exchangeCodeForTokens(
   config: OAuthConfig,
   code: string,
   verifier: string,
   redirectUri: string,
 ): Promise<OAuthTokens> {
-  const response = await fetch(TOKEN_URL, {
-    method: "POST",
-    headers: {
-      Authorization: basicAuth(config.clientId, config.clientSecret),
-      "Content-Type": "application/x-www-form-urlencoded",
-    },
-    body: new URLSearchParams({
-      grant_type: "authorization_code",
-      code,
-      redirect_uri: redirectUri,
-      code_verifier: verifier,
-      client_id: config.clientId,
-    }),
-  });
-  const body = tokenResponse(await response.json());
+  let response: Response;
+  try {
+    response = await fetch(TOKEN_URL, {
+      method: "POST",
+      headers: {
+        Authorization: basicAuth(config.clientId, config.clientSecret),
+        "Content-Type": "application/x-www-form-urlencoded",
+      },
+      body: new URLSearchParams({
+        grant_type: "authorization_code",
+        code,
+        redirect_uri: redirectUri,
+        code_verifier: verifier,
+        client_id: config.clientId,
+      }),
+      signal: AbortSignal.timeout(OAUTH_MUTATION_TIMEOUT_MS),
+    });
+  } catch {
+    // The request may have reached X and consumed the one-shot code before
+    // the response was lost. Callers must not restore an older same-client
+    // pair from this outcome.
+    throw new OAuthCodeExchangeError(
+      "code exchange got no confirmed response; the prior grant may have been replaced",
+      "ambiguous",
+    );
+  }
+
+  let raw: unknown;
+  try {
+    raw = await response.json();
+  } catch {
+    raw = null;
+  }
+  const body = tokenResponse(raw);
   if (!response.ok || !body.access_token || !body.refresh_token) {
-    throw new OAuthError(
+    const hasIssuedPair = Boolean(body.access_token && body.refresh_token);
+    const conclusivelyRefused =
+      response.status >= 400 &&
+      response.status < 500 &&
+      response.status !== 408 &&
+      response.status !== 429 &&
+      !hasIssuedPair;
+    throw new OAuthCodeExchangeError(
       `code exchange failed (${response.status}): ${body.error_description ?? body.error ?? "unknown error"}`,
+      conclusivelyRefused ? "refused" : "ambiguous",
     );
   }
   const tokens: OAuthTokens = {
@@ -144,8 +202,51 @@ export async function exchangeCode(
     expiresAt: expiryOf(body),
     scope: body.scope ?? SCOPES.join(" "),
   };
+  return tokens;
+}
+
+/** Exchange the authorization code and install it as a fresh grant. */
+export async function exchangeCode(
+  store: Storage,
+  config: OAuthConfig,
+  code: string,
+  verifier: string,
+  redirectUri: string,
+): Promise<OAuthTokens> {
+  const tokens = await exchangeCodeForTokens(config, code, verifier, redirectUri);
   await store.putOAuthTokens(SELF_ID, tokens);
   return tokens;
+}
+
+/**
+ * Revoke the long-lived user grant before deleting its local credentials.
+ *
+ * X's confidential-client form authenticates with HTTP Basic and takes only
+ * the token being invalidated in the form body. Callers deliberately treat a
+ * failed response as non-revocation and retain the local grant so the user can
+ * retry instead of being told a remote credential disappeared when it may not
+ * have.
+ */
+export async function revokeOAuthGrant(config: OAuthConfig, token: string): Promise<void> {
+  const response = await fetch(REVOKE_URL, {
+    method: "POST",
+    headers: {
+      Authorization: basicAuth(config.clientId, config.clientSecret),
+      "Content-Type": "application/x-www-form-urlencoded",
+    },
+    body: new URLSearchParams({ token }),
+    signal: AbortSignal.timeout(OAUTH_MUTATION_TIMEOUT_MS),
+  });
+  if (response.ok) return;
+
+  let detail = "unknown error";
+  try {
+    const body = tokenResponse(await response.json());
+    detail = body.error_description ?? body.error ?? detail;
+  } catch {
+    // A non-JSON error still means revocation was not confirmed.
+  }
+  throw new OAuthRevocationError(`grant revocation failed (${response.status}): ${detail}`);
 }
 
 function basicAuth(clientId: string, clientSecret: string): string {
@@ -410,7 +511,7 @@ async function refreshUnderLease(
  * every other caller through the row itself.
  *
  * Each pass reads the row and does the one thing that row permits: use it,
- * claim it, wait on it, recover it, or give up on it. Every write is
+ * claim it, recover it, or give up on it. Every write is
  * conditional on what was read, so a pass that loses a race simply reads
  * again — no caller ever acts on a row it no longer owns.
  */
@@ -418,13 +519,26 @@ async function renew(
   store: Storage,
   config: OAuthConfig,
   timings: TokenTimings,
+  expectedAccountGeneration?: string,
 ): Promise<UserGrantSnapshot> {
   // Long enough to wait out a lapsed lease and run the recovery it permits.
   const deadline = Date.now() + timings.leaseMs + timings.graceMs + timings.fetchTimeoutMs;
 
   while (Date.now() <= deadline) {
-    const row = await store.getOAuthTokens(SELF_ID);
+    const status = expectedAccountGeneration
+      ? await store.getOAuthStatusForGeneration(SELF_ID, expectedAccountGeneration)
+      : null;
+    if (expectedAccountGeneration && !status) {
+      throw new OAuthGrantConflictError("X account changed; reload before retrying");
+    }
+    const row = expectedAccountGeneration ? status!.tokens : await store.getOAuthTokens(SELF_ID);
     if (!row) throw new OAuthError("the stored grant disappeared — visit /auth/login");
+    if (row.state === "disconnecting") throw new OAuthGrantConflictError();
+    if (row.state === "reauthorizing") {
+      throw new OAuthGrantConflictError(
+        "X account reauthorization is pending; retry Reconnect or disconnect X",
+      );
+    }
     if (row.state === "broken") throw brokenError(row.brokenReason ?? "unknown");
     // A live token means someone else's refresh landed (or a fresh login did).
     if (isLive(row)) return grantSnapshot(row);
@@ -444,12 +558,13 @@ async function renew(
       continue; // Lease lost mid-flight: carry on as one of the losers.
     }
 
-    // Someone else holds the lease. Wait: they may be mid-call to X, and a
-    // holder that finishes late is still the rightful owner of the rotation.
+    // Someone else holds the lease. A same-isolate sibling joins the in-memory
+    // promise above; a different isolate cannot wait by polling D1 without
+    // exhausting Free's per-invocation query budget. Fail closed and let the
+    // browser retry after the rightful owner finishes. The loser never calls X.
     const abandonedAt = (row.leaseUntil ?? 0) + timings.graceMs;
     if (Date.now() < abandonedAt) {
-      await sleep(timings.pollMs);
-      continue;
+      throw new OAuthGrantConflictError("X token refresh is already in progress; retry shortly");
     }
 
     // The lease has lapsed and the grace period with it.
@@ -491,20 +606,51 @@ export async function getUserGrantSnapshot(
   store: Storage,
   config: OAuthConfig | null,
   timings: Partial<TokenTimings> = {},
+  expectedAccountGeneration?: string,
 ): Promise<UserGrantSnapshot | null> {
   if (!config) return null;
 
   // Only /auth/login mints a grant; with no stored row the deployment has
   // simply never been authorized.
-  const tokens = await store.getOAuthTokens(SELF_ID);
+  const status = expectedAccountGeneration
+    ? await store.getOAuthStatusForGeneration(SELF_ID, expectedAccountGeneration)
+    : null;
+  if (expectedAccountGeneration && !status) {
+    throw new OAuthGrantConflictError("X account changed; reload before retrying");
+  }
+  const tokens = expectedAccountGeneration ? status!.tokens : await store.getOAuthTokens(SELF_ID);
   if (!tokens) return null;
+  if (tokens.state === "disconnecting") throw new OAuthGrantConflictError();
+  if (tokens.state === "reauthorizing") {
+    throw new OAuthGrantConflictError(
+      "X account reauthorization is pending; retry Reconnect or disconnect X",
+    );
+  }
   if (tokens.state === "broken") throw brokenError(tokens.brokenReason ?? "unknown");
   if (isLive(tokens)) return grantSnapshot(tokens);
 
   const pending = refreshesInFlight.get(store);
-  if (pending) return await pending;
+  if (pending) {
+    const grant = await pending;
+    if (
+      expectedAccountGeneration &&
+      !(await store.isOAuthGrantCurrent(
+        SELF_ID,
+        grant.refreshToken,
+        expectedAccountGeneration,
+      ))
+    ) {
+      throw new OAuthGrantConflictError("X account changed; reload before retrying");
+    }
+    return grant;
+  }
 
-  const attempt = renew(store, config, { ...DEFAULT_TIMINGS, ...timings });
+  const attempt = renew(
+    store,
+    config,
+    { ...DEFAULT_TIMINGS, ...timings },
+    expectedAccountGeneration,
+  );
   refreshesInFlight.set(store, attempt);
   try {
     return await attempt;

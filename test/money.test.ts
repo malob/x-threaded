@@ -32,6 +32,7 @@ import { makePost } from "./fixtures";
 import {
   SELF_USER_ID,
   TEST_OAUTH,
+  accountRequest,
   fetchConversationRequest,
   idsRequested,
   makeAuthedApp,
@@ -520,11 +521,11 @@ describe("GET /api/me/posts — how far the scan pages", () => {
   }
 
   it("stops paging the moment it has enough threads", async () => {
-    const { app, xapi } = await makeAuthedApp();
+    const { app, store, xapi } = await makeAuthedApp();
     // Every page would offer another, but three threads is the whole ask.
     xapi.onGetOwnPosts = () => ({ posts: ownPage(3), nextToken: "more" });
 
-    const response = await app.request("/api/me/posts?threads=3");
+    const response = await accountRequest(app, store, "/api/me/posts?threads=3");
 
     expect(response.status).toBe(200);
     expect(xapi.count("getOwnPosts")).toBe(1);
@@ -532,7 +533,7 @@ describe("GET /api/me/posts — how far the scan pages", () => {
   });
 
   it("keeps paging while pages are short of the target", async () => {
-    const { app, xapi } = await makeAuthedApp();
+    const { app, store, xapi } = await makeAuthedApp();
     const pages = [
       { posts: ownPage(2), nextToken: "p2" },
       { posts: ownPage(2), nextToken: "p3" },
@@ -541,17 +542,17 @@ describe("GET /api/me/posts — how far the scan pages", () => {
     let served = 0;
     xapi.onGetOwnPosts = () => pages[served++] ?? { posts: [] };
 
-    const response = await app.request("/api/me/posts?threads=6");
+    const response = await accountRequest(app, store, "/api/me/posts?threads=6");
 
     expect(xapi.count("getOwnPosts")).toBe(3);
     expect(((await response.json()) as OwnPostsResponse).items).toHaveLength(6);
   });
 
   it("stops when the timeline runs out, short of the target", async () => {
-    const { app, xapi } = await makeAuthedApp();
+    const { app, store, xapi } = await makeAuthedApp();
     xapi.onGetOwnPosts = () => ({ posts: ownPage(2) });
 
-    const response = await app.request("/api/me/posts?threads=20");
+    const response = await accountRequest(app, store, "/api/me/posts?threads=20");
 
     expect(xapi.count("getOwnPosts")).toBe(1);
     const body = (await response.json()) as OwnPostsResponse;
@@ -561,10 +562,10 @@ describe("GET /api/me/posts — how far the scan pages", () => {
   });
 
   it("stops on an empty page even when X still offers a next token", async () => {
-    const { app, xapi } = await makeAuthedApp();
+    const { app, store, xapi } = await makeAuthedApp();
     xapi.onGetOwnPosts = () => ({ posts: [], nextToken: "endless" });
 
-    const response = await app.request("/api/me/posts?threads=5");
+    const response = await accountRequest(app, store, "/api/me/posts?threads=5");
 
     expect(response.status).toBe(200);
     expect(xapi.count("getOwnPosts")).toBe(1);
@@ -577,9 +578,9 @@ describe("GET /api/me/posts — how far the scan pages", () => {
    * and the error contract carries that status out intact.
    */
   it("spends nothing when user context isn't configured, and 401s", async () => {
-    const { app, xapi } = await makeTestApp();
+    const { app, store, xapi } = await makeTestApp();
 
-    const response = await app.request("/api/me/posts");
+    const response = await accountRequest(app, store, "/api/me/posts");
 
     expect(xapi.calls).toEqual([]);
     expect(response.status).toBe(401);
@@ -699,7 +700,9 @@ describe("GET /api/bookmarks/folders — first-use identity spend", () => {
     xapi.onGetMe = () => ({ id: "42", username: "m", name: "M" });
     xapi.onGetBookmarkFolders = () => [];
 
-    const first = (await (await app.request("/api/bookmarks/folders")).json()) as FoldersResponse;
+    const first = (await (
+      await accountRequest(app, store, "/api/bookmarks/folders")
+    ).json()) as FoldersResponse;
     // Folders are free; the read that resolved who "the user" is was not.
     //
     // It is a User Read at $0.010, not a post read at $0.005: this expectation
@@ -708,16 +711,20 @@ describe("GET /api/bookmarks/folders — first-use identity spend", () => {
     expect(first.cost).toEqual({ posts: 1, billable: 1, usd: USER_READ_USD });
 
     // Identity now cached: the next call spends nothing and says nothing.
-    const second = (await (await app.request("/api/bookmarks/folders")).json()) as FoldersResponse;
+    const second = (await (
+      await accountRequest(app, store, "/api/bookmarks/folders")
+    ).json()) as FoldersResponse;
     expect(second.cost).toBeUndefined();
   });
 });
 
 describe("POST /api/bookmarks/sync — what the scan bills", () => {
   it("bills the folder pages as Owned Reads and hydration as post reads", async () => {
-    const { app } = await makeBookmarkApp([makePost(), makePost()], true);
+    const { app, store } = await makeBookmarkApp([makePost(), makePost()], true);
 
-    const response = await app.request("/api/bookmarks/sync", { method: "POST" });
+    const response = await accountRequest(app, store, "/api/bookmarks/sync", {
+      method: "POST",
+    });
 
     expect(((await response.json()) as SyncResponse).cost).toEqual({
       posts: 4,
@@ -727,10 +734,12 @@ describe("POST /api/bookmarks/sync — what the scan bills", () => {
   });
 
   it("credits the hydration of posts already read today", async () => {
-    const { app } = await makeBookmarkApp([makePost()], true);
-    await app.request("/api/bookmarks/sync", { method: "POST" });
+    const { app, store } = await makeBookmarkApp([makePost()], true);
+    await accountRequest(app, store, "/api/bookmarks/sync", { method: "POST" });
 
-    const response = await app.request("/api/bookmarks/sync", { method: "POST" });
+    const response = await accountRequest(app, store, "/api/bookmarks/sync", {
+      method: "POST",
+    });
 
     // The folder page is enumerated again either way; the lookup that hydrates
     // it is the part X's same-day dedup makes free.
@@ -744,12 +753,12 @@ describe("POST /api/bookmarks/sync — what the scan bills", () => {
 
 describe("GET /api/me/posts — what the scan bills", () => {
   it("bills a timeline page as Owned Reads", async () => {
-    const { app, xapi } = await makeAuthedApp();
+    const { app, store, xapi } = await makeAuthedApp();
     xapi.onGetOwnPosts = () => ({
       posts: Array.from({ length: 3 }, () => makePost({ authorId: SELF_USER_ID })),
     });
 
-    const response = await app.request("/api/me/posts?threads=3");
+    const response = await accountRequest(app, store, "/api/me/posts?threads=3");
 
     expect(((await response.json()) as OwnPostsResponse).cost).toEqual({
       posts: 3,
@@ -760,7 +769,7 @@ describe("GET /api/me/posts — what the scan bills", () => {
 
   /** Root recovery is a lookup, not an Owned Read: different rate, same bill. */
   it("adds the post read that recovers a root the page didn't return", async () => {
-    const { app, xapi } = await makeAuthedApp();
+    const { app, store, xapi } = await makeAuthedApp();
     const root = makePost({ authorId: SELF_USER_ID, createdAt: "2024-05-01T00:00:00.000Z" });
     const continuation = replyTo(root, {
       authorId: SELF_USER_ID,
@@ -769,7 +778,7 @@ describe("GET /api/me/posts — what the scan bills", () => {
     xapi.onGetOwnPosts = () => ({ posts: [continuation] });
     xapi.onGetPostsByIds = () => ({ posts: [root], missing: [] });
 
-    const response = await app.request("/api/me/posts");
+    const response = await accountRequest(app, store, "/api/me/posts");
 
     expect(((await response.json()) as OwnPostsResponse).cost).toEqual({
       posts: 2,
@@ -797,7 +806,9 @@ describe("bookmark sync — what it must never destroy", () => {
     const firstSeen = "2024-01-01T00:00:00.000Z";
     await seedSaved(store, inFolder, "bookmark", firstSeen);
 
-    const response = await app.request("/api/bookmarks/sync", { method: "POST" });
+    const response = await accountRequest(app, store, "/api/bookmarks/sync", {
+      method: "POST",
+    });
 
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({ added: 0, removed: 0 });
@@ -811,7 +822,9 @@ describe("bookmark sync — what it must never destroy", () => {
     const manual = makePost();
     await seedSaved(store, manual, "manual", "2024-01-01T00:00:00.000Z");
 
-    const response = await app.request("/api/bookmarks/sync", { method: "POST" });
+    const response = await accountRequest(app, store, "/api/bookmarks/sync", {
+      method: "POST",
+    });
 
     expect(await response.json()).toMatchObject({ complete: true, removed: 0 });
     expect((await store.listSavedItems()).map((i) => i.postId)).toContain(manual.id);
@@ -822,7 +835,7 @@ describe("bookmark sync — what it must never destroy", () => {
     const { app, store } = await makeBookmarkApp([shared], true);
     await seedSaved(store, shared, "manual", "2024-01-01T00:00:00.000Z");
 
-    await app.request("/api/bookmarks/sync", { method: "POST" });
+    await accountRequest(app, store, "/api/bookmarks/sync", { method: "POST" });
 
     const item = (await store.listSavedItems()).find((i) => i.postId === shared.id);
     expect(item?.source).toBe("manual");

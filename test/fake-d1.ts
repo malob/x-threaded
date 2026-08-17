@@ -79,7 +79,15 @@ class FakeD1PreparedStatement implements D1PreparedStatement {
 
   /** Sync form, so batch() can drive it inside a bun:sqlite transaction. */
   execute<T = Record<string, unknown>>(): D1Result<T> {
-    const changes = this.db.query<unknown, SQLQueryBindings[]>(this.sql).run(...this.params);
+    const query = this.db.query<T, SQLQueryBindings[]>(this.sql);
+    if (query.columnNames.length > 0) {
+      return {
+        success: true,
+        meta: meta(0, 0),
+        results: query.all(...this.params),
+      };
+    }
+    const changes = query.run(...this.params);
     return {
       success: true,
       meta: meta(changes.changes, Number(changes.lastInsertRowid)),

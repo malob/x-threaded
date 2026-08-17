@@ -19,6 +19,12 @@ export interface SqlDriver {
   run(sql: string, params?: unknown[]): Promise<SqlRunResult>;
   /** All or nothing: a transaction on bun:sqlite, `db.batch` on D1. */
   batch(statements: SqlStatement[]): Promise<SqlRunResult[]>;
+  /**
+   * Run the writes and return the first row of the final query from the same
+   * transaction. Used where a browser-visible ownership snapshot must not
+   * combine state from opposite sides of another committed transition.
+   */
+  batchFirst<T>(statements: SqlStatement[], query: SqlStatement): Promise<T | null>;
 }
 
 export interface SqlRunResult {

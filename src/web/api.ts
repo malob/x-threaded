@@ -1,8 +1,10 @@
 import { formatUsd } from "../shared/pricing";
+import { ACCOUNT_GENERATION_HEADER } from "../shared/types";
 import type {
   ApiError,
   AuthStatus,
   ConversationResponse,
+  DisconnectResponse,
   FoldersResponse,
   OkResponse,
   OwnPostsResponse,
@@ -60,30 +62,83 @@ export function removeSaved(postId: string): Promise<OkResponse> {
 }
 
 /** The one GET that bills; `useOwnPosts` explains why its caller withholds the signal. */
-export function getOwnPosts(threads = 10, signal?: AbortSignal): Promise<OwnPostsResponse> {
-  return request(`/api/me/posts?threads=${threads}`, { signal });
+export function getOwnPosts(
+  accountGeneration: string,
+  threads = 10,
+  signal?: AbortSignal,
+): Promise<OwnPostsResponse> {
+  return request(`/api/me/posts?threads=${threads}`, {
+    signal,
+    headers: { [ACCOUNT_GENERATION_HEADER]: accountGeneration },
+  });
 }
 
-export function getSettings(signal?: AbortSignal): Promise<SettingsResponse> {
-  return request("/api/settings", { signal });
-}
-
-export function setBookmarkFolder(
-  bookmarkFolderId: string | null,
-  bookmarkFolderName: string,
+export function getSettings(
+  accountGeneration: string,
+  signal?: AbortSignal,
 ): Promise<SettingsResponse> {
   return request("/api/settings", {
-    method: "PATCH",
-    headers: { "Content-Type": "application/json" },
+    signal,
+    headers: { [ACCOUNT_GENERATION_HEADER]: accountGeneration },
+  });
+}
+
+export type BookmarkDisposition = "keep" | "remove";
+
+/** A staged folder switch answers with both its sync receipt and activated setting. */
+export type BookmarkSwitchResponse = SyncResponse & SettingsResponse;
+
+/**
+ * Scan a new folder and activate it only if that paid scan completes.
+ * The caller presents the confirmation UI before invoking this function.
+ */
+export function switchBookmarkFolder(
+  bookmarkFolderId: string,
+  bookmarkFolderName: string,
+  accountGeneration: string,
+): Promise<BookmarkSwitchResponse> {
+  return request("/api/bookmarks/switch", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      [ACCOUNT_GENERATION_HEADER]: accountGeneration,
+    },
     body: JSON.stringify({ bookmarkFolderId, bookmarkFolderName }),
   });
 }
 
-export function getFolders(signal?: AbortSignal): Promise<FoldersResponse> {
-  return request("/api/bookmarks/folders", { signal });
+/** Stop folder sync, explicitly deciding what happens to its app-local mirror. */
+export function clearBookmarkFolder(
+  bookmarkDisposition: BookmarkDisposition,
+  accountGeneration: string,
+): Promise<SettingsResponse> {
+  return request("/api/settings", {
+    method: "PATCH",
+    headers: {
+      "Content-Type": "application/json",
+      [ACCOUNT_GENERATION_HEADER]: accountGeneration,
+    },
+    body: JSON.stringify({ bookmarkFolderId: null, bookmarkDisposition }),
+  });
 }
 
-const AUTH_STATES: readonly string[] = ["unconfigured", "unauthorized", "broken", "authorized"];
+export function getFolders(
+  accountGeneration: string,
+  signal?: AbortSignal,
+): Promise<FoldersResponse> {
+  return request("/api/bookmarks/folders", {
+    signal,
+    headers: { [ACCOUNT_GENERATION_HEADER]: accountGeneration },
+  });
+}
+
+const AUTH_STATES: readonly string[] = [
+  "unconfigured",
+  "unauthorized",
+  "disconnecting",
+  "broken",
+  "authorized",
+];
 
 export async function getAuthStatus(signal?: AbortSignal): Promise<AuthStatus> {
   // Unlike other endpoints, a non-2xx here is still a meaningful answer — as
@@ -91,15 +146,45 @@ export async function getAuthStatus(signal?: AbortSignal): Promise<AuthStatus> {
   // body wearing the union's clothes, so it goes to the caller's catch.
   const response = await fetch("/api/auth/status", { signal });
   expectJson(response);
-  const body = (await response.json()) as { state?: string };
-  if (!AUTH_STATES.includes(body.state ?? "")) {
+  const body = (await response.json()) as { state?: string; accountGeneration?: unknown };
+  if (
+    !AUTH_STATES.includes(body.state ?? "") ||
+    typeof body.accountGeneration !== "string" ||
+    body.accountGeneration.length === 0
+  ) {
     throw new Error(`auth status unavailable (${response.status})`);
   }
   return body as AuthStatus;
 }
 
-export function syncBookmarks(): Promise<SyncResponse> {
-  return request("/api/bookmarks/sync", { method: "POST" });
+export function syncBookmarks(accountGeneration: string): Promise<SyncResponse> {
+  return request("/api/bookmarks/sync", {
+    method: "POST",
+    headers: { [ACCOUNT_GENERATION_HEADER]: accountGeneration },
+  });
+}
+
+/** Revoke the stored X grant and dispose of its bookmark mirror as instructed. */
+export async function disconnectX(
+  bookmarkDisposition: BookmarkDisposition,
+  accountGeneration: string,
+): Promise<DisconnectResponse> {
+  const result = await request<DisconnectResponse>("/api/auth/disconnect", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      [ACCOUNT_GENERATION_HEADER]: accountGeneration,
+    },
+    body: JSON.stringify({ bookmarkDisposition }),
+  });
+  if (
+    result.ok !== true ||
+    typeof result.accountGeneration !== "string" ||
+    result.accountGeneration.length === 0
+  ) {
+    throw new Error("disconnect response unavailable");
+  }
+  return result;
 }
 
 export function getConversation(

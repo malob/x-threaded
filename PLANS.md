@@ -1,6 +1,6 @@
 # Stabilization Plan
 
-Status: stabilization implementation and verification complete; awaiting product decisions
+Status: stabilization implementation and verification complete; account lifecycle resolved, remaining product decisions deferred
 Baseline: `1b4783c3f24dc150d9dbe6494def81142e35a877`
 Branch: `codex/stabilization`
 
@@ -30,6 +30,8 @@ Make the existing feature set safe and dependable before adding features. Preser
 - **Closed, Phase 2:** concurrent first-use requests in separate Worker isolates could both pay to resolve the same OAuth profile.
 - **Closed, Phase 2:** concurrent bookmark scans in separate tabs or Worker isolates could both spend before one stale result was rejected.
 - **Closed, Phase 2:** a paid quote lookup or bookmark scan that lost an expired lease could persist its stale response after a recovery run.
+- **Closed, Phase 2:** reconnect could silently attach a different X account, and disconnect/account work lacked one durable ownership boundary. Reconnect now accepts only the existing account; disconnect fences that grant's profile, bookmark, and timeline work before provider revocation and conditional local cleanup.
+- **Closed, Phase 2:** selecting a different bookmark folder could expose the new setting before its paid import was known to be complete. Selection now requires confirmation, stages the target scan, and atomically activates only a complete owned result.
 - **Closed, Phase 2:** stale or out-of-order client responses could restore read state, and a timeless mark-all overlay could consume posts delivered by a later response.
 - **Closed, Phase 2:** root-unknown client loads could bypass the resolved conversation's response ordering or turn a successful paid load into a free-reconciliation failure.
 - **Closed, Phase 2:** either ordering of separate lifecycle/post reads could combine a status with the wrong post snapshot during partial/complete transitions; responses now use one SQL snapshot.
@@ -42,15 +44,15 @@ Make the existing feature set safe and dependable before adding features. Preser
 
 - **Documented, not changed:** a full 5,000-main-result run exceeds D1 Free's 50-query invocation budget even with set-based page writes.
 - **Documented, not changed:** simultaneous requests for the same entirely unseen post can each buy its initial `$0.005` lookup; after the root resolves, the durable conversation lease stops every loser before search.
+- **Bounded, not exhaustive:** a Your posts request reads at most four 50-post timeline pages and returns at most 50 threads. It can truthfully return fewer items with `hasMore` when filtering or that safe boundary leaves more timeline to scan.
 
 ### Unresolved or product-dependent
 
 - Whether to expand the current main-search-result cap into an enrichment or USD ceiling.
-- Whether disconnected paid work should cancel or finish and cache.
-- Whether cached opens and remembered inbox tabs should automatically spend.
+- Whether app-only conversation work that loses its consumer should cancel or finish and cache. Account-owned OAuth work is already generation-fenced and is no longer part of this question.
+- Whether cached conversation opens and an ordinary same-account reload with Your posts remembered should automatically spend.
 - Visual treatment for accessible contrast and the keyboard-operable inbox-card affordance.
-- OAuth abandoned-lease recovery policy.
-- Whether a fresh login or clearing the selected folder should clear or preserve the prior account/folder's bookmark choice and bookmark-sourced queue.
+- OAuth token-refresh abandoned-lease recovery policy.
 - Applicability of X's multiple-app policy to independent personal forks.
 - Whether any external database exists from an intermediate folded-migration version.
 
@@ -91,23 +93,25 @@ Make the existing feature set safe and dependable before adding features. Preser
 ### Phase 4 — Documentation and factoring
 
 - [x] Reconcile billing, deployment, access, prerequisite, and support-link documentation with behavior.
-- [ ] Resolve user decisions before changing spend/disconnect/public-distribution semantics.
+- [x] Resolve account/folder lifecycle decision 8 and fence account-owned work at disconnect boundaries.
+- [ ] Resolve the remaining user decisions before changing automatic-spend or public-distribution semantics.
 - [ ] Split route/controller responsibilities only after behavioral coverage exists.
 - [ ] Inventory links before moving historical design material.
 - [x] Run the final lint, typecheck, unit, isolated D1, production build, Worker dry-run, browser, and diff checks.
 
 ## User decisions
 
-Check in only when work reaches one of these boundaries:
+Check in only when work reaches one of the unresolved boundaries below. Resolved
+entries remain here as the product-decision record.
 
 1. Any future spend-cap change: all billed reads, a USD ceiling, or keep the current main-search-result cap.
-2. Disconnect behavior: cancel paid work or finish and cache it.
-3. Automatic spending on cached opens and remembered inbox state.
+2. Remaining disconnect behavior for app-only conversation work: cancel it or let it finish and cache. Account-owned OAuth work is already fenced at outbound and persistence boundaries; an X request already sent may still bill, but its late result cannot land.
+3. Automatic spending on cached conversation opens and an ordinary same-account reload with Your posts remembered.
 4. Visible accessibility treatment and inbox-card interaction design.
-5. OAuth recovery allowance semantics.
+5. OAuth token-refresh abandoned-lease recovery semantics.
 6. Public self-deployment posture and X policy risk.
 7. Any production deployment, live migration, or external data inspection.
-8. Whether reconnecting a different X account or selecting no bookmark folder clears the existing bookmark-folder choice and bookmark-sourced queue.
+8. **Resolved:** Reconnect accepts only the same X account and preserves its folder and library; a different account requires Disconnect first. Stop syncing and Disconnect each require an explicit keep/remove choice for bookmark imports. Disconnect revokes at X before terminal local cleanup. After it succeeds, the next login is fresh, accepts any account, and inherits no folder or bookmark-owned queue rows (items kept earlier remain ordinary local saves).
 
 ## Verification record
 
@@ -119,13 +123,13 @@ Check in only when work reaches one of these boundaries:
 - Page-scale D1 regressions now hold ordinary 100-item post, credit, read-state, saved-item, and cached-quote operations to one query each.
 - The 5,000-node unique-handle thread probe fell from roughly 1.43 GB maximum RSS to roughly 66 MB.
 - Factual-doc pass: 80 focused money/lifecycle tests and 210 assertions passed; lint and forced multi-project typechecking passed.
-- Bookmark ownership regressions cover cross-tab overlap, expiry recovery, folder replacement, stale post snapshots, fresh OAuth grants, retry fencing, and safe request/database budgets. A maximal no-retry route uses 28 D1 statements with a cached profile or 31 while resolving the first profile; the adversarial seventh-pass profile recovery path reserves exactly enough room to stay at or below D1 Free's 50-query limit.
+- Bookmark ownership regressions cover cross-tab overlap, expiry recovery, folder replacement, stale post snapshots, fresh OAuth grants, retry fencing, and safe request/database budgets. A maximal no-retry route uses 28 D1 statements with a cached profile or 32 while resolving the first profile; the adversarial sixth-pass profile-recovery path uses exactly D1 Free's 50-query limit.
 - OAuth profile resolution is single-flight across independent Worker instances; losing callers make no X request, and expired owners are recoverable.
-- Final unit/integration gate: 638 tests and 2,491 assertions passed across 21 files.
-- Final hermetic workerd/D1 gate: 103 tests and 239 assertions passed, including the 1,000-post bookmark transaction; its normal-state fingerprint check passed.
+- Final unit/integration gate: 730 tests and 3,031 assertions passed across 23 files.
+- Final hermetic workerd/D1 gate: 122 tests and 375 assertions passed, including the 1,000-post bookmark transaction and every account-generation guard; it used in-memory persistence rather than normal Worker state.
 - Final lint, forced multi-project typecheck, Vite production build, Worker deploy dry-run, and `git diff --check` all passed.
 - A real Bun entrypoint probe bound only to `127.0.0.1`, served the empty saved queue, and shut down cleanly.
-- The built app passed a local browser smoke check for Saved/Your Posts navigation and the OAuth-disabled state with no browser warnings or errors.
+- The production build passed an isolated in-app-browser lifecycle walkthrough: confirmation focus and copy, incomplete and complete folder switching, manual-save preservation, Your Posts, and Disconnect-with-retention all behaved as designed against Fake X and an in-memory database, with no browser-console messages.
 - Two orphaned Bun test processes from the review were detected after the user reported high CPU, terminated explicitly, and followed by a clean Bun/Workerd/Wrangler process check after the final gates.
 
-Retain this record until the account-switch and other listed product decisions are resolved; after that, it can be reduced to a short durable stabilization record.
+Retain this record until the remaining listed product decisions are resolved; after that, it can be reduced to a short durable stabilization record. The account-switch outcome in decision 8 is now a durable invariant, not an open question.

@@ -57,6 +57,15 @@ export function bunDriverFor(db: Database): SqlDriver {
         return results;
       })();
     },
+
+    async batchFirst<T>(statements: SqlStatement[], query: SqlStatement): Promise<T | null> {
+      return db.transaction(() => {
+        for (const statement of statements) {
+          db.query<unknown, SQLQueryBindings[]>(statement.sql).run(...bind(statement.params));
+        }
+        return db.query<T, SQLQueryBindings[]>(query.sql).get(...bind(query.params)) ?? null;
+      })();
+    },
   };
 }
 

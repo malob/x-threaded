@@ -145,16 +145,57 @@ own data from $0.005 to $0.001 a read.
 2. `bunx wrangler secret put X_OAUTH_CLIENT_ID` and
    `bunx wrangler secret put X_OAUTH_CLIENT_SECRET`. Read the secret with the
    portal's *Show* button — regenerating it revokes any grant you already have.
-3. Visit `https://<your-worker>/auth/login` once and approve. The OAuth exchange
-   itself does not perform a billed User Read. The first folder or timeline
-   action that needs `/2/users/me` may cost $0.010 once; the app caches that
-   identity with the grant and reports the charge in the action's UI.
+3. Visit `https://<your-worker>/auth/login` and approve the initial connection.
+   The OAuth exchange itself does not perform a billed User Read. The first folder or timeline
+   action that needs `/2/users/me` may cost $0.010; the app caches that identity
+   with the grant and reports the charge in the action's UI. A Reconnect
+   callback that reaches account comparison buys one replacement-grant User
+   Read, even if that account is rejected. If the usable old grant has no
+   cached identity, identifying it before exchange can make two $0.010 reads in
+   that callback.
 
 The bookmark-folder picker loads folders only when you open it. Folder listing
-is free apart from that possible first identity lookup; selecting a folder saves
-the setting in the app database and immediately runs the billable first sync.
-Settings and folder failures stay visibly distinct from an empty folder list
-and offer a retry, while lookup and sync charges are shown in the UI.
+is free apart from that possible first identity lookup. Selecting a new folder
+does nothing until you confirm the paid scan. The app reads the target while the
+old folder and its imported Saved rows remain active, then atomically installs
+the new selection and rows only if the scan completes. A partial, failed, or
+superseded scan leaves the old selection unchanged. Settings and folder failures
+stay visibly distinct from an empty folder list and offer a retry, while lookup
+and sync charges are shown in the UI.
+
+The **Stop syncing** control also requires a choice: keep synced items as local
+saves, or remove them from this app. Both choices clear the selected folder and
+leave X bookmarks untouched; manual saves, cached conversations and posts, and
+read history remain.
+
+**Reconnect** is deliberately not an account switch. It accepts only the X
+account already attached to this deployment, rejects a different account, and
+preserves that account's bookmark selection and local library. A broken legacy
+grant with no cached identity cannot be compared safely, so the app tells you to
+disconnect first. Before exchange, the old local pair enters a durable paused
+state: only a conclusive code refusal restores its prior state. Transport,
+408/429, 5xx, incomplete response, identity, or database-promotion ambiguity
+remains paused and can be recovered by another same-account Reconnect; an
+expired callback never makes the old pair look usable again. To use another
+account, choose **Disconnect X**. Disconnect
+first fences work owned by the stored grant, asks X to revoke it, and only after
+confirmed revocation deletes the local credentials and applies your keep/remove
+choice. An X request already sent may still finish and bill, but a late
+account-owned result cannot be saved. If revocation fails, the existing local
+grant and data remain so you can retry. After a successful disconnect, the next
+login is a fresh connection: it may use any X account, has no inherited
+bookmark-folder selection, and defers its first identity lookup until a folder
+or timeline action needs it. Fresh login and terminal disconnect rotate the
+opaque account generation used for browser cache ownership and account-bound
+request admission. Stale tabs are rejected before account work, and a
+generation change resets a remembered inbox view to Saved; same-account
+Reconnect and token refresh preserve the generation.
+
+One **Your posts** request returns at most 50 threads and scans at most four
+50-post timeline pages. Because replies into other people's conversations are
+filtered after scanning, the safe boundary can return fewer threads than you
+asked for while reporting that more may exist; the UI says so rather than
+silently buying a fifth page.
 
 **Give each deployment its own X app.** A developer account allows three. X
 keeps at most one live grant per user per client id, so authorizing a second

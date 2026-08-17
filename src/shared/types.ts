@@ -1,3 +1,6 @@
+/** Browser-held account namespace required on every account-bound API call. */
+export const ACCOUNT_GENERATION_HEADER = "X-Account-Generation";
+
 export interface PostMetrics {
   likes: number;
   replies: number;
@@ -116,6 +119,11 @@ export interface OkResponse {
   ok: boolean;
 }
 
+/** Terminal X disconnect also tells the client which account-cache namespace is current. */
+export interface DisconnectResponse extends OkResponse {
+  accountGeneration: string;
+}
+
 export interface ResolveResponse {
   /** The cached conversation this post belongs to, or null if we have none. */
   rootId: string | null;
@@ -175,6 +183,9 @@ export interface OwnThread {
   loaded: boolean;
 }
 
+/** Largest Your-posts thread target one request will accept. */
+export const MAX_OWN_POST_THREADS = 50;
+
 export interface OwnPostsResponse {
   items: OwnThread[];
   quoted: Record<string, Post>;
@@ -200,22 +211,30 @@ export interface FoldersResponse {
 }
 
 /**
- * Where this deployment stands with X — one of four states, not a bag of
+ * Where this deployment stands with X — one of five states, not a bag of
  * booleans that can spell states there is no such thing as.
  *
  * `unconfigured` — no OAuth client credentials; user-context features are off.
  * `unauthorized` — credentials, but nobody has consented yet.
  * `broken` — the grant is gone and only a fresh login revives it.
+ * `disconnecting` — provider revocation owns the grant; it is deliberately
+ *   unusable until local deletion succeeds or revocation fails and releases.
  * `authorized` — usable; `user` is null until something has paid for the
  *   billable `/2/users/me` that resolves it, so the status route never does.
+ * `accountGeneration` is the durable opaque namespace for account-owned
+ * client caches. Fresh login and terminal disconnect rotate it; same-account
+ * reconnect and token refresh preserve it.
  */
-export type AuthStatus =
-  | { state: "unconfigured" }
-  | { state: "unauthorized"; loginUrl: string }
-  | { state: "broken"; reason: string; loginUrl: string }
-  | {
-      state: "authorized";
-      user: { username: string; name: string } | null;
-      scopes: string[];
-      expiresAt: number;
-    };
+export type AuthStatus = { accountGeneration: string } &
+  (
+    | { state: "unconfigured" }
+    | { state: "unauthorized"; loginUrl: string }
+    | { state: "disconnecting" }
+    | { state: "broken"; reason: string; loginUrl: string }
+    | {
+        state: "authorized";
+        user: { username: string; name: string } | null;
+        scopes: string[];
+        expiresAt: number;
+      }
+  );

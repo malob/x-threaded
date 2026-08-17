@@ -57,37 +57,76 @@ describe("nonvisual accessibility markup", () => {
     expect(attribute(folderSelect, "aria-label")).toBe('"Bookmark folder to sync"');
   });
 
-  it("serializes bookmark-folder mutation and sync controls", async () => {
+  it("serializes every bookmark/account lifecycle mutation after confirmation", async () => {
     const source = await parseWebFile("Inbox.tsx");
     const inbox = openings(source);
-    expect(source.text).toContain("const folderBusy = settingFolder || syncing;");
-    expect(source.text).toContain("const [syncFlight] = useState(createSingleFlight);");
-    expect(source.text).toContain("await syncFlight.run(async () =>");
+    expect(source.text).toContain("const [lifecycleFlight] = useState(createSingleFlight);");
+    expect(source.text).toContain("await lifecycleFlight.run(async () =>");
     expect(source.text).toContain("await sync.mutateAsync(undefined)");
-    expect(source.text).toContain("await setFolder.mutateAsync({ id, name })");
+    expect(source.text).toContain("await switchFolder.mutateAsync({");
+    expect(source.text).toContain("await clearFolder.mutateAsync({");
+    expect(source.text).toContain("await disconnect.mutateAsync({");
+    // A dialog opened under account A must keep sending A even if a focus
+    // refresh changes the component's current generation to B before confirm.
+    expect(source.text.match(/accountGeneration: prompt\.accountGeneration/g)).toHaveLength(3);
+    expect(source.text).toContain(
+      'accountGeneration: prompt.accountGeneration,\n        });\n        setTab("saved");',
+    );
     expect(source.text).not.toContain("sync.mutate(undefined");
-    const changeFolder = source.text.indexOf("const changeFolder = async");
-    const changeFolderGate = source.text.indexOf("await syncFlight.run(async () =>", changeFolder);
-    const folderMutation = source.text.indexOf("await setFolder.mutateAsync", changeFolder);
-    expect(changeFolder).toBeGreaterThan(-1);
-    expect(changeFolderGate).toBeGreaterThan(changeFolder);
-    expect(folderMutation).toBeGreaterThan(changeFolderGate);
+    const requestFolder = source.text.indexOf("const requestFolderChange =");
+    const confirmFolder = source.text.indexOf("const confirmFolderSwitch =");
+    const folderMutation = source.text.indexOf("await switchFolder.mutateAsync", confirmFolder);
+    expect(requestFolder).toBeGreaterThan(-1);
+    expect(confirmFolder).toBeGreaterThan(requestFolder);
+    expect(source.text.slice(requestFolder, confirmFolder)).not.toContain("mutate");
+    expect(folderMutation).toBeGreaterThan(confirmFolder);
 
     const folderSelect = elementWith(inbox, "select", "defaultValue", '{settings.bookmarkFolderId ?? ""}');
-    expect(attribute(folderSelect, "disabled")).toBe("{folderBusy}");
+    expect(attribute(folderSelect, "disabled")).toBe("{busy}");
 
     const pickerButtons = inbox.filter(
       (element) =>
         tag(element) === "button" && attribute(element, "onClick") === "{() => setPicking(true)}",
     );
     expect(pickerButtons).toHaveLength(2);
-    for (const button of pickerButtons) expect(attribute(button, "disabled")).toBe("{folderBusy}");
+    for (const button of pickerButtons) expect(attribute(button, "disabled")).toBe("{busy}");
 
     const syncButton = elementWith(inbox, "button", "onClick", "{onSync}");
-    expect(attribute(syncButton, "disabled")).toBe("{folderBusy}");
+    expect(attribute(syncButton, "disabled")).toBe("{busy}");
 
-    const folderBar = elementWith(inbox, "FolderBar", "syncing", "{sync.isPending}");
-    expect(attribute(folderBar, "settingFolder")).toBe("{setFolder.isPending}");
+    const folderBar = elementWith(inbox, "FolderBar", "busy", "{lifecycleBusy}");
+    expect(attribute(folderBar, "syncing")).toBe("{sync.isPending || switchFolder.isPending}");
+  });
+
+  it("reconciles account-owned tab state before enabling a paid own-post query", async () => {
+    const source = (await parseWebFile("Inbox.tsx")).text;
+    const reconciliation = source.indexOf(
+      "const accountTab = reconcileAccountTab(storedTab, accountGeneration);",
+    );
+    const paidQuery = source.indexOf(
+      'useOwnPosts(accountGeneration, scan, tab === "yours" && authorized)',
+    );
+    expect(reconciliation).toBeGreaterThan(-1);
+    expect(paidQuery).toBeGreaterThan(reconciliation);
+  });
+
+  it("uses a modal dialog with labelled copy, safe initial focus and keyboard cancellation", async () => {
+    const source = await parseWebFile("Inbox.tsx");
+    const inbox = openings(source);
+    const dialog = elementWith(inbox, "dialog", "aria-modal", '"true"');
+    expect(attribute(dialog, "aria-labelledby")).toBe("{DIALOG_TITLE_ID}");
+    expect(attribute(dialog, "aria-describedby")).toBe("{DIALOG_DETAIL_ID}");
+    expect(attribute(dialog, "onCancel")).toBe("{cancel}");
+    expect(source.text).toContain("dialog.showModal()");
+    expect(source.text).toContain("cancelRef.current?.focus()");
+    expect(source.text).toContain("document.activeElement !== document.body");
+    expect(source.text).toContain("previousFocus?.focus()");
+    expect(source.text).toContain("Keep as local saves");
+    expect(source.text).toContain("Remove from this app");
+    expect(source.text).toContain("Disconnect and keep local saves");
+    expect(source.text).toContain("Disconnect and remove synced saves");
+    expect(source.text).toContain("Continue reconnecting");
+    expect(source.text).toContain("Cancel");
   });
 
   it("wires each inbox tab to its labelled panel", async () => {

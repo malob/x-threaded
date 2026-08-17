@@ -37,7 +37,7 @@ CI follows the five contributor gates with
 configuration, and static-asset wiring without deploying anything; run it
 locally too when changing the Worker entry, `wrangler.jsonc`, or assets setup.
 
-## Three invariants
+## Four invariants
 
 Most review findings on this codebase have come back to one of these.
 
@@ -61,6 +61,31 @@ edit `0001_init.sql`, which existing databases have already recorded and will
 skip. After first bootstrap, apply migrations before deploying a Worker that
 needs new columns. The bootstrap exception is documented in `DEPLOYING.md`:
 the first raw deploy must provision D1 before migrations can run.
+
+**Account transitions are owned protocols, not settings writes.** Account-bound
+requests carry the observed opaque account generation and must reject a stale
+generation atomically before X spend or mutation; confirmation dialogs retain
+the generation under which they opened. X work also carries the observed
+refresh token and is checked before outbound calls and conditional persistence.
+A folder switch must stage its paid target scan
+under the source/target/run lease and atomically activate only a complete scan;
+selecting an option in the UI must remain inert until explicit confirmation.
+Stopping sync requires a `keep` or `remove` disposition for bookmark-owned
+Saved rows. Reauthorization is same-account-only and uses a callback lease plus
+identity comparison before replacing the grant, while preserving that account's
+folder and library. Claiming that callback must first durably move the old pair
+to `reauthorizing`: only a conclusive provider refusal or confirmed
+different-account identity may restore its displaced state. Ambiguous exchange,
+identity, and promotion outcomes stay fenced; a read-after-error probe must
+distinguish a committed promotion before cleanup can revoke its token. A settled
+or expired pending row with cached identity may be reclaimed only by another
+same-account callback. Disconnect first claims the grant, fences competing
+bookmark/profile/timeline work, and revokes at X; only confirmed revocation may
+atomically apply the disposition and remove local credentials. An account X
+request already sent can still bill, but its late result must not persist. A
+fresh login after terminal disconnect is a new account generation with no
+inherited folder or bookmark ownership. Keep these rules coherent across routes,
+storage drivers, and client cache invalidation.
 
 Before changing anything that talks to X, read
 [`docs/x-api-notes.md`](docs/x-api-notes.md); before touching the thread view,
@@ -89,10 +114,12 @@ the point where they happen. Before "fixing" one, read the comment next to it:
 - The spend meter **over-counts in one place** — re-reading a referenced post to
   resolve its media is billed even when the same post was read minutes earlier.
   The estimate is meant to lean high.
-- **Opening a cached conversation auto-refreshes** it. That's first-view-is-
-  consent, not an accident. An empty cross-day `since_id` page normally bills
-  nothing, but a same-day full reread or missing media/root/quote hydration can
-  still produce a charge.
+- **Opening a cached conversation currently auto-refreshes** it. That is an
+  explicit code path, not accidental query invalidation, but whether the product
+  should keep automatically spending there remains user decision 3 in
+  `PLANS.md`. An empty cross-day `since_id` page normally bills nothing, but a
+  same-day full reread or missing media/root/quote hydration can still produce a
+  charge.
 - Protected accounts' replies stay as **"unavailable post" placeholders**.
   Full-archive search accepts the app-only bearer *only* (see x-api-notes N5),
   so conversation trees can never run as the signed-in user.
@@ -102,8 +129,8 @@ the point where they happen. Before "fixing" one, read the comment next to it:
 ## Known gaps
 
 They live in the README's [Limitations](README.md#limitations) section, written
-as what a user notices rather than as what's absent from the code. Two notes
-for whoever picks one up:
+as what a user notices rather than as what's absent from the code. Notes for
+whoever picks one up:
 
 - The **per-conversation run lease** is durable and renewable. It starts at five
   minutes; the owner checks before every outbound X boundary and internal
@@ -118,7 +145,16 @@ for whoever picks one up:
   requests for the same unseen post can still each buy the initial lookup; the
   root lease prevents losing requests from continuing into conversation search.
 - The **settings surface** is further along than it looks — the `settings`
-  table, `/api/settings` route, and bookmark-folder control already exist.
-  Both runtime entries already read the fetch cap from the environment. What's
-  missing is an in-app lower override, with that environment value remaining
-  the hard ceiling.
+  table, clear-only `/api/settings` route, confirmed `/api/bookmarks/switch`
+  protocol, and bookmark-folder controls already exist. Both runtime entries
+  already read the fetch cap from the environment. What's missing is an in-app
+  lower override, with that environment value remaining the hard ceiling.
+- **Disconnect ownership does not include public conversation fetching.** It
+  fences work attached to the user OAuth grant. Conversation fetches use the
+  app-only bearer and their own per-root lease, so disconnecting X neither
+  cancels them nor resolves the separate automatic-spend product decision.
+- A **Your posts** request may scan at most four 50-post timeline pages and may
+  return at most 50 threads. Filtering self-thread continuations and replies
+  into other people's conversations can leave fewer than the requested number
+  while `hasMore` remains true. Preserve that truthful result instead of buying
+  a fifth page or treating the timeline as exhausted.

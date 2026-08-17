@@ -697,7 +697,11 @@ export function describeStorageContract(name: string, makeStore: MakeStore): voi
 
       it("round-trips a token row with no user ID yet", async () => {
         const store = await makeStore();
-        await store.putOAuthTokens("self", { ...tokens, userId: null });
+        expect(await store.claimFreshOAuthInstall("self", "callback-a", 5000, 1000)).toBe(true);
+        expect(await store.claimFreshOAuthInstall("self", "callback-b", 5000, 1000)).toBe(false);
+        expect(
+          await store.finishFreshOAuthInstall("self", "callback-a", { ...tokens, userId: null }),
+        ).toBe(true);
 
         expect(await store.getOAuthTokens("self")).toEqual(readyRow());
       });
@@ -707,6 +711,152 @@ export function describeStorageContract(name: string, makeStore: MakeStore): voi
         await store.putOAuthTokens("self", tokens);
 
         expect(await store.getOAuthTokens("self")).toEqual(readyRow());
+      });
+
+      it("lazily creates one durable account generation and rotates it on a fresh grant", async () => {
+        const store = await makeStore();
+        const initial = await store.getOrCreateAccountGeneration("self", "generation-initial");
+        expect(initial).toBe("generation-initial");
+        expect(await store.getOrCreateAccountGeneration("self", "generation-loser")).toBe(initial);
+
+        await store.putOAuthTokens("self", tokens);
+        const connected = await store.getOrCreateAccountGeneration("self", "generation-unused");
+        expect(connected).toBeString();
+        expect(connected).not.toBe(initial);
+      });
+
+      it("reads the account generation and OAuth row from one storage snapshot", async () => {
+        const store = await makeStore();
+        expect(await store.getOAuthStatusSnapshot("self", "generation-empty")).toEqual({
+          accountGeneration: "generation-empty",
+          tokens: null,
+        });
+
+        await store.putOAuthTokens("self", { ...tokens, userId: "42" });
+        const connected = await store.getOAuthStatusSnapshot("self", "generation-loser");
+        expect(connected.accountGeneration).not.toBe("generation-empty");
+        expect(connected.tokens).toEqual(readyRow({ userId: "42" }));
+      });
+
+      it("rejects stale account generations in every account-bound storage guard", async () => {
+        const store = await makeStore();
+        await store.putOAuthTokens("self", tokens);
+        const currentGeneration = await store.getOrCreateAccountGeneration(
+          "self",
+          "generation-unused",
+        );
+        const staleGeneration = "generation-stale";
+        expect(currentGeneration).not.toBe(staleGeneration);
+        const saved = makePost({
+          id: "saved-current-account",
+          createdAt: "2024-01-01T00:00:00.000Z",
+        });
+        const stalePost = makePost({
+          id: "must-not-land",
+          createdAt: "2024-01-02T00:00:00.000Z",
+        });
+        await store.upsertPosts([saved]);
+        await store.addSavedItems([savedItem(saved.id, { source: "bookmark" })]);
+        await store.setBookmarkFolder("folder-current", "Current");
+
+        expect(await store.getOAuthStatusForGeneration("self", staleGeneration)).toBeNull();
+        expect(await store.getBookmarkFolderForGeneration(staleGeneration)).toBeNull();
+        expect(await store.clearBookmarkFolder("remove", staleGeneration)).toBe(false);
+        expect(
+          await store.beginBookmarkSync(
+            "folder-current",
+            "stale-sync",
+            5000,
+            1000,
+            staleGeneration,
+          ),
+        ).toBe(false);
+        expect(
+          await store.beginBookmarkFolderSwitch(
+            "folder-current",
+            "folder-next",
+            "Next",
+            "stale-switch",
+            5000,
+            1000,
+            staleGeneration,
+          ),
+        ).toBe(false);
+        expect(
+          await store.claimUserProfileLease(
+            "self",
+            tokens.refreshToken,
+            "stale-profile",
+            5000,
+            1000,
+            staleGeneration,
+          ),
+        ).toBe(false);
+        expect(
+          await store.upsertPostsIfOAuthGrantCurrent(
+            "self",
+            tokens.refreshToken,
+            [stalePost],
+            1,
+            staleGeneration,
+          ),
+        ).toBe(false);
+        expect(
+          await store.claimOAuthDisconnect(
+            "self",
+            tokens.refreshToken,
+            "stale-disconnect",
+            5000,
+            1000,
+            staleGeneration,
+          ),
+        ).toBe(false);
+
+        expect(await store.getOAuthTokens("self")).toEqual(readyRow());
+        expect(await store.getBookmarkFolder()).toEqual({
+          id: "folder-current",
+          name: "Current",
+        });
+        expect(await store.listSavedItems()).toEqual([
+          savedItem(saved.id, { source: "bookmark" }),
+        ]);
+        expect(await store.getPost(stalePost.id)).toBeNull();
+
+        const noGrant = await makeStore();
+        const noGrantGeneration = await noGrant.getOrCreateAccountGeneration(
+          "self",
+          "generation-current",
+        );
+        expect(
+          await noGrant.claimFreshOAuthInstall(
+            "self",
+            "stale-callback",
+            5000,
+            1000,
+            staleGeneration,
+          ),
+        ).toBe(false);
+        expect(await noGrant.finishOAuthDisconnectWithoutGrant("remove", staleGeneration)).toBeNull();
+        expect(await noGrant.getOrCreateAccountGeneration("self", "generation-loser")).toBe(
+          noGrantGeneration,
+        );
+
+        const reauthorization = await makeStore();
+        await reauthorization.putOAuthTokens("self", { ...tokens, userId: "account" });
+        expect(
+          await reauthorization.claimOAuthReauthorization(
+            "self",
+            tokens.refreshToken,
+            "stale-callback",
+            5000,
+            1000,
+            staleGeneration,
+          ),
+        ).toBe(false);
+        expect(await reauthorization.getOAuthTokens("self")).toMatchObject({
+          refreshToken: tokens.refreshToken,
+          state: "ready",
+        });
       });
 
       it("round-trips the cached profile", async () => {
@@ -739,6 +889,583 @@ export function describeStorageContract(name: string, makeStore: MakeStore): voi
           refreshToken: "refresh-2",
         });
         expect(await store.getOAuthTokens("someone-else")).toBeNull();
+      });
+
+      it("does not attach orphaned account bookmarks to a fresh grant", async () => {
+        const store = await makeStore();
+        await store.setBookmarkFolder("orphan-folder", "Old account");
+        await store.addSavedItems([
+          savedItem("orphan", { source: "bookmark" }),
+          savedItem("manual", { source: "manual" }),
+        ]);
+
+        await store.putOAuthTokens("self", { ...tokens, userId: null });
+
+        expect(await store.getBookmarkFolder()).toEqual({ id: null, name: null });
+        expect(
+          (await store.listSavedItems())
+            .map(({ postId, source }) => ({ postId, source }))
+            .sort((a, b) => a.postId.localeCompare(b.postId)),
+        ).toEqual([
+          { postId: "manual", source: "manual" },
+          { postId: "orphan", source: "manual" },
+        ]);
+        expect(
+          await store.finishFreshOAuthInstall("self", "callback-b", {
+            ...tokens,
+            accessToken: "racing-access",
+            refreshToken: "racing-refresh",
+          }),
+        ).toBe(false);
+        expect((await store.getOAuthTokens("self"))?.refreshToken).toBe(tokens.refreshToken);
+      });
+
+      it("recovers an expired first-callback lease and fences its stale holder", async () => {
+        const store = await makeStore();
+        expect(await store.claimFreshOAuthInstall("self", "callback-old", 2000, 1000)).toBe(true);
+        expect(await store.claimFreshOAuthInstall("self", "callback-new", 5000, 2000)).toBe(true);
+        expect(
+          await store.finishFreshOAuthInstall("self", "callback-old", {
+            ...tokens,
+            refreshToken: "stale",
+          }),
+        ).toBe(false);
+        expect(
+          await store.finishFreshOAuthInstall("self", "callback-new", {
+            ...tokens,
+            refreshToken: "current",
+          }),
+        ).toBe(true);
+        expect((await store.getOAuthTokens("self"))?.refreshToken).toBe("current");
+      });
+
+      it("installs a same-account reauthorization only against the observed grant", async () => {
+        const store = await makeStore();
+        await store.putOAuthTokens("self", {
+          ...tokens,
+          userId: "42",
+          username: "someone",
+          displayName: "Some One",
+        });
+        await store.setBookmarkFolder("folder1", "Reading");
+        await store.addSavedItems([savedItem("bookmark", { source: "bookmark" })]);
+        const accountGeneration = await store.getOrCreateAccountGeneration(
+          "self",
+          "generation-unused",
+        );
+
+        expect(
+          await store.claimOAuthReauthorization(
+            "self",
+            tokens.refreshToken,
+            "callback",
+            5000,
+            1000,
+          ),
+        ).toBe(true);
+        expect(await store.getOAuthTokens("self")).toMatchObject({
+          state: "reauthorizing",
+          leaseId: "callback",
+        });
+        expect(
+          await store.probeOAuthReauthorizationPromotion(
+            "self",
+            tokens.refreshToken,
+            "refresh-new",
+            "callback",
+          ),
+        ).toBe("owned-pending");
+        expect(await store.isOAuthGrantCurrent("self", tokens.refreshToken)).toBe(false);
+
+        expect(
+          await store.replaceOAuthTokensIfCurrent(
+            "self",
+            tokens.refreshToken,
+            {
+              accessToken: "access-new",
+              refreshToken: "refresh-new",
+              expiresAt: 1_770_000_000_000,
+              scope: tokens.scope,
+              userId: "42",
+              username: "someone-new",
+              displayName: "Some One",
+            },
+            "callback",
+          ),
+        ).toBe(true);
+        expect(await store.getOAuthTokens("self")).toMatchObject({
+          accessToken: "access-new",
+          refreshToken: "refresh-new",
+          userId: "42",
+          username: "someone-new",
+        });
+        expect(
+          await store.probeOAuthReauthorizationPromotion(
+            "self",
+            tokens.refreshToken,
+            "refresh-new",
+            "callback",
+          ),
+        ).toBe("promoted");
+        expect(
+          await store.probeOAuthReauthorizationPromotion(
+            "self",
+            tokens.refreshToken,
+            "unrelated",
+            "callback",
+          ),
+        ).toBe("superseded");
+        expect(await store.getBookmarkFolder()).toEqual({ id: "folder1", name: "Reading" });
+        expect((await store.listSavedItems()).map((item) => item.postId)).toEqual(["bookmark"]);
+        expect(await store.getOrCreateAccountGeneration("self", "generation-loser")).toBe(
+          accountGeneration,
+        );
+
+        expect(
+          await store.replaceOAuthTokensIfCurrent("self", tokens.refreshToken, {
+            accessToken: "stale",
+            refreshToken: "stale",
+            expiresAt: 1_780_000_000_000,
+            scope: tokens.scope,
+            userId: "42",
+          }),
+        ).toBe(false);
+        expect((await store.getOAuthTokens("self"))?.refreshToken).toBe("refresh-new");
+      });
+
+      it("single-flights reauthorization exchange and binds install to its callback owner", async () => {
+        const store = await makeStore();
+        await store.putOAuthTokens("self", { ...tokens, userId: "42" });
+        expect(
+          await store.claimOAuthReauthorization(
+            "self",
+            tokens.refreshToken,
+            "callback-a",
+            5000,
+            1000,
+          ),
+        ).toBe(true);
+        expect(await store.getOAuthTokens("self")).toMatchObject({
+          state: "reauthorizing",
+          leaseId: "callback-a",
+        });
+        expect(await store.isOAuthGrantCurrent("self", tokens.refreshToken)).toBe(false);
+        expect(
+          await store.claimOAuthReauthorization(
+            "self",
+            tokens.refreshToken,
+            "callback-b",
+            5000,
+            1000,
+          ),
+        ).toBe(false);
+        const replacement = {
+          ...tokens,
+          accessToken: "access-new",
+          refreshToken: "refresh-new",
+          userId: "42",
+        };
+        expect(
+          await store.replaceOAuthTokensIfCurrent(
+            "self",
+            tokens.refreshToken,
+            replacement,
+            "callback-b",
+          ),
+        ).toBe(false);
+        expect(
+          await store.replaceOAuthTokensIfCurrent(
+            "self",
+            tokens.refreshToken,
+            replacement,
+            "callback-a",
+          ),
+        ).toBe(true);
+        expect((await store.getOAuthTokens("self"))?.refreshToken).toBe("refresh-new");
+      });
+
+      it("serializes reauthorization callbacks with token refresh ownership", async () => {
+        const store = await makeStore();
+        await store.putOAuthTokens("self", { ...tokens, userId: "42" });
+
+        expect(
+          await store.claimOAuthReauthorization(
+            "self",
+            tokens.refreshToken,
+            "callback-a",
+            5000,
+            1000,
+          ),
+        ).toBe(true);
+        expect(
+          await store.claimTokenLease("self", tokens.refreshToken, "refresh-a", 5000, 1000),
+        ).toBe(false);
+        expect(
+          await store.restoreOAuthReauthorization(
+            "self",
+            tokens.refreshToken,
+            "callback-a",
+          ),
+        ).toBe(true);
+        expect(
+          await store.claimTokenLease("self", tokens.refreshToken, "refresh-a", 5000, 1000),
+        ).toBe(true);
+
+        await store.releaseTokenLease("self", "refresh-a", tokens.refreshToken);
+        expect(
+          await store.claimTokenLease("self", tokens.refreshToken, "refresh-b", 5000),
+        ).toBe(true);
+        expect(
+          await store.claimOAuthReauthorization(
+            "self",
+            tokens.refreshToken,
+            "callback-b",
+            5000,
+            1000,
+          ),
+        ).toBe(false);
+
+        await store.releaseTokenLease("self", "refresh-b", tokens.refreshToken);
+        expect(
+          await store.claimOAuthReauthorization(
+            "self",
+            tokens.refreshToken,
+            "expired-callback-a",
+            2000,
+            1000,
+          ),
+        ).toBe(true);
+        expect(
+          await store.claimOAuthReauthorization(
+            "self",
+            tokens.refreshToken,
+            "expired-callback-b",
+            5000,
+            2000,
+          ),
+        ).toBe(true);
+        expect(
+          await store.replaceOAuthTokensIfCurrent(
+            "self",
+            tokens.refreshToken,
+            {
+              ...tokens,
+              accessToken: "stale-callback",
+              refreshToken: "stale-callback",
+              userId: "42",
+            },
+            "expired-callback-a",
+          ),
+        ).toBe(false);
+        expect(
+          await store.replaceOAuthTokensIfCurrent(
+            "self",
+            tokens.refreshToken,
+            {
+              ...tokens,
+              accessToken: "recovered-callback",
+              refreshToken: "recovered-callback",
+              userId: "42",
+            },
+            "expired-callback-b",
+          ),
+        ).toBe(true);
+        expect((await store.getOAuthTokens("self"))?.refreshToken).toBe("recovered-callback");
+      });
+
+      it("settles an ambiguous callback as pending and only restores pending on refusal", async () => {
+        const store = await makeStore();
+        await store.putOAuthTokens("self", { ...tokens, userId: "42" });
+
+        expect(
+          await store.claimOAuthReauthorization(
+            "self",
+            tokens.refreshToken,
+            "callback-a",
+            5000,
+            1000,
+          ),
+        ).toBe(true);
+        expect(
+          await store.settleOAuthReauthorizationPending(
+            "self",
+            tokens.refreshToken,
+            "callback-a",
+            "replacement outcome unknown",
+          ),
+        ).toBe(true);
+        expect(await store.getOAuthTokens("self")).toMatchObject({
+          state: "reauthorizing",
+          leaseId: null,
+          leaseUntil: null,
+          brokenReason: "replacement outcome unknown",
+        });
+        expect(await store.isOAuthGrantCurrent("self", tokens.refreshToken)).toBe(false);
+        expect(
+          await store.claimTokenLease("self", tokens.refreshToken, "refresh", 9000, 8000),
+        ).toBe(false);
+
+        expect(
+          await store.claimOAuthReauthorization(
+            "self",
+            tokens.refreshToken,
+            "callback-b",
+            9000,
+            8000,
+          ),
+        ).toBe(true);
+        expect(
+          await store.restoreOAuthReauthorization(
+            "self",
+            tokens.refreshToken,
+            "callback-b",
+          ),
+        ).toBe(true);
+        expect(await store.getOAuthTokens("self")).toMatchObject({
+          state: "reauthorizing",
+          leaseId: null,
+          brokenReason: "replacement outcome unknown",
+        });
+        expect(
+          await store.claimOAuthDisconnect(
+            "self",
+            tokens.refreshToken,
+            "disconnect",
+            11_000,
+            10_000,
+          ),
+        ).toBe(true);
+        expect(
+          await store.releaseOAuthDisconnect("self", tokens.refreshToken, "disconnect"),
+        ).toBe(true);
+        expect(await store.getOAuthTokens("self")).toMatchObject({
+          state: "broken",
+          brokenReason: "replacement outcome unknown",
+        });
+      });
+
+      it("leases terminal disconnect and keeps imported bookmarks as manual saves", async () => {
+        const store = await makeStore();
+        await store.putOAuthTokens("self", { ...tokens, userId: "42" });
+        await store.setBookmarkFolder("folder1", "Reading");
+        await store.addSavedItems([
+          savedItem("bookmark", { source: "bookmark" }),
+          savedItem("manual", { source: "manual" }),
+        ]);
+        const connectedGeneration = await store.getOrCreateAccountGeneration(
+          "self",
+          "generation-unused",
+        );
+
+        expect(
+          await store.claimOAuthDisconnect("self", tokens.refreshToken, "disconnect-a", 5000, 1000),
+        ).toBe(true);
+        expect(
+          await store.claimOAuthDisconnect("self", tokens.refreshToken, "disconnect-b", 6000, 2000),
+        ).toBe(false);
+        expect(
+          await store.finishOAuthDisconnect("self", tokens.refreshToken, "wrong", "keep"),
+        ).toBeNull();
+        const accountGeneration = await store.finishOAuthDisconnect(
+          "self",
+          tokens.refreshToken,
+          "disconnect-a",
+          "keep",
+        );
+        expect(accountGeneration).toBeString();
+        expect(accountGeneration).not.toBe(connectedGeneration);
+        expect(await store.getOrCreateAccountGeneration("self", "generation-loser")).toBe(
+          accountGeneration!,
+        );
+
+        expect(await store.getOAuthTokens("self")).toBeNull();
+        expect(await store.getBookmarkFolder()).toEqual({ id: null, name: null });
+        expect(
+          (await store.listSavedItems()).map(({ postId, source }) => ({ postId, source })),
+        ).toEqual([
+          { postId: "bookmark", source: "manual" },
+          { postId: "manual", source: "manual" },
+        ]);
+      });
+
+      it("rotates generation while terminally cleaning orphan account rows", async () => {
+        const store = await makeStore();
+        const before = await store.getOrCreateAccountGeneration("self", "generation-before");
+        await store.setBookmarkFolder("orphan", "Old account");
+        await store.addSavedItems([savedItem("bookmark", { source: "bookmark" })]);
+
+        const after = await store.finishOAuthDisconnectWithoutGrant("keep");
+
+        expect(after).toBeString();
+        expect(after).not.toBe(before);
+        expect(await store.getOrCreateAccountGeneration("self", "generation-loser")).toBe(after!);
+        expect(await store.getBookmarkFolder()).toEqual({ id: null, name: null });
+        expect(await store.listSavedItems()).toEqual([
+          savedItem("bookmark", { source: "manual" }),
+        ]);
+      });
+
+      it("releases a failed disconnect, recovers expiry, and fences the stale owner", async () => {
+        const store = await makeStore();
+        await store.putOAuthTokens("self", { ...tokens, userId: "42" });
+
+        expect(
+          await store.claimOAuthDisconnect("self", tokens.refreshToken, "disconnect-a", 2000, 1000),
+        ).toBe(true);
+        expect(
+          await store.releaseOAuthDisconnect("self", tokens.refreshToken, "disconnect-a"),
+        ).toBe(true);
+        expect((await store.getOAuthTokens("self"))?.state).toBe("ready");
+
+        expect(
+          await store.claimOAuthDisconnect("self", tokens.refreshToken, "disconnect-old", 3000, 2000),
+        ).toBe(true);
+        expect(
+          await store.claimOAuthDisconnect("self", tokens.refreshToken, "disconnect-new", 5000, 3000),
+        ).toBe(true);
+        expect(
+          await store.finishOAuthDisconnect(
+            "self",
+            tokens.refreshToken,
+            "disconnect-old",
+            "remove",
+          ),
+        ).toBeNull();
+        expect(
+          await store.finishOAuthDisconnect(
+            "self",
+            tokens.refreshToken,
+            "disconnect-new",
+            "remove",
+          ),
+        ).toBeString();
+      });
+
+      it("does not let a disconnecting grant start a late profile resolution", async () => {
+        const store = await makeStore();
+        await store.putOAuthTokens("self", tokens);
+
+        expect(
+          await store.claimOAuthDisconnect("self", tokens.refreshToken, "disconnect", 5000, 1000),
+        ).toBe(true);
+        expect(
+          await store.claimUserProfileLease(
+            "self",
+            tokens.refreshToken,
+            "late-profile",
+            5000,
+            1000,
+          ),
+        ).toBe(false);
+        expect(
+          await store.putUserProfile("self", tokens.refreshToken, {
+            userId: "42",
+            username: "someone",
+            displayName: "Some One",
+          }),
+        ).toBe(false);
+      });
+
+      it("does not let a folder clear override an owned disconnect disposition", async () => {
+        const store = await makeStore();
+        await store.putOAuthTokens("self", tokens);
+        await store.setBookmarkFolder("folder-a", "Reading");
+        await store.addSavedItems([savedItem("bookmark", { source: "bookmark" })]);
+
+        expect(
+          await store.claimOAuthDisconnect("self", tokens.refreshToken, "disconnect", 5000, 1000),
+        ).toBe(true);
+        expect(await store.clearBookmarkFolder("keep")).toBe(false);
+        expect(await store.getBookmarkFolder()).toEqual({ id: "folder-a", name: "Reading" });
+        expect(await store.listSavedItems()).toEqual([
+          savedItem("bookmark", { source: "bookmark" }),
+        ]);
+
+        expect(
+          await store.finishOAuthDisconnect(
+            "self",
+            tokens.refreshToken,
+            "disconnect",
+            "remove",
+          ),
+        ).toBeString();
+        expect(await store.listSavedItems()).toEqual([]);
+      });
+
+      it("does not let disconnect or folder clear steal an active OAuth callback", async () => {
+        const now = Date.now();
+        const freshStore = await makeStore();
+        expect(
+          await freshStore.claimFreshOAuthInstall("self", "fresh", now + 5000, now),
+        ).toBe(true);
+        expect(await freshStore.clearBookmarkFolder("remove")).toBe(false);
+
+        const reconnectStore = await makeStore();
+        await reconnectStore.putOAuthTokens("self", { ...tokens, userId: "42" });
+        expect(
+          await reconnectStore.claimOAuthReauthorization(
+            "self",
+            tokens.refreshToken,
+            "callback",
+            now + 5000,
+            now,
+          ),
+        ).toBe(true);
+        expect(
+          await reconnectStore.claimOAuthDisconnect(
+            "self",
+            tokens.refreshToken,
+            "disconnect",
+            now + 6000,
+            now + 1000,
+          ),
+        ).toBe(false);
+        expect(
+          await reconnectStore.settleOAuthReauthorizationPending(
+            "self",
+            tokens.refreshToken,
+            "callback",
+            "provider outcome unknown",
+          ),
+        ).toBe(true);
+        expect(
+          await reconnectStore.claimOAuthDisconnect(
+            "self",
+            tokens.refreshToken,
+            "disconnect",
+            now + 6000,
+            now + 1000,
+          ),
+        ).toBe(true);
+      });
+
+      it("invalidates an expired first callback before clear or Disconnect succeeds", async () => {
+        const now = Date.now();
+        const disconnectStore = await makeStore();
+        expect(
+          await disconnectStore.claimFreshOAuthInstall("self", "stale-disconnect", now, now - 1),
+        ).toBe(true);
+        expect(await disconnectStore.finishOAuthDisconnectWithoutGrant("keep")).toBeString();
+        expect(
+          await disconnectStore.finishFreshOAuthInstall("self", "stale-disconnect", {
+            ...tokens,
+            refreshToken: "must-not-return",
+          }),
+        ).toBe(false);
+        expect(await disconnectStore.getOAuthTokens("self")).toBeNull();
+
+        const clearStore = await makeStore();
+        expect(
+          await clearStore.claimFreshOAuthInstall("self", "stale-clear", now, now - 1),
+        ).toBe(true);
+        expect(await clearStore.clearBookmarkFolder("remove")).toBe(true);
+        expect(
+          await clearStore.finishFreshOAuthInstall("self", "stale-clear", {
+            ...tokens,
+            refreshToken: "must-not-return",
+          }),
+        ).toBe(false);
+        expect(await clearStore.getOAuthTokens("self")).toBeNull();
       });
 
       it("writes the profile without touching the token pair or the lease", async () => {
@@ -1283,6 +2010,100 @@ export function describeStorageContract(name: string, makeStore: MakeStore): voi
         expect(await store.getPost("old")).toBeNull();
         expect(await store.getSetting("bookmark_folder_id")).toBe("folder2");
         expect(await store.getSetting("bookmark_folder_name")).toBe("Later");
+      });
+
+      it("clears a selected folder without leaving bookmark-source orphans", async () => {
+        const keepStore = await makeStore();
+        await keepStore.setBookmarkFolder("folder1", "Reading");
+        await keepStore.addSavedItems([
+          savedItem("bookmark", { source: "bookmark" }),
+          savedItem("manual", { source: "manual" }),
+        ]);
+        await keepStore.clearBookmarkFolder("keep");
+        expect(await keepStore.getBookmarkFolder()).toEqual({ id: null, name: null });
+        expect(
+          (await keepStore.listSavedItems())
+            .map(({ postId, source }) => ({ postId, source }))
+            .sort((a, b) => a.postId.localeCompare(b.postId)),
+        ).toEqual([
+          { postId: "bookmark", source: "manual" },
+          { postId: "manual", source: "manual" },
+        ]);
+
+        const removeStore = await makeStore();
+        await removeStore.setBookmarkFolder("folder1", "Reading");
+        await removeStore.addSavedItems([
+          savedItem("bookmark", { source: "bookmark" }),
+          savedItem("manual", { source: "manual" }),
+        ]);
+        await removeStore.clearBookmarkFolder("remove");
+        expect(await removeStore.getBookmarkFolder()).toEqual({ id: null, name: null });
+        expect(await removeStore.listSavedItems()).toEqual([savedItem("manual", { source: "manual" })]);
+      });
+
+      it("stages a replacement folder and atomically activates only its complete scan", async () => {
+        const store = await makeStore();
+        const old = makePost({ id: "old", createdAt: "2024-01-01T00:00:00.000Z" });
+        const next = makePost({ id: "next", createdAt: "2024-01-02T00:00:00.000Z" });
+        await store.upsertPosts([old]);
+        await store.addSavedItems([savedItem(old.id, { source: "bookmark" })]);
+        await store.setBookmarkFolder("folder-a", "A");
+
+        expect(
+          await store.beginBookmarkFolderSwitch(
+            "folder-a",
+            "folder-b",
+            "B",
+            "switch-run",
+            5000,
+            1000,
+          ),
+        ).toBe(true);
+        expect(await store.getBookmarkFolder()).toEqual({ id: "folder-a", name: "A" });
+        expect(
+          await store.finishBookmarkFolderSwitch(
+            "folder-a",
+            "folder-b",
+            "B",
+            "switch-run",
+            [next],
+            [next.id],
+            "2024-01-02T00:00:00.000Z",
+          ),
+        ).toEqual({ applied: true, added: 1, removed: 1 });
+        expect(await store.getBookmarkFolder()).toEqual({ id: "folder-b", name: "B" });
+        expect((await store.listSavedItems()).map((item) => item.postId)).toEqual([next.id]);
+      });
+
+      it("fences a staged switch when the selected folder changes before commit", async () => {
+        const store = await makeStore();
+        const next = makePost({ id: "next", createdAt: "2024-01-02T00:00:00.000Z" });
+        await store.setBookmarkFolder("folder-a", "A");
+        expect(
+          await store.beginBookmarkFolderSwitch(
+            "folder-a",
+            "folder-b",
+            "B",
+            "switch-run",
+            5000,
+            1000,
+          ),
+        ).toBe(true);
+        await store.clearBookmarkFolder("remove");
+
+        expect(
+          await store.finishBookmarkFolderSwitch(
+            "folder-a",
+            "folder-b",
+            "B",
+            "switch-run",
+            [next],
+            [next.id],
+            "2024-01-02T00:00:00.000Z",
+          ),
+        ).toEqual({ applied: false, added: 0, removed: 0 });
+        expect(await store.getPost(next.id)).toBeNull();
+        expect(await store.getBookmarkFolder()).toEqual({ id: null, name: null });
       });
 
       it("single-flights a live scan and fences it after exact-expiry recovery", async () => {

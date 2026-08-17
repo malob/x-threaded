@@ -119,6 +119,20 @@ export interface Storage {
   hasConversations(rootIds: string[]): Promise<Set<string>>;
 
   upsertPosts(posts: Post[]): Promise<void>;
+  /**
+   * Persist account-derived posts only while the exact observed grant remains
+   * usable. The ownership check and write share the SQL statement, fencing a
+   * disconnect/relogin that lands after the X response.
+   */
+  upsertPostsIfOAuthGrantCurrent(
+    id: string,
+    observedRefreshToken: string,
+    posts: Post[],
+    /** Fail without writing when payload expansion would consume more D1 statements. */
+    maxStatements?: number,
+    /** Reject a stale browser tab even if it observed the replacement grant. */
+    expectedAccountGeneration?: string,
+  ): Promise<boolean>;
   getPosts(conversationId: string): Promise<Post[]>;
   getPostsByIds(ids: string[]): Promise<Post[]>;
   /**
@@ -162,12 +176,120 @@ export interface Storage {
   /** The whole stored grant, lease bookkeeping included. */
   getOAuthTokens(id: string): Promise<StoredTokens | null>;
   /**
+   * Initialize the durable browser-cache namespace if needed, then read it
+   * together with the OAuth row from one database transaction.
+   */
+  getOAuthStatusSnapshot(id: string, generationCandidate: string): Promise<OAuthStatusSnapshot>;
+  /** Read the namespace and OAuth row only when a request still owns that namespace. */
+  getOAuthStatusForGeneration(
+    id: string,
+    expectedAccountGeneration: string,
+  ): Promise<OAuthStatusSnapshot | null>;
+  /** Stable namespace for client caches; create it lazily for upgraded databases. */
+  getOrCreateAccountGeneration(id: string, candidate: string): Promise<string>;
+  /** Whether this grant may still issue account-bound X calls. */
+  isOAuthGrantCurrent(
+    id: string,
+    observedRefreshToken: string,
+    expectedAccountGeneration?: string,
+  ): Promise<boolean>;
+  /**
    * Write a grant outright, resetting the lease state: ready, unleased, with
    * the recovery allowance restored. This is what a fresh `/auth/login`
    * does — and the only escape from `broken`. A rotation must go through
    * `finalizeTokenLease` instead, which checks it still owns the row.
    */
   putOAuthTokens(id: string, tokens: OAuthTokens): Promise<void>;
+  /** Own a first-ever callback before it exchanges a code at X. */
+  claimFreshOAuthInstall(
+    id: string,
+    leaseId: string,
+    leaseUntil: number,
+    now: number,
+    expectedAccountGeneration?: string,
+  ): Promise<boolean>;
+  /** Install a fresh grant and detach any orphaned account rows under that callback lease. */
+  finishFreshOAuthInstall(id: string, leaseId: string, tokens: OAuthTokens): Promise<boolean>;
+  /** Own one reauthorization code exchange for the coherently observed grant. */
+  claimOAuthReauthorization(
+    id: string,
+    observedRefreshToken: string,
+    leaseId: string,
+    leaseUntil: number,
+    now: number,
+    expectedAccountGeneration?: string,
+  ): Promise<boolean>;
+  /** Release a first-install callback lease that did not install a grant. */
+  releaseOAuthCallbackLease(id: string, leaseId: string): Promise<boolean>;
+  /**
+   * Restore exactly the state a reauthorization claim displaced. Only call
+   * this when provider evidence proves the old grant was not invalidated.
+   */
+  restoreOAuthReauthorization(
+    id: string,
+    observedRefreshToken: string,
+    leaseId: string,
+  ): Promise<boolean>;
+  /**
+   * End one callback owner while leaving the observed pair durably unusable.
+   * A later explicit callback (cached identity required) or Disconnect may recover it.
+   */
+  settleOAuthReauthorizationPending(
+    id: string,
+    observedRefreshToken: string,
+    leaseId: string,
+    reason: string,
+  ): Promise<boolean>;
+  /** Resolve an ambiguous promotion write before any cleanup can revoke its winner. */
+  probeOAuthReauthorizationPromotion(
+    id: string,
+    observedRefreshToken: string,
+    replacementRefreshToken: string,
+    leaseId: string,
+  ): Promise<OAuthReauthorizationPromotion>;
+  /**
+   * Install a reauthorized grant only while the exact grant whose account was
+   * compared is still current. Unlike a fresh login, this preserves the
+   * same account's bookmark selection, queue, and active scan.
+   */
+  replaceOAuthTokensIfCurrent(
+    id: string,
+    observedRefreshToken: string,
+    tokens: OAuthTokens,
+    /** When supplied, the CAS also proves and releases this callback owner. */
+    callbackLeaseId?: string,
+  ): Promise<boolean>;
+  /**
+   * Own terminal disconnect before revoking the remote grant. Claiming also
+   * fences bookmark/profile work begun under it; expiry lets a later explicit
+   * disconnect recover after a crashed Worker.
+   */
+  claimOAuthDisconnect(
+    id: string,
+    observedRefreshToken: string,
+    leaseId: string,
+    leaseUntil: number,
+    now: number,
+    expectedAccountGeneration?: string,
+  ): Promise<boolean>;
+  /** Remove credentials and apply the requested imported-bookmark disposition atomically. */
+  finishOAuthDisconnect(
+    id: string,
+    observedRefreshToken: string,
+    leaseId: string,
+    disposition: BookmarkDisposition,
+  ): Promise<string | null>;
+  /** Terminal orphan cleanup when no provider grant exists; returns the new generation. */
+  finishOAuthDisconnectWithoutGrant(
+    disposition: BookmarkDisposition,
+    expectedAccountGeneration?: string,
+  ): Promise<string | null>;
+  /** Give a failed revocation its old usable/broken local state back. */
+  releaseOAuthDisconnect(
+    id: string,
+    observedRefreshToken: string,
+    leaseId: string,
+  ): Promise<boolean>;
   /**
    * Cache the signed-in user's identity, touching nothing else. Narrow on
    * purpose: it runs after a billable `/2/users/me` round-trip, during which
@@ -190,6 +312,7 @@ export interface Storage {
     leaseId: string,
     leaseUntil: number,
     now: number,
+    expectedAccountGeneration?: string,
   ): Promise<boolean>;
   /**
    * Cache the profile and release its lease atomically, only if both the grant
@@ -223,6 +346,7 @@ export interface Storage {
     observed: string,
     leaseId: string,
     leaseUntil: number,
+    now?: number,
   ): Promise<boolean>;
   /**
    * Take over a lease whose holder never came back — once per grant.
@@ -267,8 +391,20 @@ export interface Storage {
   setSetting(key: string, value: string): Promise<void>;
   /** Read the bookmark folder's id/name pair in one database snapshot. */
   getBookmarkFolder(): Promise<BookmarkFolderSetting>;
+  /** Read the folder only if it belongs to the request's account namespace. */
+  getBookmarkFolderForGeneration(
+    expectedAccountGeneration: string,
+  ): Promise<BookmarkFolderSetting | null>;
   /** Atomically store the bookmark folder's id/name pair and invalidate any older scan. */
   setBookmarkFolder(folderId: string, folderName: string): Promise<void>;
+  /**
+   * Clear selection/leases and convert or remove every bookmark-owned queue
+   * row atomically. False means a terminal account transition owns the data.
+   */
+  clearBookmarkFolder(
+    disposition: BookmarkDisposition,
+    expectedAccountGeneration?: string,
+  ): Promise<boolean>;
   /**
    * Own a scan for `folderId`, but only if it is still selected and no live
    * owner exists. An expired owner may be recovered by a new run; the run ID
@@ -279,6 +415,7 @@ export interface Storage {
     runId: string,
     leaseUntil: number,
     now: number,
+    expectedAccountGeneration?: string,
   ): Promise<boolean>;
   /** Extend an owned scan before another X request. False means ownership moved. */
   renewBookmarkSync(folderId: string, runId: string, leaseUntil: number): Promise<boolean>;
@@ -297,6 +434,41 @@ export interface Storage {
     complete: boolean,
     addedAt: string,
     /** Refuse before issuing the transaction when its expanded batch is larger. */
+    maxStatements?: number,
+  ): Promise<BookmarkSyncCommit>;
+  /** Claim a staged scan without changing the currently active folder. */
+  beginBookmarkFolderSwitch(
+    sourceFolderId: string | null,
+    targetFolderId: string,
+    targetFolderName: string,
+    runId: string,
+    leaseUntil: number,
+    now: number,
+    expectedAccountGeneration?: string,
+  ): Promise<boolean>;
+  /** Renew a staged scan only while its source selection and owner still match. */
+  renewBookmarkFolderSwitch(
+    sourceFolderId: string | null,
+    targetFolderId: string,
+    targetFolderName: string,
+    runId: string,
+    leaseUntil: number,
+  ): Promise<boolean>;
+  /** Release one failed staged scan without touching the active folder. */
+  abortBookmarkFolderSwitch(
+    sourceFolderId: string | null,
+    targetFolderId: string,
+    runId: string,
+  ): Promise<boolean>;
+  /** Reconcile and activate a fully scanned replacement folder in one transaction. */
+  finishBookmarkFolderSwitch(
+    sourceFolderId: string | null,
+    targetFolderId: string,
+    targetFolderName: string,
+    runId: string,
+    posts: Post[],
+    folderPostIds: string[],
+    addedAt: string,
     maxStatements?: number,
   ): Promise<BookmarkSyncCommit>;
 
@@ -337,14 +509,29 @@ export interface BookmarkFolderSetting {
   name: string | null;
 }
 
+/** What happens to queue rows imported from X when their account link ends. */
+export type BookmarkDisposition = "keep" | "remove";
+
+/** What a read-after-error can prove about a same-account promotion batch. */
+export type OAuthReauthorizationPromotion = "promoted" | "owned-pending" | "superseded";
+
 /**
  * Where the stored grant is in the refresh protocol.
  *
  * `ready` — usable, nobody is refreshing it.
  * `refreshing` — one caller holds a lease and may be talking to X right now.
  * `broken` — the grant is gone; only a fresh `/auth/login` revives it.
+ * `reauthorizing` — a replacement may have invalidated this pair, so it is
+ *   fenced until a same-account callback succeeds or the user disconnects.
+ * `disconnecting` — an explicit disconnect owns remote revocation; no route
+ *   may use the grant while it is deciding whether local deletion is safe.
  */
-export type TokenState = "ready" | "refreshing" | "broken";
+export type TokenState =
+  | "ready"
+  | "refreshing"
+  | "broken"
+  | "reauthorizing"
+  | "disconnecting";
 
 /** A grant as the OAuth code hands it over: the token pair and what we know. */
 export interface OAuthTokens {
@@ -373,7 +560,7 @@ export interface StoredTokens extends OAuthTokens {
   username: string | null;
   displayName: string | null;
   state: TokenState;
-  /** Non-null only while `state` is `refreshing`. */
+  /** Non-null while a refresh, callback, or disconnect owns the transition. */
   leaseId: string | null;
   /** Unix ms the lease lapses at. */
   leaseUntil: number | null;
@@ -381,6 +568,12 @@ export interface StoredTokens extends OAuthTokens {
   recoveryUsed: boolean;
   /** Set with `broken`; what to tell the user. */
   brokenReason: string | null;
+}
+
+/** Account status fields that must describe the same committed database snapshot. */
+export interface OAuthStatusSnapshot {
+  accountGeneration: string;
+  tokens: StoredTokens | null;
 }
 
 export interface PostRow {

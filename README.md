@@ -93,7 +93,7 @@ On D1 Free, the five-page, no-ancillary default-cap regression uses 14 of the
 Higher values are not certified for Free; a full 5,000-main-result run is not
 Free-safe even before ancillary lookups.
 
-The user-context features need one interactive authorization per deployment at
+The user-context features need an initial interactive authorization per deployment at
 `/auth/login`. **Give each deployment its own X app.** X allows one live grant
 per user per client id, so two deployments sharing a client id revoke each
 other's tokens on login — see [`docs/x-api-notes.md`](docs/x-api-notes.md) N15.
@@ -123,7 +123,7 @@ One TypeScript repo, two server targets, one set of routes.
 - **`src/server/app.ts`** — every API route, as a Hono app with no runtime
   dependencies. `src/server/index.ts` (Bun) and `src/server/worker.ts`
   (Workers) are thin entries that build it with the right storage driver.
-- **Storage** — `SqlStore` writes each query exactly once over a four-method
+- **Storage** — `SqlStore` writes each query exactly once over a five-method
   `SqlDriver` seam (`src/server/db/`), backed by `bun:sqlite` locally and D1
   when deployed. The interface is async so both fit behind it.
 - **Schema** — `migrations/` is the only source of it, applied by wrangler
@@ -152,16 +152,47 @@ paid actions:
 | Re-opening a cached one | free to render from storage; the automatic refresh can bill newly returned posts or missing media/root/quote lookups |
 | Refreshing for new replies | $0.005 per newly returned main or referenced post, plus ancillary lookups; stored page posts read earlier that UTC day are credited |
 | Resuming a truncated fetch | $0.005 per newly returned older main or referenced post, plus ancillary lookups |
-| Your posts tab | $0.001 per post (Owned Read), plus $0.005 for any thread root older than the scan window |
+| Your posts tab | $0.001 per timeline post (Owned Read), plus $0.005 for any thread root older than the scan window; one request reads at most four 50-post timeline pages and returns at most 50 threads, and can report that more may exist |
 | Bookmark sync | $0.001 per bookmark enumerated, plus $0.005 per post hydrated |
-| First user-context identity lookup | $0.010 once, when a folder or timeline action first needs `/2/users/me`; then cached with the grant and shown as part of that action's receipt |
+| User-context identity lookup | A fresh connection defers its $0.010 `/2/users/me` read until the first folder or timeline action and then caches it with that grant. A Reconnect callback that reaches account comparison buys one replacement-grant identity read—even when that account is rejected; identifying a usable old grant with no cached identity first can make two |
 | Opening the bookmark-folder picker | folder enumeration itself is free and happens only while the picker is open |
-| Choosing a bookmark folder | the database-only setting write is free, then the app immediately runs a billable bookmark sync |
+| Choosing or switching bookmark folders | selection is inert until you confirm a paid target-folder scan; only a complete scan atomically activates the folder and replaces the bookmark-owned Saved rows |
 
 Bookmark settings themselves live in the app database and are free to read and
 write. The folder picker asks X for folders only when you open it. Settings and
 folder-list failures are shown separately from a genuinely empty result, with a
 retry control, and any identity lookup or sync charge is reported in the UI.
+
+Folder and account changes are explicit lifecycle operations. Switching folders
+first scans the target while the old selection and its Saved rows remain active;
+an incomplete, failed, or superseded scan leaves them unchanged. **Stop syncing**
+asks whether imported bookmarks should become ordinary local saves or be removed
+from this app. Either choice clears the folder selection without changing X, and
+manual saves, cached posts and conversations, and read history remain.
+
+**Reconnect** can replace credentials only for the X account already connected.
+A callback that reaches account comparison identifies the replacement grant to
+enforce that rule, rejects a different account, and preserves the current folder
+and local library. The old pair is paused before the code exchange: if X
+conclusively refuses the code it is restored, while a timeout, rate limit,
+server failure, lost response, identity failure, or local promotion failure
+stays visibly paused because the replacement may already have invalidated it.
+Retrying **Reconnect** can recover that state for the same cached account; it is
+never reported as a usable old session merely because a callback lease expired.
+To change accounts, use **Disconnect X**: choose the same
+keep/remove treatment for imported bookmarks, then the app fences work owned by
+that grant and asks X to revoke it before deleting local credentials and
+applying the choice. A user-context X call already sent can still finish and
+bill, but its late result cannot be persisted after the account transition. If
+X does not confirm revocation, the app retains the existing local grant and
+account data so you can retry. After a successful disconnect, the next
+connection is fresh: it may authorize any X account, starts with no selected
+bookmark folder, and does not turn prior local saves back into bookmark-owned
+rows. Fresh connection and terminal disconnect also rotate the opaque account
+generation used to namespace browser caches and guard account-bound requests.
+Stale tabs are rejected before account work, and a generation change resets a
+remembered inbox view to Saved. Same-account reconnect and token refresh preserve
+the generation.
 
 Those are estimates, not invoices. X's same-day deduplication is observed
 rather than contractual, and the app deliberately over-counts in one place —
@@ -195,11 +226,19 @@ Known and deliberate, as of this writing:
   `bunx wrangler secret put MAX_POSTS_PER_FETCH` immediately activates the new
   value. The bookmark-folder choice does have an in-app control, but the two
   automatic fetches — the refresh when you open a cached conversation, and the
-  own-posts scan on reload — have no toggles.
+  own-posts scan when a remembered Your posts tab reloads for the same account
+  generation — have no toggles.
+  That automatic-spend choice is separate from the X-account lifecycle:
+  Disconnect fences user-context work, while public conversation fetches use
+  the app-only bearer token and are not canceled by disconnecting an account.
 - **Bookmarks you can't read are reported but not shown.** Sync tells you how
   many were unavailable; the Saved tab has no placeholder card for them.
-- **A token row from before profile caching reports `user: null`** on
-  `/api/auth/status`. It heals on any re-login.
+- **A fresh X connection can initially show no account handle.** Login defers
+  the first billable identity lookup until a folder or timeline action needs
+  it. Reconnect is different: a callback that reaches account comparison buys
+  one identity read to identify the replacement grant, even if that account is
+  then rejected. Identifying a usable old grant with no cached identity before
+  exchange can make two.
 
 ## Further reading
 

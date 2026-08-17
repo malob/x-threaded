@@ -10,7 +10,7 @@ import type { Post } from "../src/shared/types";
 import { XApiError } from "../src/server/xapi";
 import { FakeXApi } from "./fake-xapi";
 import { makePost } from "./fixtures";
-import { makeAuthedApp, TEST_OAUTH } from "./harness";
+import { accountRequest, makeAuthedApp, TEST_OAUTH, withAccountGeneration } from "./harness";
 
 function deferred<T>() {
   let resolve!: (value: T | PromiseLike<T>) => void;
@@ -18,18 +18,6 @@ function deferred<T>() {
     resolve = done;
   });
   return { promise, resolve };
-}
-
-async function selectFolder(
-  app: Awaited<ReturnType<typeof makeAuthedApp>>["app"],
-  id: string,
-  name: string,
-): Promise<Response> {
-  return await app.request("/api/settings", {
-    method: "PATCH",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ bookmarkFolderId: id, bookmarkFolderName: name }),
-  });
 }
 
 describe("bookmark sync ownership", () => {
@@ -52,6 +40,10 @@ describe("bookmark sync ownership", () => {
       userId: "account",
     });
     await storeA.setBookmarkFolder("folder", "Reading");
+    const accountGeneration = await storeA.getOrCreateAccountGeneration(
+      SELF_ID,
+      crypto.randomUUID(),
+    );
 
     const firstStarted = deferred<void>();
     const finishFirst = deferred<{
@@ -71,9 +63,15 @@ describe("bookmark sync ownership", () => {
       return { posts: [], ids: [], missing: [], complete: true };
     };
 
-    const first = appA.request("/api/bookmarks/sync", { method: "POST" });
+    const first = appA.request(
+      "/api/bookmarks/sync",
+      withAccountGeneration(accountGeneration, { method: "POST" }),
+    );
     await firstStarted.promise;
-    const overlapping = await appB.request("/api/bookmarks/sync", { method: "POST" });
+    const overlapping = await appB.request(
+      "/api/bookmarks/sync",
+      withAccountGeneration(accountGeneration, { method: "POST" }),
+    );
     finishFirst.resolve({ posts: [post], ids: [post.id], missing: [], complete: true });
     const original = await first;
 
@@ -96,8 +94,12 @@ describe("bookmark sync ownership", () => {
       complete: boolean;
     }>();
     const oldStarted = deferred<void>();
+    const accountGeneration = await store.getOrCreateAccountGeneration(
+      SELF_ID,
+      crypto.randomUUID(),
+    );
 
-    expect((await selectFolder(app, "folder-old", "Old folder")).status).toBe(200);
+    await store.setBookmarkFolder("folder-old", "Old folder");
     xapi.onGetBookmarksByFolder = (_token, _userId, folderId) => {
       if (folderId === "folder-old") {
         oldStarted.resolve();
@@ -107,11 +109,17 @@ describe("bookmark sync ownership", () => {
       return { posts: [newPost], ids: [newPost.id], missing: [], complete: true };
     };
 
-    const stale = app.request("/api/bookmarks/sync", { method: "POST" });
+    const stale = app.request(
+      "/api/bookmarks/sync",
+      withAccountGeneration(accountGeneration, { method: "POST" }),
+    );
     await oldStarted.promise;
-    expect((await selectFolder(app, "folder-new", "New folder")).status).toBe(200);
+    await store.setBookmarkFolder("folder-new", "New folder");
 
-    const current = await app.request("/api/bookmarks/sync", { method: "POST" });
+    const current = await app.request(
+      "/api/bookmarks/sync",
+      withAccountGeneration(accountGeneration, { method: "POST" }),
+    );
     expect(current.status).toBe(200);
     expect(await current.json()).toMatchObject({ added: 1, removed: 0 });
 
@@ -149,6 +157,10 @@ describe("bookmark sync ownership", () => {
       userId: "account",
     });
     await storeA.setBookmarkFolder("folder", "Reading");
+    const accountGeneration = await storeA.getOrCreateAccountGeneration(
+      SELF_ID,
+      crypto.randomUUID(),
+    );
 
     const staleStarted = deferred<void>();
     const staleResult = deferred<{
@@ -174,10 +186,16 @@ describe("bookmark sync ownership", () => {
       };
     };
 
-    const stale = appA.request("/api/bookmarks/sync", { method: "POST" });
+    const stale = appA.request(
+      "/api/bookmarks/sync",
+      withAccountGeneration(accountGeneration, { method: "POST" }),
+    );
     await staleStarted.promise;
     setSystemTime(new Date(started.getTime() + BOOKMARK_SYNC_LEASE_MS));
-    const recovered = await appB.request("/api/bookmarks/sync", { method: "POST" });
+    const recovered = await appB.request(
+      "/api/bookmarks/sync",
+      withAccountGeneration(accountGeneration, { method: "POST" }),
+    );
     expect(recovered.status).toBe(200);
 
     staleResult.resolve({
@@ -226,12 +244,13 @@ describe("bookmark sync ownership", () => {
       return { posts: [], ids: [], missing: [], complete: true };
     };
 
-    expect((await app.request("/api/bookmarks/sync", { method: "POST" })).status).toBe(200);
+    expect((await accountRequest(app, store, "/api/bookmarks/sync", { method: "POST" })).status)
+      .toBe(200);
   });
 
   it("releases its owner after an X failure so an immediate retry can run", async () => {
-    const { app, xapi } = await makeAuthedApp();
-    expect((await selectFolder(app, "folder", "Reading")).status).toBe(200);
+    const { app, store, xapi } = await makeAuthedApp();
+    await store.setBookmarkFolder("folder", "Reading");
     let scans = 0;
     xapi.onGetBookmarksByFolder = () => {
       scans += 1;
@@ -239,14 +258,16 @@ describe("bookmark sync ownership", () => {
       return { posts: [], ids: [], missing: [], complete: true };
     };
 
-    expect((await app.request("/api/bookmarks/sync", { method: "POST" })).status).toBe(502);
-    expect((await app.request("/api/bookmarks/sync", { method: "POST" })).status).toBe(200);
+    expect((await accountRequest(app, store, "/api/bookmarks/sync", { method: "POST" })).status)
+      .toBe(502);
+    expect((await accountRequest(app, store, "/api/bookmarks/sync", { method: "POST" })).status)
+      .toBe(200);
     expect(xapi.count("getBookmarksByFolder")).toBe(2);
   });
 
   it("stops before a 21st outbound request and releases the lease", async () => {
     const { app, store, xapi } = await makeAuthedApp();
-    expect((await selectFolder(app, "folder", "Reading")).status).toBe(200);
+    await store.setBookmarkFolder("folder", "Reading");
     const posts = Array.from({ length: 1_000 }, (_, index) =>
       makePost({ text: `budget ${index}` }),
     );
@@ -265,7 +286,9 @@ describe("bookmark sync ownership", () => {
       };
     };
 
-    const stopped = await app.request("/api/bookmarks/sync", { method: "POST" });
+    const stopped = await accountRequest(app, store, "/api/bookmarks/sync", {
+      method: "POST",
+    });
     expect(stopped.status).toBe(409);
     expect(await stopped.json()).toMatchObject({
       error: "bookmark sync exceeded its safe request budget; retry",
@@ -274,7 +297,8 @@ describe("bookmark sync ownership", () => {
     expect(await store.listSavedItems()).toEqual([]);
 
     // The handled budget stop releases immediately rather than wedging until expiry.
-    expect((await app.request("/api/bookmarks/sync", { method: "POST" })).status).toBe(200);
+    expect((await accountRequest(app, store, "/api/bookmarks/sync", { method: "POST" })).status)
+      .toBe(200);
   });
 
   it("does not let a superseded scan overwrite a newer post snapshot", async () => {
@@ -289,8 +313,12 @@ describe("bookmark sync ownership", () => {
       complete: boolean;
     }>();
     const staleStarted = deferred<void>();
+    const accountGeneration = await store.getOrCreateAccountGeneration(
+      SELF_ID,
+      crypto.randomUUID(),
+    );
 
-    expect((await selectFolder(app, "folder-old", "Old folder")).status).toBe(200);
+    await store.setBookmarkFolder("folder-old", "Old folder");
     xapi.onGetBookmarksByFolder = (_token, _userId, folderId) => {
       if (folderId === "folder-old") {
         staleStarted.resolve();
@@ -299,10 +327,16 @@ describe("bookmark sync ownership", () => {
       return { posts: [currentPost], ids: [postId], missing: [], complete: true };
     };
 
-    const stale = app.request("/api/bookmarks/sync", { method: "POST" });
+    const stale = app.request(
+      "/api/bookmarks/sync",
+      withAccountGeneration(accountGeneration, { method: "POST" }),
+    );
     await staleStarted.promise;
-    expect((await selectFolder(app, "folder-new", "New folder")).status).toBe(200);
-    expect((await app.request("/api/bookmarks/sync", { method: "POST" })).status).toBe(200);
+    await store.setBookmarkFolder("folder-new", "New folder");
+    expect((await app.request(
+      "/api/bookmarks/sync",
+      withAccountGeneration(accountGeneration, { method: "POST" }),
+    )).status).toBe(200);
 
     staleResult.resolve({ posts: [stalePost], ids: [postId], missing: [], complete: true });
     expect((await stale).status).toBe(409);
@@ -319,14 +353,21 @@ describe("bookmark sync ownership", () => {
       complete: boolean;
     }>();
     const staleStarted = deferred<void>();
+    const accountGeneration = await store.getOrCreateAccountGeneration(
+      SELF_ID,
+      crypto.randomUUID(),
+    );
 
-    expect((await selectFolder(app, "folder-a", "Account A")).status).toBe(200);
+    await store.setBookmarkFolder("folder-a", "Account A");
     xapi.onGetBookmarksByFolder = () => {
       staleStarted.resolve();
       return staleResult.promise;
     };
 
-    const stale = app.request("/api/bookmarks/sync", { method: "POST" });
+    const stale = app.request(
+      "/api/bookmarks/sync",
+      withAccountGeneration(accountGeneration, { method: "POST" }),
+    );
     await staleStarted.promise;
     await store.putOAuthTokens(SELF_ID, {
       accessToken: "access-b",

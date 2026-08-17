@@ -223,6 +223,35 @@ button:disabled {
   margin-bottom: 1rem;
 }
 
+.lifecycle-dialog {
+  width: min(32rem, calc(100vw - 2rem));
+  padding: 1.25rem;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg);
+  color: var(--text);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.24);
+}
+
+.lifecycle-dialog::backdrop {
+  background: rgba(0, 0, 0, 0.42);
+}
+
+.lifecycle-dialog h2 {
+  margin: 0 0 0.5rem;
+  font-size: 18px;
+}
+
+.lifecycle-dialog p {
+  margin: 0 0 1rem;
+}
+
+.dialog-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
 ul.conversations {
   list-style: none;
   padding: 0;

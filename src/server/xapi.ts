@@ -358,8 +358,15 @@ export class XApi {
    */
   async getMe(
     accessToken: string,
+    opts: { beforeRequest?: () => void | Promise<void> } = {},
   ): Promise<Billed<{ id: string; username: string; name: string }>> {
-    const result = await this.get("/users/me", MeResponseSchema, {}, accessToken);
+    const result = await this.get(
+      "/users/me",
+      MeResponseSchema,
+      {},
+      accessToken,
+      opts.beforeRequest,
+    );
     if (!result.data) throw new XApiError("could not resolve the authenticated user", 401);
     return { value: result.data, receipt: userReads(1) };
   }
@@ -381,7 +388,11 @@ export class XApi {
   async getOwnPosts(
     accessToken: string,
     userId: string,
-    opts: { max?: number; paginationToken?: string } = {},
+    opts: {
+      max?: number;
+      paginationToken?: string;
+      beforeRequest?: () => void | Promise<void>;
+    } = {},
   ): Promise<Billed<{ posts: Post[]; nextToken?: string }>> {
     const params: Record<string, string> = {
       max_results: String(Math.min(Math.max(opts.max ?? 50, 5), 100)),
@@ -392,7 +403,13 @@ export class XApi {
       "media.fields": MEDIA_FIELDS,
     };
     if (opts.paginationToken) params.pagination_token = opts.paginationToken;
-    const page = await this.get(`/users/${userId}/tweets`, SearchPageSchema, params, accessToken);
+    const page = await this.get(
+      `/users/${userId}/tweets`,
+      SearchPageSchema,
+      params,
+      accessToken,
+      opts.beforeRequest,
+    );
     const users = new Map((page.includes?.users ?? []).map((u) => [u.id, u]));
     const media = mediaMap(page.includes);
     const fetchedAt = new Date().toISOString();
@@ -410,6 +427,7 @@ export class XApi {
   async getBookmarkFolders(
     accessToken: string,
     userId: string,
+    opts: { beforeRequest?: () => void | Promise<void> } = {},
   ): Promise<Billed<{ id: string; name: string }[]>> {
     const folders: { id: string; name: string }[] = [];
     let paginationToken: string | undefined;
@@ -423,6 +441,7 @@ export class XApi {
         BookmarkFoldersSchema,
         params,
         accessToken,
+        opts.beforeRequest,
       );
       // Unlike bookmark-item sync, this route has nowhere to represent an
       // incomplete result. Returning the data beside errors would make a

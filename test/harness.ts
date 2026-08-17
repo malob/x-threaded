@@ -5,7 +5,7 @@ import { SqlStore } from "../src/server/db/store";
 import { SELF_ID, type OAuthConfig } from "../src/server/oauth";
 import type { Storage } from "../src/server/storage";
 import type { ConversationPage } from "../src/server/xapi";
-import type { Post } from "../src/shared/types";
+import { ACCOUNT_GENERATION_HEADER, type Post } from "../src/shared/types";
 import { FakeD1Database } from "./fake-d1";
 import { FakeXApi } from "./fake-xapi";
 import { makePost } from "./fixtures";
@@ -74,11 +74,10 @@ export async function makeBookmarkApp(
   folderIds?: string[],
 ): Promise<TestApp> {
   const harness = await makeAuthedApp({ userId });
-  await harness.app.request("/api/settings", {
-    method: "PATCH",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ bookmarkFolderId: "folder1", bookmarkFolderName: "Reading" }),
-  });
+  // Fixture setup bypasses the staged-switch API: its X scan is what the
+  // route under test is about, and this helper starts from an already active
+  // selection.
+  await harness.store.setBookmarkFolder("folder1", "Reading");
   const ids = folderIds ?? folderPosts.map((p) => p.id);
   const hydrated = new Set(folderPosts.map((p) => p.id));
   harness.xapi.onGetBookmarksByFolder = () => ({
@@ -94,6 +93,29 @@ export async function makeBookmarkApp(
 /** The same SqlStore the Worker runs, over a fresh D1 stand-in. */
 export async function makeD1TestStore(): Promise<SqlStore> {
   return new SqlStore(d1Driver(await FakeD1Database.create()));
+}
+
+/** Test-only admission helper for routes bound to the browser's account namespace. */
+export async function accountRequest(
+  app: ApiApp,
+  store: Storage,
+  path: string,
+  init: RequestInit = {},
+): Promise<Response> {
+  const generation = await store.getOrCreateAccountGeneration(SELF_ID, crypto.randomUUID());
+  const headers = new Headers(init.headers);
+  headers.set(ACCOUNT_GENERATION_HEADER, generation);
+  return await app.request(path, { ...init, headers });
+}
+
+/** Attach a generation already read before a query-count reset. */
+export function withAccountGeneration(
+  accountGeneration: string,
+  init: RequestInit = {},
+): RequestInit {
+  const headers = new Headers(init.headers);
+  headers.set(ACCOUNT_GENERATION_HEADER, accountGeneration);
+  return { ...init, headers };
 }
 
 /** POST /api/conversations with the usual JSON body. */

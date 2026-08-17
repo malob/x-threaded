@@ -278,6 +278,35 @@ describe("applyMigrations — an already-ledgered database", () => {
     expect(await driver.all(`SELECT id, name FROM d1_migrations ORDER BY id`)).toEqual(before);
   });
 
+  it("lets an already-ledgered database persist reauthorization and disconnect states", async () => {
+    const driver = emptyDriver();
+    await applyMigrations(driver, MIGRATIONS);
+    const { SqlStore } = await import("../src/server/db/store");
+    const store = new SqlStore(driver);
+    await store.putOAuthTokens("self", {
+      accessToken: "access",
+      refreshToken: "refresh",
+      expiresAt: Date.now() + 60_000,
+      scope: "tweet.read",
+      userId: "42",
+    });
+
+    expect(
+      await store.claimOAuthReauthorization("self", "refresh", "callback", 4000, 1000),
+    ).toBe(true);
+    expect((await store.getOAuthTokens("self"))?.state).toBe("reauthorizing");
+    expect(await store.restoreOAuthReauthorization("self", "refresh", "callback")).toBe(true);
+    expect((await store.getOAuthTokens("self"))?.state).toBe("ready");
+
+    expect(
+      await store.claimOAuthDisconnect("self", "refresh", "disconnect", 5000, 1000),
+    ).toBe(true);
+    expect((await store.getOAuthTokens("self"))?.state).toBe("disconnecting");
+    expect(await store.releaseOAuthDisconnect("self", "refresh", "disconnect")).toBe(true);
+    expect((await store.getOAuthTokens("self"))?.state).toBe("ready");
+    expect(await ledger(driver)).toEqual(MIGRATION_NAMES);
+  });
+
   it("applies only the migrations it has not seen", async () => {
     const driver = emptyDriver();
     await applyMigrations(driver, MIGRATIONS);

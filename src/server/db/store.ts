@@ -8,8 +8,11 @@ import {
   type ConversationRunRow,
   type ConversationStatus,
   type BookmarkFolderSetting,
+  type BookmarkDisposition,
   type BookmarkSyncCommit,
   type OAuthTokens,
+  type OAuthStatusSnapshot,
+  type OAuthReauthorizationPromotion,
   type PostRow,
   type SavedItem,
   type Storage,
@@ -50,6 +53,13 @@ interface OAuthTokenRow {
   broken_reason: string | null;
 }
 
+type OAuthStatusRow = {
+  account_generation: string;
+  oauth_id: string | null;
+} & {
+  [K in keyof OAuthTokenRow]: OAuthTokenRow[K] | null;
+};
+
 const OAUTH_COLUMNS = `access_token, refresh_token, expires_at, scope, user_id, username,
    display_name, state, lease_id, lease_until, recovery_used, broken_reason`;
 
@@ -80,7 +90,29 @@ function rotationParams(tokens: OAuthTokens): unknown[] {
 }
 
 function toTokenState(value: string): TokenState {
-  return value === "refreshing" || value === "broken" ? value : "ready";
+  return value === "refreshing" ||
+    value === "broken" ||
+    value === "reauthorizing" ||
+    value === "disconnecting"
+    ? value
+    : "ready";
+}
+
+function storedTokens(row: OAuthTokenRow): StoredTokens {
+  return {
+    accessToken: row.access_token,
+    refreshToken: row.refresh_token,
+    expiresAt: row.expires_at,
+    scope: row.scope,
+    userId: row.user_id,
+    username: row.username,
+    displayName: row.display_name,
+    state: toTokenState(row.state),
+    leaseId: row.lease_id,
+    leaseUntil: row.lease_until,
+    recoveryUsed: row.recovery_used !== 0,
+    brokenReason: row.broken_reason,
+  };
 }
 
 function toConversationStatus(value: string): ConversationStatus {
@@ -146,9 +178,33 @@ const BOOKMARK_FOLDER_KEY = "bookmark_folder_id";
 const BOOKMARK_FOLDER_NAME_KEY = "bookmark_folder_name";
 const BOOKMARK_SYNC_RUN_KEY = "bookmark_sync_run";
 const USER_PROFILE_LEASE_PREFIX = "oauth_profile_lease:";
+const OAUTH_INSTALL_LEASE_PREFIX = "oauth_install_lease:";
+const ACCOUNT_GENERATION_PREFIX = "oauth_account_generation:";
 
 function userProfileLeaseKey(id: string): string {
   return `${USER_PROFILE_LEASE_PREFIX}${id}`;
+}
+
+function oauthInstallLeaseKey(id: string): string {
+  return `${OAUTH_INSTALL_LEASE_PREFIX}${id}`;
+}
+
+function accountGenerationKey(id: string): string {
+  return `${ACCOUNT_GENERATION_PREFIX}${id}`;
+}
+
+function accountGenerationGuard(
+  id: string,
+  expectedAccountGeneration: string | undefined,
+): { sql: string; params: unknown[] } {
+  return expectedAccountGeneration === undefined
+    ? { sql: "1", params: [] }
+    : {
+        sql: `EXISTS (
+          SELECT 1 FROM settings WHERE key = ? AND value = ?
+        )`,
+        params: [accountGenerationKey(id), expectedAccountGeneration],
+      };
 }
 
 /** Bind a settings lease to a grant without duplicating its refresh token. */
@@ -162,12 +218,49 @@ function userProfileLeaseValue(leaseId: string, leaseUntil: number, grant: strin
 }
 
 function bookmarkSyncLeaseValue(folderId: string, runId: string, leaseUntil: number): string {
-  return JSON.stringify({ v: 1, folderId, runId, leaseUntil });
+  return JSON.stringify({
+    v: 2,
+    mode: "sync",
+    sourceFolderId: folderId,
+    folderId,
+    runId,
+    leaseUntil,
+  });
+}
+
+function bookmarkSwitchLeaseValue(
+  sourceFolderId: string | null,
+  folderId: string,
+  folderName: string,
+  runId: string,
+  leaseUntil: number,
+): string {
+  return JSON.stringify({
+    v: 2,
+    mode: "switch",
+    sourceFolderId: sourceFolderId ?? "",
+    folderId,
+    folderName,
+    runId,
+    leaseUntil,
+  });
 }
 
 /** Read a field without letting an old non-JSON settings value abort the query. */
-function bookmarkLeaseField(field: "folderId" | "runId" | "leaseUntil"): string {
+function bookmarkLeaseField(
+  field: "mode" | "sourceFolderId" | "folderId" | "folderName" | "runId" | "leaseUntil",
+): string {
   return `json_extract(CASE WHEN json_valid(value) THEN value ELSE '{}' END, '$.${field}')`;
+}
+
+/** Version-one leases used folderId as both the source and target. */
+function bookmarkLeaseSource(): string {
+  return `COALESCE(CAST(${bookmarkLeaseField("sourceFolderId")} AS TEXT), CAST(${bookmarkLeaseField("folderId")} AS TEXT), '')`;
+}
+
+/** Version-one leases were ordinary syncs. */
+function bookmarkLeaseMode(): string {
+  return `COALESCE(CAST(${bookmarkLeaseField("mode")} AS TEXT), 'sync')`;
 }
 
 function postParams(p: Post): unknown[] {
@@ -470,6 +563,32 @@ export class SqlStore implements Storage {
     await this.db.batch(postJsonBatches(posts).map((json) => ({ sql: UPSERT_POSTS, params: [json] })));
   }
 
+  async upsertPostsIfOAuthGrantCurrent(
+    id: string,
+    observedRefreshToken: string,
+    posts: Post[],
+    maxStatements = Number.POSITIVE_INFINITY,
+    expectedAccountGeneration?: string,
+  ): Promise<boolean> {
+    if (posts.length === 0) {
+      return await this.isOAuthGrantCurrent(id, observedRefreshToken, expectedAccountGeneration);
+    }
+    const batches = postJsonBatches(posts);
+    if (batches.length > maxStatements) return false;
+    const generation = accountGenerationGuard(id, expectedAccountGeneration);
+    const results = await this.db.batch(
+      batches.map((json) => ({
+        sql: `${UPSERT_POSTS}
+              WHERE EXISTS (
+                SELECT 1 FROM oauth_tokens
+                 WHERE id = ? AND refresh_token = ? AND state = 'ready'
+              ) AND ${generation.sql}`,
+        params: [json, id, observedRefreshToken, ...generation.params],
+      })),
+    );
+    return results.every((result) => result.rowsAffected > 0);
+  }
+
   async getPosts(conversationId: string): Promise<Post[]> {
     const rows = await this.db.all<PostRow>(
       `SELECT * FROM posts WHERE conversation_id = ? ORDER BY created_at ASC`,
@@ -609,6 +728,25 @@ export class SqlStore implements Storage {
     return { id: row?.folder_id ?? null, name: row?.folder_name ?? null };
   }
 
+  async getBookmarkFolderForGeneration(
+    expectedAccountGeneration: string,
+  ): Promise<BookmarkFolderSetting | null> {
+    const row = await this.db.first<{ folder_id: string | null; folder_name: string | null }>(
+      `SELECT
+         (SELECT value FROM settings WHERE key = ?) AS folder_id,
+         (SELECT value FROM settings WHERE key = ?) AS folder_name
+       FROM settings
+       WHERE key = ? AND value = ?`,
+      [
+        BOOKMARK_FOLDER_KEY,
+        BOOKMARK_FOLDER_NAME_KEY,
+        accountGenerationKey("self"),
+        expectedAccountGeneration,
+      ],
+    );
+    return row ? { id: row.folder_id, name: row.folder_name } : null;
+  }
+
   async setBookmarkFolder(folderId: string, folderName: string): Promise<void> {
     const updatedAt = new Date().toISOString();
     // One statement keeps id/name inseparable and clears the current scan in
@@ -633,27 +771,95 @@ export class SqlStore implements Storage {
     );
   }
 
+  async clearBookmarkFolder(
+    disposition: BookmarkDisposition,
+    expectedAccountGeneration?: string,
+  ): Promise<boolean> {
+    const operationKey = `bookmark_clear:${crypto.randomUUID()}`;
+    const operationValue = "owned";
+    const now = Date.now();
+    const generation = accountGenerationGuard("self", expectedAccountGeneration);
+    const owner = `EXISTS (SELECT 1 FROM settings WHERE key = ? AND value = ?)`;
+    const savedMutation =
+      disposition === "keep"
+        ? `UPDATE saved_items SET source = 'manual'
+             WHERE source = 'bookmark' AND ${owner}`
+        : `DELETE FROM saved_items WHERE source = 'bookmark' AND ${owner}`;
+    const results = await this.db.batch([
+      {
+        // The probe makes an otherwise empty clear observable while keeping
+        // the ownership check in the same transaction as every mutation. A
+        // disconnect that claimed first therefore wins; a clear that commits
+        // first is a completed earlier choice that disconnect sees afterward.
+        sql: `INSERT INTO settings (key, value, updated_at)
+              SELECT ?, ?, ?
+               WHERE NOT EXISTS (
+                 SELECT 1 FROM oauth_tokens WHERE id = ? AND state = 'disconnecting'
+               )
+                 AND NOT EXISTS (
+                   SELECT 1 FROM settings
+                    WHERE key = ? AND json_valid(value)
+                      AND COALESCE(CAST(json_extract(value, '$.leaseUntil') AS INTEGER), 0) > ?
+               )
+                 AND ${generation.sql}`,
+        params: [
+          operationKey,
+          operationValue,
+          new Date().toISOString(),
+          "self",
+          oauthInstallLeaseKey("self"),
+          now,
+          ...generation.params,
+        ],
+      },
+      { sql: savedMutation, params: [operationKey, operationValue] },
+      {
+        // Recovering an expired first-login callback linearizes this clear
+        // after it; deleting that owner prevents its stale completion from
+        // later installing a grant against the state we just changed.
+        sql: `DELETE FROM settings WHERE key IN (?, ?, ?, ?) AND ${owner}`,
+        params: [
+          BOOKMARK_FOLDER_KEY,
+          BOOKMARK_FOLDER_NAME_KEY,
+          BOOKMARK_SYNC_RUN_KEY,
+          oauthInstallLeaseKey("self"),
+          operationKey,
+          operationValue,
+        ],
+      },
+      {
+        sql: `DELETE FROM settings WHERE key = ? AND value = ?`,
+        params: [operationKey, operationValue],
+      },
+    ]);
+    return results.at(-1)?.rowsAffected === 1;
+  }
+
   async beginBookmarkSync(
     folderId: string,
     runId: string,
     leaseUntil: number,
     now: number,
+    expectedAccountGeneration?: string,
   ): Promise<boolean> {
     const value = bookmarkSyncLeaseValue(folderId, runId, leaseUntil);
+    const generation = accountGenerationGuard("self", expectedAccountGeneration);
     const result = await this.db.run(
       `INSERT INTO settings (key, value, updated_at)
        SELECT ?, ?, ?
         WHERE COALESCE((SELECT value FROM settings WHERE key = ?), '') = ?
+          AND ${generation.sql}
        ON CONFLICT(key) DO UPDATE SET
          value = excluded.value, updated_at = excluded.updated_at
        WHERE COALESCE(CAST(${bookmarkLeaseField("leaseUntil")} AS INTEGER), 0) <= ?
-          OR COALESCE(CAST(${bookmarkLeaseField("folderId")} AS TEXT), '') <> ?`,
+          OR ${bookmarkLeaseSource()} <> ?`,
       [
         BOOKMARK_SYNC_RUN_KEY,
         value,
         new Date().toISOString(),
         BOOKMARK_FOLDER_KEY,
         folderId,
+        ...generation.params,
         now,
         folderId,
       ],
@@ -670,6 +876,8 @@ export class SqlStore implements Storage {
       `UPDATE settings
           SET value = ?, updated_at = ?
         WHERE key = ?
+          AND ${bookmarkLeaseMode()} = 'sync'
+          AND ${bookmarkLeaseSource()} = ?
           AND ${bookmarkLeaseField("folderId")} = ?
           AND ${bookmarkLeaseField("runId")} = ?
           AND COALESCE((SELECT value FROM settings WHERE key = ?), '') = ?`,
@@ -677,6 +885,7 @@ export class SqlStore implements Storage {
         bookmarkSyncLeaseValue(folderId, runId, leaseUntil),
         new Date().toISOString(),
         BOOKMARK_SYNC_RUN_KEY,
+        folderId,
         folderId,
         runId,
         BOOKMARK_FOLDER_KEY,
@@ -690,10 +899,12 @@ export class SqlStore implements Storage {
     const result = await this.db.run(
       `DELETE FROM settings
         WHERE key = ?
+          AND ${bookmarkLeaseMode()} = 'sync'
+          AND ${bookmarkLeaseSource()} = ?
           AND ${bookmarkLeaseField("folderId")} = ?
           AND ${bookmarkLeaseField("runId")} = ?
           AND COALESCE((SELECT value FROM settings WHERE key = ?), '') = ?`,
-      [BOOKMARK_SYNC_RUN_KEY, folderId, runId, BOOKMARK_FOLDER_KEY, folderId],
+      [BOOKMARK_SYNC_RUN_KEY, folderId, folderId, runId, BOOKMARK_FOLDER_KEY, folderId],
     );
     return result.rowsAffected === 1;
   }
@@ -711,12 +922,15 @@ export class SqlStore implements Storage {
       sql: `${UPSERT_POSTS}
              WHERE (SELECT ${bookmarkLeaseField("runId")}
                       FROM settings
-                     WHERE key = ? AND ${bookmarkLeaseField("folderId")} = ?)
+                     WHERE key = ? AND ${bookmarkLeaseMode()} = 'sync'
+                       AND ${bookmarkLeaseSource()} = ?
+                       AND ${bookmarkLeaseField("folderId")} = ?)
                    = ?
                AND COALESCE((SELECT value FROM settings WHERE key = ?), '') = ?`,
       params: [
         json,
         BOOKMARK_SYNC_RUN_KEY,
+        folderId,
         folderId,
         runId,
         BOOKMARK_FOLDER_KEY,
@@ -734,12 +948,15 @@ export class SqlStore implements Storage {
               FROM json_each(?)
              WHERE (SELECT ${bookmarkLeaseField("runId")}
                       FROM settings
-                     WHERE key = ? AND ${bookmarkLeaseField("folderId")} = ?)
+                     WHERE key = ? AND ${bookmarkLeaseMode()} = 'sync'
+                       AND ${bookmarkLeaseSource()} = ?
+                       AND ${bookmarkLeaseField("folderId")} = ?)
                    = ?
                AND COALESCE((SELECT value FROM settings WHERE key = ?), '') = ?`,
       params: [
         json,
         BOOKMARK_SYNC_RUN_KEY,
+        folderId,
         folderId,
         runId,
         BOOKMARK_FOLDER_KEY,
@@ -761,12 +978,15 @@ export class SqlStore implements Storage {
                      )
                      AND (SELECT ${bookmarkLeaseField("runId")}
                             FROM settings
-                           WHERE key = ? AND ${bookmarkLeaseField("folderId")} = ?)
+                           WHERE key = ? AND ${bookmarkLeaseMode()} = 'sync'
+                             AND ${bookmarkLeaseSource()} = ?
+                             AND ${bookmarkLeaseField("folderId")} = ?)
                          = ?
                      AND COALESCE((SELECT value FROM settings WHERE key = ?), '') = ?`,
             params: [
               folderIds,
               BOOKMARK_SYNC_RUN_KEY,
+              folderId,
               folderId,
               runId,
               BOOKMARK_FOLDER_KEY,
@@ -782,10 +1002,19 @@ export class SqlStore implements Storage {
       {
         sql: `DELETE FROM settings
                WHERE key = ?
+                 AND ${bookmarkLeaseMode()} = 'sync'
+                 AND ${bookmarkLeaseSource()} = ?
                  AND ${bookmarkLeaseField("folderId")} = ?
                  AND ${bookmarkLeaseField("runId")} = ?
                  AND COALESCE((SELECT value FROM settings WHERE key = ?), '') = ?`,
-        params: [BOOKMARK_SYNC_RUN_KEY, folderId, runId, BOOKMARK_FOLDER_KEY, folderId],
+        params: [
+          BOOKMARK_SYNC_RUN_KEY,
+          folderId,
+          folderId,
+          runId,
+          BOOKMARK_FOLDER_KEY,
+          folderId,
+        ],
       },
     ];
     if (statements.length > maxStatements) {
@@ -803,6 +1032,201 @@ export class SqlStore implements Storage {
       applied: released,
       added: released ? added : 0,
       removed: released ? removed : 0,
+    };
+  }
+
+  async beginBookmarkFolderSwitch(
+    sourceFolderId: string | null,
+    targetFolderId: string,
+    targetFolderName: string,
+    runId: string,
+    leaseUntil: number,
+    now: number,
+    expectedAccountGeneration?: string,
+  ): Promise<boolean> {
+    const source = sourceFolderId ?? "";
+    const generation = accountGenerationGuard("self", expectedAccountGeneration);
+    const { rowsAffected } = await this.db.run(
+      `INSERT INTO settings (key, value, updated_at)
+       SELECT ?, ?, ?
+        WHERE COALESCE((SELECT value FROM settings WHERE key = ?), '') = ?
+          AND ${generation.sql}
+       ON CONFLICT(key) DO UPDATE SET
+         value = excluded.value, updated_at = excluded.updated_at
+       WHERE COALESCE(CAST(${bookmarkLeaseField("leaseUntil")} AS INTEGER), 0) <= ?
+          OR ${bookmarkLeaseSource()} <> ?`,
+      [
+        BOOKMARK_SYNC_RUN_KEY,
+        bookmarkSwitchLeaseValue(
+          sourceFolderId,
+          targetFolderId,
+          targetFolderName,
+          runId,
+          leaseUntil,
+        ),
+        new Date().toISOString(),
+        BOOKMARK_FOLDER_KEY,
+        source,
+        ...generation.params,
+        now,
+        source,
+      ],
+    );
+    return rowsAffected === 1;
+  }
+
+  async renewBookmarkFolderSwitch(
+    sourceFolderId: string | null,
+    targetFolderId: string,
+    targetFolderName: string,
+    runId: string,
+    leaseUntil: number,
+  ): Promise<boolean> {
+    const source = sourceFolderId ?? "";
+    const { rowsAffected } = await this.db.run(
+      `UPDATE settings SET value = ?, updated_at = ?
+        WHERE key = ? AND ${bookmarkLeaseMode()} = 'switch'
+          AND ${bookmarkLeaseSource()} = ?
+          AND ${bookmarkLeaseField("folderId")} = ?
+          AND CAST(${bookmarkLeaseField("folderName")} AS TEXT) = ?
+          AND ${bookmarkLeaseField("runId")} = ?
+          AND COALESCE((SELECT value FROM settings WHERE key = ?), '') = ?`,
+      [
+        bookmarkSwitchLeaseValue(
+          sourceFolderId,
+          targetFolderId,
+          targetFolderName,
+          runId,
+          leaseUntil,
+        ),
+        new Date().toISOString(),
+        BOOKMARK_SYNC_RUN_KEY,
+        source,
+        targetFolderId,
+        targetFolderName,
+        runId,
+        BOOKMARK_FOLDER_KEY,
+        source,
+      ],
+    );
+    return rowsAffected === 1;
+  }
+
+  async abortBookmarkFolderSwitch(
+    sourceFolderId: string | null,
+    targetFolderId: string,
+    runId: string,
+  ): Promise<boolean> {
+    const source = sourceFolderId ?? "";
+    const { rowsAffected } = await this.db.run(
+      `DELETE FROM settings
+        WHERE key = ? AND ${bookmarkLeaseMode()} = 'switch'
+          AND ${bookmarkLeaseSource()} = ?
+          AND ${bookmarkLeaseField("folderId")} = ?
+          AND ${bookmarkLeaseField("runId")} = ?
+          AND COALESCE((SELECT value FROM settings WHERE key = ?), '') = ?`,
+      [
+        BOOKMARK_SYNC_RUN_KEY,
+        source,
+        targetFolderId,
+        runId,
+        BOOKMARK_FOLDER_KEY,
+        source,
+      ],
+    );
+    return rowsAffected === 1;
+  }
+
+  async finishBookmarkFolderSwitch(
+    sourceFolderId: string | null,
+    targetFolderId: string,
+    targetFolderName: string,
+    runId: string,
+    posts: Post[],
+    folderPostIds: string[],
+    addedAt: string,
+    maxStatements = Number.POSITIVE_INFINITY,
+  ): Promise<BookmarkSyncCommit> {
+    const source = sourceFolderId ?? "";
+    const guardSql = `(SELECT ${bookmarkLeaseField("runId")}
+                         FROM settings
+                        WHERE key = ? AND ${bookmarkLeaseMode()} = 'switch'
+                          AND ${bookmarkLeaseSource()} = ?
+                          AND ${bookmarkLeaseField("folderId")} = ?
+                          AND CAST(${bookmarkLeaseField("folderName")} AS TEXT) = ?)
+                      = ?
+                    AND COALESCE((SELECT value FROM settings WHERE key = ?), '') = ?`;
+    const guardParams = [
+      BOOKMARK_SYNC_RUN_KEY,
+      source,
+      targetFolderId,
+      targetFolderName,
+      runId,
+      BOOKMARK_FOLDER_KEY,
+      source,
+    ];
+    const postStatements = postJsonBatches(posts).map((json) => ({
+      sql: `${UPSERT_POSTS} WHERE ${guardSql}`,
+      params: [json, ...guardParams],
+    }));
+    const itemStatements = jsonBatches(
+      posts,
+      (post) => JSON.stringify([post.id, "bookmark", addedAt]),
+      (post) => `saved item ${post.id}`,
+    ).map((json) => ({
+      sql: `INSERT OR IGNORE INTO saved_items (post_id, source, added_at)
+            SELECT json_extract(value, '$[0]'), json_extract(value, '$[1]'),
+                   json_extract(value, '$[2]')
+              FROM json_each(?) WHERE ${guardSql}`,
+      params: [json, ...guardParams],
+    }));
+    const removalStatement = {
+      sql: `DELETE FROM saved_items
+             WHERE source = 'bookmark'
+               AND NOT EXISTS (
+                 SELECT 1 FROM json_each(?) AS folder
+                  WHERE CAST(folder.value AS TEXT) = saved_items.post_id
+               )
+               AND ${guardSql}`,
+      params: [boundJson(folderPostIds, "bookmark folder ids"), ...guardParams],
+    };
+    const activated = boundJson(
+      [
+        [BOOKMARK_FOLDER_KEY, targetFolderId],
+        [BOOKMARK_FOLDER_NAME_KEY, targetFolderName],
+        [BOOKMARK_SYNC_RUN_KEY, ""],
+      ],
+      "bookmark folder activation",
+    );
+    const activationStatement = {
+      sql: `INSERT INTO settings (key, value, updated_at)
+            SELECT json_extract(value, '$[0]'), json_extract(value, '$[1]'), ?
+              FROM json_each(?)
+             WHERE ${guardSql}
+            ON CONFLICT(key) DO UPDATE SET
+              value = excluded.value, updated_at = excluded.updated_at`,
+      params: [new Date().toISOString(), activated, ...guardParams],
+    };
+    const statements = [
+      ...postStatements,
+      ...itemStatements,
+      removalStatement,
+      activationStatement,
+    ];
+    if (statements.length > maxStatements) {
+      return { applied: false, added: 0, removed: 0, budgetExceeded: true };
+    }
+    const results = await this.db.batch(statements);
+    const itemStart = postStatements.length;
+    const added = results
+      .slice(itemStart, itemStart + itemStatements.length)
+      .reduce((total, result) => total + result.rowsAffected, 0);
+    const removed = results[itemStart + itemStatements.length]?.rowsAffected ?? 0;
+    const applied = results.at(-1)?.rowsAffected === 3;
+    return {
+      applied,
+      added: applied ? added : 0,
+      removed: applied ? removed : 0,
     };
   }
 
@@ -873,27 +1297,119 @@ export class SqlStore implements Storage {
       [id],
     );
     if (!row) return null;
+    return storedTokens(row);
+  }
+
+  async getOAuthStatusSnapshot(
+    id: string,
+    generationCandidate: string,
+  ): Promise<OAuthStatusSnapshot> {
+    const key = accountGenerationKey(id);
+    const row = await this.db.batchFirst<OAuthStatusRow>(
+      [
+        {
+          sql: `INSERT OR IGNORE INTO settings (key, value, updated_at) VALUES (?, ?, ?)`,
+          params: [key, generationCandidate, new Date().toISOString()],
+        },
+      ],
+      {
+        sql: `SELECT settings.value AS account_generation,
+                     oauth_tokens.id AS oauth_id,
+                     oauth_tokens.access_token AS access_token,
+                     oauth_tokens.refresh_token AS refresh_token,
+                     oauth_tokens.expires_at AS expires_at,
+                     oauth_tokens.scope AS scope,
+                     oauth_tokens.user_id AS user_id,
+                     oauth_tokens.username AS username,
+                     oauth_tokens.display_name AS display_name,
+                     oauth_tokens.state AS state,
+                     oauth_tokens.lease_id AS lease_id,
+                     oauth_tokens.lease_until AS lease_until,
+                     oauth_tokens.recovery_used AS recovery_used,
+                     oauth_tokens.broken_reason AS broken_reason
+                FROM settings
+                LEFT JOIN oauth_tokens ON oauth_tokens.id = ?
+               WHERE settings.key = ?`,
+        params: [id, key],
+      },
+    );
+    if (!row) throw new Error("OAuth status snapshot disappeared after initialization");
     return {
-      accessToken: row.access_token,
-      refreshToken: row.refresh_token,
-      expiresAt: row.expires_at,
-      scope: row.scope,
-      userId: row.user_id,
-      username: row.username,
-      displayName: row.display_name,
-      state: toTokenState(row.state),
-      leaseId: row.lease_id,
-      leaseUntil: row.lease_until,
-      recoveryUsed: row.recovery_used !== 0,
-      brokenReason: row.broken_reason,
+      accountGeneration: row.account_generation,
+      tokens: row.oauth_id === null ? null : storedTokens(row as OAuthTokenRow),
     };
+  }
+
+  async getOAuthStatusForGeneration(
+    id: string,
+    expectedAccountGeneration: string,
+  ): Promise<OAuthStatusSnapshot | null> {
+    const row = await this.db.first<OAuthStatusRow>(
+      `SELECT settings.value AS account_generation,
+              oauth_tokens.id AS oauth_id,
+              oauth_tokens.access_token AS access_token,
+              oauth_tokens.refresh_token AS refresh_token,
+              oauth_tokens.expires_at AS expires_at,
+              oauth_tokens.scope AS scope,
+              oauth_tokens.user_id AS user_id,
+              oauth_tokens.username AS username,
+              oauth_tokens.display_name AS display_name,
+              oauth_tokens.state AS state,
+              oauth_tokens.lease_id AS lease_id,
+              oauth_tokens.lease_until AS lease_until,
+              oauth_tokens.recovery_used AS recovery_used,
+              oauth_tokens.broken_reason AS broken_reason
+         FROM settings
+         LEFT JOIN oauth_tokens ON oauth_tokens.id = ?
+        WHERE settings.key = ? AND settings.value = ?`,
+      [id, accountGenerationKey(id), expectedAccountGeneration],
+    );
+    return row
+      ? {
+          accountGeneration: row.account_generation,
+          tokens: row.oauth_id === null ? null : storedTokens(row as OAuthTokenRow),
+        }
+      : null;
+  }
+
+  async getOrCreateAccountGeneration(id: string, candidate: string): Promise<string> {
+    const key = accountGenerationKey(id);
+    await this.db.run(
+      `INSERT OR IGNORE INTO settings (key, value, updated_at) VALUES (?, ?, ?)`,
+      [key, candidate, new Date().toISOString()],
+    );
+    const row = await this.db.first<{ value: string }>(
+      `SELECT value FROM settings WHERE key = ?`,
+      [key],
+    );
+    if (!row) throw new Error("account generation disappeared after initialization");
+    return row.value;
+  }
+
+  async isOAuthGrantCurrent(
+    id: string,
+    observedRefreshToken: string,
+    expectedAccountGeneration?: string,
+  ): Promise<boolean> {
+    const generation = accountGenerationGuard(id, expectedAccountGeneration);
+    return (
+      (await this.db.first<{ ok: number }>(
+        `SELECT 1 AS ok FROM oauth_tokens
+          WHERE id = ? AND refresh_token = ? AND state = 'ready'
+            AND ${generation.sql}`,
+        [id, observedRefreshToken, ...generation.params],
+      )) !== null
+    );
   }
 
   async putOAuthTokens(id: string, tokens: OAuthTokens): Promise<void> {
     // Every lease column is named rather than left to REPLACE's defaults, so
     // the reset is a statement of intent instead of a side effect. A fresh
-    // grant can identify a different X account, so invalidate any scan or
-    // profile resolution begun under the previous grant in the same transaction.
+    // grant can identify a different X account. Treat any bookmark-owned row
+    // left without a grant as an orphan: preserve it as a manual local save,
+    // clear the account-bound folder/leases, and install the token in one
+    // transaction. Same-account reauthorization uses its narrower CAS method.
+    const updatedAt = new Date().toISOString();
     await this.db.batch([
       {
         sql: `INSERT OR REPLACE INTO oauth_tokens
@@ -903,16 +1419,619 @@ export class SqlStore implements Storage {
         params: [id, ...rotationParams(tokens)],
       },
       {
-        sql: `DELETE FROM settings WHERE key = ?`,
-        params: [BOOKMARK_SYNC_RUN_KEY],
+        sql: `INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)
+              ON CONFLICT(key) DO UPDATE SET
+                value = excluded.value, updated_at = excluded.updated_at`,
+        params: [accountGenerationKey(id), crypto.randomUUID(), updatedAt],
       },
       {
-        // A fresh login may be a different account. Its first profile read
-        // must not wait behind, or be writable by, the prior grant's holder.
-        sql: `DELETE FROM settings WHERE key = ?`,
-        params: [userProfileLeaseKey(id)],
+        sql: `UPDATE saved_items SET source = 'manual' WHERE source = 'bookmark'`,
+        params: [],
+      },
+      {
+        sql: `DELETE FROM settings WHERE key IN (?, ?, ?, ?, ?)`,
+        params: [
+          BOOKMARK_FOLDER_KEY,
+          BOOKMARK_FOLDER_NAME_KEY,
+          BOOKMARK_SYNC_RUN_KEY,
+          userProfileLeaseKey(id),
+          oauthInstallLeaseKey(id),
+        ],
       },
     ]);
+  }
+
+  async claimFreshOAuthInstall(
+    id: string,
+    leaseId: string,
+    leaseUntil: number,
+    now: number,
+    expectedAccountGeneration?: string,
+  ): Promise<boolean> {
+    const value = JSON.stringify({ leaseId, leaseUntil });
+    const generation = accountGenerationGuard(id, expectedAccountGeneration);
+    const { rowsAffected } = await this.db.run(
+      `INSERT INTO settings (key, value, updated_at)
+       SELECT ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM oauth_tokens WHERE id = ?)
+         AND ${generation.sql}
+       ON CONFLICT(key) DO UPDATE SET
+         value = excluded.value, updated_at = excluded.updated_at
+       WHERE COALESCE(
+               CASE WHEN json_valid(settings.value)
+                    THEN CAST(json_extract(settings.value, '$.leaseUntil') AS INTEGER) END,
+               0
+             ) <= ?
+         AND NOT EXISTS (SELECT 1 FROM oauth_tokens WHERE id = ?)
+         AND ${generation.sql}`,
+      [
+        oauthInstallLeaseKey(id),
+        value,
+        new Date().toISOString(),
+        id,
+        ...generation.params,
+        now,
+        id,
+        ...generation.params,
+      ],
+    );
+    return rowsAffected === 1;
+  }
+
+  async finishFreshOAuthInstall(
+    id: string,
+    leaseId: string,
+    tokens: OAuthTokens,
+  ): Promise<boolean> {
+    const lease = `EXISTS (
+      SELECT 1 FROM settings
+       WHERE key = ? AND json_valid(value)
+         AND CAST(json_extract(value, '$.leaseId') AS TEXT) = ?
+    )`;
+    const current = `EXISTS (
+      SELECT 1 FROM oauth_tokens WHERE id = ? AND refresh_token = ?
+    )`;
+    const accountGeneration = crypto.randomUUID();
+    const results = await this.db.batch([
+      {
+        sql: `INSERT INTO oauth_tokens
+                (id, access_token, refresh_token, expires_at, scope, user_id, username,
+                 display_name, state, lease_id, lease_until, recovery_used, broken_reason, updated_at)
+              SELECT ?, ?, ?, ?, ?, ?, ?, ?, 'ready', NULL, NULL, 0, NULL, ?
+               WHERE ${lease}
+              ON CONFLICT(id) DO NOTHING`,
+        params: [id, ...rotationParams(tokens), oauthInstallLeaseKey(id), leaseId],
+      },
+      {
+        sql: `INSERT INTO settings (key, value, updated_at)
+              SELECT ?, ?, ? WHERE ${current} AND ${lease}
+              ON CONFLICT(key) DO UPDATE SET
+                value = excluded.value, updated_at = excluded.updated_at`,
+        params: [
+          accountGenerationKey(id),
+          accountGeneration,
+          new Date().toISOString(),
+          id,
+          tokens.refreshToken,
+          oauthInstallLeaseKey(id),
+          leaseId,
+        ],
+      },
+      {
+        sql: `UPDATE saved_items SET source = 'manual'
+               WHERE source = 'bookmark' AND ${current} AND ${lease}`,
+        params: [id, tokens.refreshToken, oauthInstallLeaseKey(id), leaseId],
+      },
+      {
+        sql: `DELETE FROM settings
+               WHERE key IN (?, ?, ?, ?) AND ${current} AND ${lease}`,
+        params: [
+          BOOKMARK_FOLDER_KEY,
+          BOOKMARK_FOLDER_NAME_KEY,
+          BOOKMARK_SYNC_RUN_KEY,
+          userProfileLeaseKey(id),
+          id,
+          tokens.refreshToken,
+          oauthInstallLeaseKey(id),
+          leaseId,
+        ],
+      },
+      {
+        sql: `DELETE FROM settings
+               WHERE key = ? AND json_valid(value)
+                 AND CAST(json_extract(value, '$.leaseId') AS TEXT) = ?`,
+        params: [oauthInstallLeaseKey(id), leaseId],
+      },
+    ]);
+    return results[0]?.rowsAffected === 1;
+  }
+
+  async claimOAuthReauthorization(
+    id: string,
+    observedRefreshToken: string,
+    leaseId: string,
+    leaseUntil: number,
+    now: number,
+    expectedAccountGeneration?: string,
+  ): Promise<boolean> {
+    const grant = await grantFingerprint(observedRefreshToken);
+    const key = oauthInstallLeaseKey(id);
+    const updatedAt = new Date().toISOString();
+    const generation = accountGenerationGuard(id, expectedAccountGeneration);
+    const claimable = `(state IN ('ready', 'broken')
+      OR (state = 'reauthorizing' AND COALESCE(lease_until, 0) <= ?))`;
+    const results = await this.db.batch([
+      {
+        // Store the displaced state in the owner record. A callback recovering
+        // a pending callback therefore restores to pending on refusal, never
+        // promotes an old pair whose validity is no longer known.
+        sql: `INSERT INTO settings (key, value, updated_at)
+              SELECT ?, json_object(
+                           'leaseId', ?, 'leaseUntil', ?, 'grant', ?,
+                           'priorState', state, 'priorReason', broken_reason
+                         ), ?
+               FROM oauth_tokens
+               WHERE id = ? AND refresh_token = ? AND user_id IS NOT NULL
+                 AND ${generation.sql}
+                 AND ${claimable}
+              ON CONFLICT(key) DO UPDATE SET
+                value = excluded.value, updated_at = excluded.updated_at
+              WHERE COALESCE(
+                      CASE WHEN json_valid(settings.value)
+                           THEN CAST(json_extract(settings.value, '$.leaseUntil') AS INTEGER) END,
+                      0
+                    ) <= ?`,
+        params: [
+          key,
+          leaseId,
+          leaseUntil,
+          grant,
+          updatedAt,
+          id,
+          observedRefreshToken,
+          ...generation.params,
+          now,
+          now,
+        ],
+      },
+      {
+        // The row transition is the durable safety boundary. From this point
+        // onward no account route may present the old pair, even if the Worker
+        // dies after X consumes the authorization code.
+        sql: `UPDATE oauth_tokens
+                 SET state = 'reauthorizing', lease_id = ?, lease_until = ?,
+                     broken_reason = COALESCE(
+                       broken_reason,
+                       'reauthorization outcome pending; retry Reconnect or disconnect X'
+                     ),
+                     updated_at = ?
+               WHERE id = ? AND refresh_token = ? AND user_id IS NOT NULL
+                 AND ${generation.sql}
+                 AND ${claimable}
+                 AND EXISTS (
+                   SELECT 1 FROM settings
+                    WHERE key = ? AND json_valid(value)
+                      AND CAST(json_extract(value, '$.leaseId') AS TEXT) = ?
+                      AND CAST(json_extract(value, '$.grant') AS TEXT) = ?
+                 )`,
+        params: [
+          leaseId,
+          leaseUntil,
+          updatedAt,
+          id,
+          observedRefreshToken,
+          ...generation.params,
+          now,
+          key,
+          leaseId,
+          grant,
+        ],
+      },
+    ]);
+    return results[1]?.rowsAffected === 1;
+  }
+
+  async releaseOAuthCallbackLease(id: string, leaseId: string): Promise<boolean> {
+    const { rowsAffected } = await this.db.run(
+      `DELETE FROM settings
+        WHERE key = ? AND json_valid(value)
+          AND CAST(json_extract(value, '$.leaseId') AS TEXT) = ?`,
+      [oauthInstallLeaseKey(id), leaseId],
+    );
+    return rowsAffected === 1;
+  }
+
+  async restoreOAuthReauthorization(
+    id: string,
+    observedRefreshToken: string,
+    leaseId: string,
+  ): Promise<boolean> {
+    const grant = await grantFingerprint(observedRefreshToken);
+    const key = oauthInstallLeaseKey(id);
+    const owner = `EXISTS (
+      SELECT 1 FROM settings
+       WHERE key = ? AND json_valid(value)
+         AND CAST(json_extract(value, '$.leaseId') AS TEXT) = ?
+         AND CAST(json_extract(value, '$.grant') AS TEXT) = ?
+    )`;
+    const results = await this.db.batch([
+      {
+        sql: `UPDATE oauth_tokens
+                 SET state = CASE
+                       CAST(json_extract(
+                         (SELECT value FROM settings WHERE key = ?), '$.priorState'
+                       ) AS TEXT)
+                       WHEN 'broken' THEN 'broken'
+                       WHEN 'reauthorizing' THEN 'reauthorizing'
+                       ELSE 'ready'
+                     END,
+                     lease_id = NULL, lease_until = NULL,
+                     broken_reason = CASE
+                       CAST(json_extract(
+                         (SELECT value FROM settings WHERE key = ?), '$.priorState'
+                       ) AS TEXT)
+                       WHEN 'ready' THEN NULL
+                       ELSE CAST(json_extract(
+                         (SELECT value FROM settings WHERE key = ?), '$.priorReason'
+                       ) AS TEXT)
+                     END,
+                     updated_at = ?
+               WHERE id = ? AND refresh_token = ? AND state = 'reauthorizing'
+                 AND lease_id = ? AND ${owner}`,
+        params: [
+          key,
+          key,
+          key,
+          new Date().toISOString(),
+          id,
+          observedRefreshToken,
+          leaseId,
+          key,
+          leaseId,
+          grant,
+        ],
+      },
+      {
+        sql: `DELETE FROM settings
+               WHERE key = ? AND json_valid(value)
+                 AND CAST(json_extract(value, '$.leaseId') AS TEXT) = ?
+                 AND CAST(json_extract(value, '$.grant') AS TEXT) = ?`,
+        params: [key, leaseId, grant],
+      },
+    ]);
+    return results[0]?.rowsAffected === 1;
+  }
+
+  async settleOAuthReauthorizationPending(
+    id: string,
+    observedRefreshToken: string,
+    leaseId: string,
+    reason: string,
+  ): Promise<boolean> {
+    const grant = await grantFingerprint(observedRefreshToken);
+    const key = oauthInstallLeaseKey(id);
+    const results = await this.db.batch([
+      {
+        sql: `UPDATE oauth_tokens
+                 SET state = 'reauthorizing', lease_id = NULL, lease_until = NULL,
+                     broken_reason = ?, updated_at = ?
+               WHERE id = ? AND refresh_token = ? AND state = 'reauthorizing'
+                 AND lease_id = ?
+                 AND EXISTS (
+                   SELECT 1 FROM settings
+                    WHERE key = ? AND json_valid(value)
+                      AND CAST(json_extract(value, '$.leaseId') AS TEXT) = ?
+                      AND CAST(json_extract(value, '$.grant') AS TEXT) = ?
+                 )`,
+        params: [
+          reason,
+          new Date().toISOString(),
+          id,
+          observedRefreshToken,
+          leaseId,
+          key,
+          leaseId,
+          grant,
+        ],
+      },
+      {
+        sql: `DELETE FROM settings
+               WHERE key = ? AND json_valid(value)
+                 AND CAST(json_extract(value, '$.leaseId') AS TEXT) = ?
+                 AND CAST(json_extract(value, '$.grant') AS TEXT) = ?`,
+        params: [key, leaseId, grant],
+      },
+    ]);
+    return results[0]?.rowsAffected === 1;
+  }
+
+  async probeOAuthReauthorizationPromotion(
+    id: string,
+    observedRefreshToken: string,
+    replacementRefreshToken: string,
+    leaseId: string,
+  ): Promise<OAuthReauthorizationPromotion> {
+    const row = await this.db.first<{ outcome: OAuthReauthorizationPromotion }>(
+      `SELECT CASE
+         WHEN refresh_token = ? THEN 'promoted'
+         WHEN refresh_token = ? AND state = 'reauthorizing' AND lease_id = ?
+           THEN 'owned-pending'
+         ELSE 'superseded'
+       END AS outcome
+       FROM oauth_tokens WHERE id = ?`,
+      [replacementRefreshToken, observedRefreshToken, leaseId, id],
+    );
+    return row?.outcome ?? "superseded";
+  }
+
+  async replaceOAuthTokensIfCurrent(
+    id: string,
+    observedRefreshToken: string,
+    tokens: OAuthTokens,
+    callbackLeaseId?: string,
+  ): Promise<boolean> {
+    if (callbackLeaseId) {
+      const grant = await grantFingerprint(observedRefreshToken);
+      const key = oauthInstallLeaseKey(id);
+      const results = await this.db.batch([
+        {
+          sql: `UPDATE oauth_tokens
+                  SET access_token = ?, refresh_token = ?, expires_at = ?, scope = ?,
+                      user_id = ?, username = ?, display_name = ?, state = 'ready',
+                      lease_id = NULL, lease_until = NULL, recovery_used = 0,
+                      broken_reason = NULL, updated_at = ?
+                WHERE id = ? AND refresh_token = ? AND state = 'reauthorizing'
+                  AND lease_id = ?
+                  AND EXISTS (
+                    SELECT 1 FROM settings
+                     WHERE key = ? AND json_valid(value)
+                       AND CAST(json_extract(value, '$.leaseId') AS TEXT) = ?
+                       AND CAST(json_extract(value, '$.grant') AS TEXT) = ?
+                  )`,
+          params: [
+            tokens.accessToken,
+            tokens.refreshToken,
+            tokens.expiresAt,
+            tokens.scope,
+            tokens.userId ?? null,
+            tokens.username ?? null,
+            tokens.displayName ?? null,
+            new Date().toISOString(),
+            id,
+            observedRefreshToken,
+            callbackLeaseId,
+            key,
+            callbackLeaseId,
+            grant,
+          ],
+        },
+        {
+          sql: `DELETE FROM settings
+                 WHERE key = ? AND json_valid(value)
+                   AND CAST(json_extract(value, '$.leaseId') AS TEXT) = ?
+                   AND CAST(json_extract(value, '$.grant') AS TEXT) = ?`,
+          params: [key, callbackLeaseId, grant],
+        },
+      ]);
+      return results[0]?.rowsAffected === 1;
+    }
+    const { rowsAffected } = await this.db.run(
+      `UPDATE oauth_tokens
+          SET access_token = ?, refresh_token = ?, expires_at = ?, scope = ?,
+              user_id = ?, username = ?, display_name = ?, state = 'ready',
+              lease_id = NULL, lease_until = NULL, recovery_used = 0,
+              broken_reason = NULL, updated_at = ?
+        WHERE id = ? AND refresh_token = ? AND state IN ('ready', 'broken')`,
+      [
+        tokens.accessToken,
+        tokens.refreshToken,
+        tokens.expiresAt,
+        tokens.scope,
+        tokens.userId ?? null,
+        tokens.username ?? null,
+        tokens.displayName ?? null,
+        new Date().toISOString(),
+        id,
+        observedRefreshToken,
+      ],
+    );
+    return rowsAffected === 1;
+  }
+
+  async claimOAuthDisconnect(
+    id: string,
+    observedRefreshToken: string,
+    leaseId: string,
+    leaseUntil: number,
+    now: number,
+    expectedAccountGeneration?: string,
+  ): Promise<boolean> {
+    // The same transaction that elects the remote-revocation owner fences
+    // every paid bookmark/profile operation it can. Each cleanup statement
+    // repeats the winning lease predicate: D1 batches are transactions, but a
+    // zero-row conditional first statement does not skip later statements.
+    const owner = `EXISTS (
+      SELECT 1 FROM oauth_tokens
+       WHERE id = ? AND refresh_token = ? AND state = 'disconnecting' AND lease_id = ?
+    )`;
+    const generation = accountGenerationGuard(id, expectedAccountGeneration);
+    const results = await this.db.batch([
+      {
+        sql: `UPDATE oauth_tokens
+                 SET state = 'disconnecting', lease_id = ?, lease_until = ?, updated_at = ?
+               WHERE id = ? AND refresh_token = ?
+                 AND (state IN ('ready', 'broken', 'reauthorizing')
+                      OR (state = 'disconnecting' AND COALESCE(lease_until, 0) <= ?))
+                 AND NOT EXISTS (
+                   SELECT 1 FROM settings
+                    WHERE key = ? AND json_valid(value)
+                      AND COALESCE(CAST(json_extract(value, '$.leaseUntil') AS INTEGER), 0) > ?
+                 )
+                 AND ${generation.sql}`,
+        params: [
+          leaseId,
+          leaseUntil,
+          new Date().toISOString(),
+          id,
+          observedRefreshToken,
+          now,
+          oauthInstallLeaseKey(id),
+          now,
+          ...generation.params,
+        ],
+      },
+      {
+        sql: `DELETE FROM settings WHERE key = ? AND ${owner}`,
+        params: [BOOKMARK_SYNC_RUN_KEY, id, observedRefreshToken, leaseId],
+      },
+      {
+        sql: `DELETE FROM settings WHERE key = ? AND ${owner}`,
+        params: [userProfileLeaseKey(id), id, observedRefreshToken, leaseId],
+      },
+      {
+        sql: `DELETE FROM settings WHERE key = ? AND ${owner}`,
+        params: [oauthInstallLeaseKey(id), id, observedRefreshToken, leaseId],
+      },
+    ]);
+    return results[0]?.rowsAffected === 1;
+  }
+
+  async finishOAuthDisconnect(
+    id: string,
+    observedRefreshToken: string,
+    leaseId: string,
+    disposition: BookmarkDisposition,
+  ): Promise<string | null> {
+    const owner = `EXISTS (
+      SELECT 1 FROM oauth_tokens
+       WHERE id = ? AND refresh_token = ? AND state = 'disconnecting' AND lease_id = ?
+    )`;
+    const savedMutation =
+      disposition === "keep"
+        ? `UPDATE saved_items SET source = 'manual'
+             WHERE source = 'bookmark' AND ${owner}`
+        : `DELETE FROM saved_items WHERE source = 'bookmark' AND ${owner}`;
+    const ownerParams = [id, observedRefreshToken, leaseId];
+    const accountGeneration = crypto.randomUUID();
+    const results = await this.db.batch([
+      { sql: savedMutation, params: ownerParams },
+      {
+        sql: `INSERT INTO settings (key, value, updated_at)
+              SELECT ?, ?, ? WHERE ${owner}
+              ON CONFLICT(key) DO UPDATE SET
+                value = excluded.value, updated_at = excluded.updated_at`,
+        params: [
+          accountGenerationKey(id),
+          accountGeneration,
+          new Date().toISOString(),
+          ...ownerParams,
+        ],
+      },
+      {
+        sql: `DELETE FROM settings
+               WHERE key IN (?, ?, ?, ?, ?) AND ${owner}`,
+        params: [
+          BOOKMARK_FOLDER_KEY,
+          BOOKMARK_FOLDER_NAME_KEY,
+          BOOKMARK_SYNC_RUN_KEY,
+          userProfileLeaseKey(id),
+          oauthInstallLeaseKey(id),
+          ...ownerParams,
+        ],
+      },
+      {
+        sql: `DELETE FROM oauth_tokens
+               WHERE id = ? AND refresh_token = ?
+                 AND state = 'disconnecting' AND lease_id = ?`,
+        params: ownerParams,
+      },
+    ]);
+    return results.at(-1)?.rowsAffected === 1 ? accountGeneration : null;
+  }
+
+  async finishOAuthDisconnectWithoutGrant(
+    disposition: BookmarkDisposition,
+    expectedAccountGeneration?: string,
+  ): Promise<string | null> {
+    const operationKey = `oauth_disconnect_empty:${crypto.randomUUID()}`;
+    const operationValue = "owned";
+    const accountGeneration = crypto.randomUUID();
+    const now = Date.now();
+    const generation = accountGenerationGuard("self", expectedAccountGeneration);
+    const owner = `EXISTS (SELECT 1 FROM settings WHERE key = ? AND value = ?)`;
+    const savedMutation =
+      disposition === "keep"
+        ? `UPDATE saved_items SET source = 'manual'
+             WHERE source = 'bookmark' AND ${owner}`
+        : `DELETE FROM saved_items WHERE source = 'bookmark' AND ${owner}`;
+    const results = await this.db.batch([
+      {
+        sql: `INSERT INTO settings (key, value, updated_at)
+              SELECT ?, ?, ?
+               WHERE NOT EXISTS (SELECT 1 FROM oauth_tokens WHERE id = ?)
+                 AND NOT EXISTS (
+                   SELECT 1 FROM settings
+                    WHERE key = ? AND json_valid(value)
+                      AND COALESCE(CAST(json_extract(value, '$.leaseUntil') AS INTEGER), 0) > ?
+                 )
+                 AND ${generation.sql}`,
+        params: [
+          operationKey,
+          operationValue,
+          new Date().toISOString(),
+          "self",
+          oauthInstallLeaseKey("self"),
+          now,
+          ...generation.params,
+        ],
+      },
+      { sql: savedMutation, params: [operationKey, operationValue] },
+      {
+        // This is terminal even when it recovered an expired callback lease:
+        // invalidate that exact owner before reporting Disconnect complete.
+        sql: `DELETE FROM settings WHERE key IN (?, ?, ?, ?) AND ${owner}`,
+        params: [
+          BOOKMARK_FOLDER_KEY,
+          BOOKMARK_FOLDER_NAME_KEY,
+          BOOKMARK_SYNC_RUN_KEY,
+          oauthInstallLeaseKey("self"),
+          operationKey,
+          operationValue,
+        ],
+      },
+      {
+        sql: `INSERT INTO settings (key, value, updated_at)
+              SELECT ?, ?, ? WHERE ${owner}
+              ON CONFLICT(key) DO UPDATE SET
+                value = excluded.value, updated_at = excluded.updated_at`,
+        params: [
+          accountGenerationKey("self"),
+          accountGeneration,
+          new Date().toISOString(),
+          operationKey,
+          operationValue,
+        ],
+      },
+      {
+        sql: `DELETE FROM settings WHERE key = ? AND value = ?`,
+        params: [operationKey, operationValue],
+      },
+    ]);
+    return results.at(-1)?.rowsAffected === 1 ? accountGeneration : null;
+  }
+
+  async releaseOAuthDisconnect(
+    id: string,
+    observedRefreshToken: string,
+    leaseId: string,
+  ): Promise<boolean> {
+    const { rowsAffected } = await this.db.run(
+      `UPDATE oauth_tokens
+          SET state = CASE WHEN broken_reason IS NULL THEN 'ready' ELSE 'broken' END,
+              lease_id = NULL, lease_until = NULL, updated_at = ?
+        WHERE id = ? AND refresh_token = ? AND state = 'disconnecting' AND lease_id = ?`,
+      [new Date().toISOString(), id, observedRefreshToken, leaseId],
+    );
+    return rowsAffected === 1;
   }
 
   async putUserProfile(
@@ -926,7 +2045,7 @@ export class SqlStore implements Storage {
     // the wrong account from then on (Stage 3 adversarial review, finding 3).
     const { rowsAffected } = await this.db.run(
       `UPDATE oauth_tokens SET user_id = ?, username = ?, display_name = ?, updated_at = ?
-       WHERE id = ? AND refresh_token = ?`,
+       WHERE id = ? AND refresh_token = ? AND state <> 'disconnecting'`,
       [
         profile.userId,
         profile.username,
@@ -945,16 +2064,20 @@ export class SqlStore implements Storage {
     leaseId: string,
     leaseUntil: number,
     now: number,
+    expectedAccountGeneration?: string,
   ): Promise<boolean> {
     const grant = await grantFingerprint(observedRefreshToken);
     const value = userProfileLeaseValue(leaseId, leaseUntil, grant);
+    const generation = accountGenerationGuard(id, expectedAccountGeneration);
     const { rowsAffected } = await this.db.run(
       `INSERT INTO settings (key, value, updated_at)
        SELECT ?, ?, ?
         WHERE EXISTS (
           SELECT 1 FROM oauth_tokens
-           WHERE id = ? AND refresh_token = ? AND user_id IS NULL AND state <> 'broken'
+           WHERE id = ? AND refresh_token = ? AND user_id IS NULL
+             AND state IN ('ready', 'refreshing')
         )
+          AND ${generation.sql}
        ON CONFLICT(key) DO UPDATE SET
          value = excluded.value, updated_at = excluded.updated_at
        WHERE COALESCE(
@@ -973,6 +2096,7 @@ export class SqlStore implements Storage {
         new Date().toISOString(),
         id,
         observedRefreshToken,
+        ...generation.params,
         now,
         grant,
       ],
@@ -996,7 +2120,8 @@ export class SqlStore implements Storage {
       {
         sql: `UPDATE oauth_tokens
                  SET user_id = ?, username = ?, display_name = ?, updated_at = ?
-               WHERE id = ? AND refresh_token = ? AND user_id IS NULL AND state <> 'broken'
+               WHERE id = ? AND refresh_token = ? AND user_id IS NULL
+                 AND state IN ('ready', 'refreshing')
                  AND EXISTS (
                    SELECT 1 FROM settings
                     WHERE key = ?
@@ -1050,12 +2175,26 @@ export class SqlStore implements Storage {
     observed: string,
     leaseId: string,
     leaseUntil: number,
+    now = Date.now(),
   ): Promise<boolean> {
     const { rowsAffected } = await this.db.run(
       `UPDATE oauth_tokens
           SET state = 'refreshing', lease_id = ?, lease_until = ?, updated_at = ?
-        WHERE id = ? AND state = 'ready' AND refresh_token = ?`,
-      [leaseId, leaseUntil, new Date().toISOString(), id, observed],
+        WHERE id = ? AND state = 'ready' AND refresh_token = ?
+          AND NOT EXISTS (
+            SELECT 1 FROM settings
+             WHERE key = ? AND json_valid(value)
+               AND CAST(json_extract(value, '$.leaseUntil') AS INTEGER) > ?
+          )`,
+      [
+        leaseId,
+        leaseUntil,
+        new Date().toISOString(),
+        id,
+        observed,
+        oauthInstallLeaseKey(id),
+        now,
+      ],
     );
     return rowsAffected === 1;
   }

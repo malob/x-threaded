@@ -17,6 +17,8 @@
     "src/server",
     "src/shared",
     "src/web/thread",
+    "src/web/api.ts",
+    "src/web/queries/inbox.ts",
     "src/web/queries/conversation-cache.ts",
     "src/web/inbox-state.ts",
     "src/web/media-state.ts"

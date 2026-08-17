@@ -3,7 +3,11 @@ import { bunDriver } from "../src/server/db/bun";
 import { SqlStore } from "../src/server/db/store";
 import {
   exchangeCode,
+  exchangeCodeForTokens,
   getUserAccessToken,
+  OAuthCodeExchangeError,
+  OAuthGrantConflictError,
+  revokeOAuthGrant,
   SELF_ID,
   type OAuthConfig,
   type TokenTimings,
@@ -254,20 +258,24 @@ describe("getUserAccessToken — the cross-isolate lease", () => {
     return [new SqlStore(driver), new SqlStore(driver)];
   }
 
-  it("presents the refresh token to X once across two isolates", async () => {
+  it("presents the token once and makes the cross-isolate loser retry", async () => {
     const [first, second] = await twoIsolates();
     await storeWithExpiredToken(first);
 
     const { state, handler } = tokenEndpoint({ delayMs: 20 });
-    const tokens = await withEndpoint(handler, () =>
-      Promise.all([
+    const results = await withEndpoint(handler, () =>
+      Promise.allSettled([
         getUserAccessToken(first, CONFIG, FAST),
         getUserAccessToken(second, CONFIG, FAST),
       ]),
     );
 
     expect(state.hits).toBe(1);
-    expect(tokens).toEqual(["access-1", "access-1"]);
+    expect(results.filter((result) => result.status === "fulfilled")).toEqual([
+      { status: "fulfilled", value: "access-1" },
+    ]);
+    const rejected = results.find((result) => result.status === "rejected");
+    expect(rejected?.reason).toBeInstanceOf(OAuthGrantConflictError);
     expect(await first.getOAuthTokens(SELF_ID)).toMatchObject({
       accessToken: "access-1",
       refreshToken: "refresh-1",
@@ -554,6 +562,73 @@ describe("getUserAccessToken — finalize is conditional", () => {
 });
 
 describe("exchangeCode", () => {
+  async function exchangeFailure(
+    handler: (url: string, init?: RequestInit) => Response | Promise<Response>,
+  ): Promise<OAuthCodeExchangeError> {
+    try {
+      await withEndpoint(handler, () =>
+        exchangeCodeForTokens(CONFIG, "code", "verifier", "https://example.test/auth/callback"),
+      );
+    } catch (error) {
+      expect(error).toBeInstanceOf(OAuthCodeExchangeError);
+      return error as OAuthCodeExchangeError;
+    }
+    throw new Error("expected code exchange to fail");
+  }
+
+  it("distinguishes a conclusive code refusal from ambiguous provider outcomes", async () => {
+    const refused = await exchangeFailure(() =>
+      Response.json({ error: "invalid_grant" }, { status: 400 }),
+    );
+    expect(refused.outcome).toBe("refused");
+
+    for (const status of [408, 429, 500]) {
+      const ambiguous = await exchangeFailure(() =>
+        Response.json({ error: "temporarily_unavailable" }, { status }),
+      );
+      expect(ambiguous.outcome).toBe("ambiguous");
+    }
+
+    const transport = await exchangeFailure(() => {
+      throw new TypeError("socket closed");
+    });
+    expect(transport.outcome).toBe("ambiguous");
+  });
+
+  it("can exchange a reauthorization code without replacing the observed grant", async () => {
+    const store = await newStore();
+    await store.putOAuthTokens(SELF_ID, {
+      accessToken: "access-old",
+      refreshToken: "refresh-old",
+      expiresAt: Date.now() + 60_000,
+      scope: GRANTED_SCOPE,
+      userId: "42",
+    });
+
+    let exchangeSignal: AbortSignal | null | undefined;
+    const next = await withEndpoint(
+      async (_url, init) => {
+        exchangeSignal = init?.signal;
+        return Response.json({
+          access_token: "access-new",
+          refresh_token: "refresh-new",
+          expires_in: 7200,
+          scope: GRANTED_SCOPE,
+        });
+      },
+      () =>
+        exchangeCodeForTokens(CONFIG, "code", "verifier", "https://example.test/auth/callback"),
+    );
+
+    expect(next).toMatchObject({ accessToken: "access-new", refreshToken: "refresh-new" });
+    expect(exchangeSignal).toBeInstanceOf(AbortSignal);
+    expect(await store.getOAuthTokens(SELF_ID)).toMatchObject({
+      accessToken: "access-old",
+      refreshToken: "refresh-old",
+      userId: "42",
+    });
+  });
+
   it("revives a broken grant", async () => {
     const store: Storage = await storeWithExpiredToken();
     await store.markTokenBroken(SELF_ID, "refresh-0", "invalid_grant");
@@ -577,5 +652,28 @@ describe("exchangeCode", () => {
       brokenReason: null,
     });
     expect(await getUserAccessToken(store, CONFIG, FAST)).toBe("access-new");
+  });
+});
+
+describe("revokeOAuthGrant", () => {
+  it("uses X's confidential-client revocation request without deleting anything locally", async () => {
+    const observed: { url: string; init?: RequestInit }[] = [];
+    await withEndpoint(
+      async (url, init) => {
+        observed.push({ url, init });
+        return Response.json({ revoked: true });
+      },
+      () => revokeOAuthGrant(CONFIG, "refresh-to-revoke"),
+    );
+
+    expect(observed[0]?.url).toBe("https://api.x.com/2/oauth2/revoke");
+    expect(observed[0]?.init?.method).toBe("POST");
+    expect(new Headers(observed[0]?.init?.headers).get("authorization")).toBe(
+      `Basic ${btoa("client-id:client-secret")}`,
+    );
+    expect(new URLSearchParams(String(observed[0]?.init?.body)).toString()).toBe(
+      "token=refresh-to-revoke",
+    );
+    expect(observed[0]?.init?.signal).toBeInstanceOf(AbortSignal);
   });
 });

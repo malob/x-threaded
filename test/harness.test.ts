@@ -1,7 +1,7 @@
 import { describe, expect, it, setSystemTime } from "bun:test";
 import { buildApp } from "../src/server/app";
 import { d1Driver } from "../src/server/db/d1";
-import type { SqlDriver } from "../src/server/db/driver";
+import type { SqlDriver, SqlStatement } from "../src/server/db/driver";
 import { SqlStore } from "../src/server/db/store";
 import { resolveQuotedPosts } from "../src/server/conversations";
 import { runConversationFetch } from "../src/server/conversation-fetch";
@@ -12,7 +12,13 @@ import { snowflakeMs } from "../src/shared/snowflake";
 import { FakeD1Database, D1_MAX_BOUND_PARAMS } from "./fake-d1";
 import { FakeXApi } from "./fake-xapi";
 import { makePost, snowflakeId } from "./fixtures";
-import { makeD1TestStore, makeTestApp, searchPage, TEST_OAUTH } from "./harness";
+import {
+  makeD1TestStore,
+  makeTestApp,
+  searchPage,
+  TEST_OAUTH,
+  withAccountGeneration,
+} from "./harness";
 import { withMockFetch } from "./setup";
 
 describe("network tripwire", () => {
@@ -172,6 +178,10 @@ async function countedD1Store(): Promise<{
       queries += statements.length;
       return await base.batch(statements);
     },
+    async batchFirst<T>(statements: SqlStatement[], query: SqlStatement) {
+      queries += statements.length + 1;
+      return await base.batchFirst<T>(statements, query);
+    },
   };
   return {
     store: new SqlStore(counted),
@@ -245,7 +255,7 @@ describe("SqlStore over the D1 fake", () => {
     expect(queryCount()).toBe(3);
   });
 
-  it("bounds an active profile-lease wait to fifteen D1 queries and no X spend", async () => {
+  it("bounds an active profile-lease wait to thirteen D1 queries and no X spend", async () => {
     const { store, queryCount, resetQueryCount } = await countedD1Store();
     const now = Date.now();
     await store.putOAuthTokens(SELF_ID, {
@@ -263,19 +273,60 @@ describe("SqlStore over the D1 fake", () => {
         now,
       ),
     ).toBe(true);
+    const accountGeneration = await store.getOrCreateAccountGeneration(
+      SELF_ID,
+      crypto.randomUUID(),
+    );
     resetQueryCount();
     const xapi = new FakeXApi();
     const app = buildApp({ store, xapi, maxPosts: 500, oauth: TEST_OAUTH });
 
-    const response = await app.request("/api/bookmarks/folders");
+    const response = await app.request(
+      "/api/bookmarks/folders",
+      withAccountGeneration(accountGeneration),
+    );
 
     expect(response.status).toBe(409);
     expect(xapi.count("getMe")).toBe(0);
     expect(xapi.count("getBookmarkFolders")).toBe(0);
-    expect(queryCount()).toBe(15);
+    expect(queryCount()).toBe(13);
   });
 
-  it("recovers an already-expired profile lease and completes the route in four D1 statements", async () => {
+  it("rejects a cross-isolate active token refresh after two D1 reads", async () => {
+    const { store, queryCount, resetQueryCount } = await countedD1Store();
+    const now = Date.now();
+    await store.putOAuthTokens(SELF_ID, {
+      accessToken: "expired",
+      refreshToken: "refresh",
+      expiresAt: now - 1,
+      scope: "users.read bookmark.read",
+      userId: "account",
+    });
+    const accountGeneration = await store.getOrCreateAccountGeneration(
+      SELF_ID,
+      crypto.randomUUID(),
+    );
+    expect(
+      await store.claimTokenLease(SELF_ID, "refresh", "other-isolate", now + 30_000, now),
+    ).toBe(true);
+    resetQueryCount();
+    const xapi = new FakeXApi();
+    const app = buildApp({ store, xapi, maxPosts: 500, oauth: TEST_OAUTH });
+
+    const response = await app.request(
+      "/api/bookmarks/folders",
+      withAccountGeneration(accountGeneration),
+    );
+
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({
+      error: expect.stringContaining("refresh is already in progress"),
+    });
+    expect(xapi.calls).toEqual([]);
+    expect(queryCount()).toBe(2);
+  });
+
+  it("recovers an already-expired profile lease and completes the route in six D1 statements", async () => {
     const started = new Date("2024-06-01T12:00:00.000Z");
     setSystemTime(started);
     try {
@@ -296,18 +347,25 @@ describe("SqlStore over the D1 fake", () => {
         ),
       ).toBe(true);
       setSystemTime(new Date(started.getTime() + 3 * 60_000));
+      const accountGeneration = await store.getOrCreateAccountGeneration(
+        SELF_ID,
+        crypto.randomUUID(),
+      );
       resetQueryCount();
       const xapi = new FakeXApi();
       xapi.onGetMe = () => ({ id: "42", username: "someone", name: "Some One" });
       xapi.onGetBookmarkFolders = () => [];
       const app = buildApp({ store, xapi, maxPosts: 500, oauth: TEST_OAUTH });
 
-      const response = await app.request("/api/bookmarks/folders");
+      const response = await app.request(
+        "/api/bookmarks/folders",
+        withAccountGeneration(accountGeneration),
+      );
 
       expect(response.status).toBe(200);
       expect(xapi.count("getMe")).toBe(1);
       expect(xapi.count("getBookmarkFolders")).toBe(1);
-      expect(queryCount()).toBe(4);
+      expect(queryCount()).toBe(6);
     } finally {
       setSystemTime();
     }
@@ -453,9 +511,16 @@ describe("SqlStore over the D1 fake", () => {
       };
     };
     const app = buildApp({ store, xapi, maxPosts: 500, oauth: TEST_OAUTH });
+    const accountGeneration = await store.getOrCreateAccountGeneration(
+      SELF_ID,
+      crypto.randomUUID(),
+    );
     resetQueryCount();
 
-    const response = await app.request("/api/bookmarks/sync", { method: "POST" });
+    const response = await app.request(
+      "/api/bookmarks/sync",
+      withAccountGeneration(accountGeneration, { method: "POST" }),
+    );
 
     expect(response.status).toBe(200);
     expect(xapi.count("getBookmarksByFolder")).toBe(1);
@@ -487,22 +552,29 @@ describe("SqlStore over the D1 fake", () => {
       };
     };
     const app = buildApp({ store, xapi, maxPosts: 500, oauth: TEST_OAUTH });
+    const accountGeneration = await store.getOrCreateAccountGeneration(
+      SELF_ID,
+      crypto.randomUUID(),
+    );
     resetQueryCount();
 
-    const response = await app.request("/api/bookmarks/sync", { method: "POST" });
+    const response = await app.request(
+      "/api/bookmarks/sync",
+      withAccountGeneration(accountGeneration, { method: "POST" }),
+    );
 
     expect(response.status).toBe(200);
     expect(xapi.count("getMe")).toBe(1);
-    expect(queryCount()).toBe(31);
+    expect(queryCount()).toBe(32);
     expect(queryCount()).toBeLessThanOrEqual(50);
   });
 
-  it("refuses a twelfth finish statement after worst-case profile polling and outbound checks", async () => {
+  it("fits an eleven-statement finish after worst-case profile polling and a getMe retry", async () => {
     const { store, queryCount, resetQueryCount } = await countedD1Store();
     const now = Date.now();
     const crashedUntil = now + 60_000;
     const posts = Array.from({ length: 1_000 }, (_, index) =>
-      makePost({ text: `${index}:${"x".repeat(12_000)}` }),
+      makePost({ text: `${index}:${"x".repeat(11_000)}` }),
     );
     await store.putOAuthTokens(SELF_ID, {
       accessToken: "access",
@@ -521,8 +593,8 @@ describe("SqlStore over the D1 fake", () => {
       ),
     ).toBe(true);
 
-    // Six ordinary passes observe the crashed holder. The seventh is made at
-    // exact expiry so it exercises the resolver's maximum seven snapshot / seven
+    // Five ordinary passes observe the crashed holder. The sixth is made at
+    // exact expiry so it exercises the resolver's maximum six snapshot / six
     // claim reads, followed by the winning two-statement profile finish.
     const claimProfile = store.claimUserProfileLease.bind(store);
     let profilePasses = 0;
@@ -532,19 +604,26 @@ describe("SqlStore over the D1 fake", () => {
       leaseId,
       leaseUntil,
       claimNow,
+      expectedAccountGeneration,
     ) => {
       profilePasses += 1;
       return await claimProfile(
         id,
         observedRefreshToken,
         leaseId,
-        profilePasses === 7 ? crashedUntil + 2 * 60_000 : leaseUntil,
-        profilePasses === 7 ? crashedUntil : claimNow,
+        profilePasses === 6 ? crashedUntil + 2 * 60_000 : leaseUntil,
+        profilePasses === 6 ? crashedUntil : claimNow,
+        expectedAccountGeneration,
       );
     };
 
     const xapi = new FakeXApi();
-    xapi.onGetMe = () => ({ id: "account", username: "reader", name: "Reader" });
+    xapi.onGetMe = async (_token, opts) => {
+      // Fake the real client's one retry: both actual fetch attempts must
+      // re-check the browser's account generation before they can spend.
+      await opts?.beforeRequest?.();
+      return { id: "account", username: "reader", name: "Reader" };
+    };
     xapi.onGetBookmarksByFolder = async (_token, _userId, _folderId, opts) => {
       // FakeXApi supplies the first folder boundary and ten hydration batches;
       // these are the remaining nine folder pages, for the route maximum of 20.
@@ -557,21 +636,25 @@ describe("SqlStore over the D1 fake", () => {
       };
     };
     const app = buildApp({ store, xapi, maxPosts: 500, oauth: TEST_OAUTH });
+    const accountGeneration = await store.getOrCreateAccountGeneration(
+      SELF_ID,
+      crypto.randomUUID(),
+    );
     resetQueryCount();
 
-    const response = await app.request("/api/bookmarks/sync", { method: "POST" });
+    const response = await app.request(
+      "/api/bookmarks/sync",
+      withAccountGeneration(accountGeneration, { method: "POST" }),
+    );
 
-    expect(profilePasses).toBe(7);
+    expect(profilePasses).toBe(6);
     expect(xapi.count("getMe")).toBe(1);
     expect(xapi.count("getBookmarksByFolder")).toBe(1);
-    // 2 folder/claim + 16 profile + 20 ownership + 1 credit = 39. Refusing
-    // the twelve-statement finish performs no batch, then owner-bound abort is 40.
-    expect(queryCount()).toBe(40);
-    expect(response.status).toBe(409);
-    expect(await response.json()).toMatchObject({
-      error: "bookmark sync exceeded its safe database budget; retry a smaller scan",
-    });
-    expect(await store.listSavedItems()).toEqual([]);
+    // 2 folder/claim + 16 profile (including two pre-getMe checks) +
+    // 20 ownership + 1 credit + the allowed 11-statement finish = 50.
+    expect(queryCount()).toBe(50);
+    expect(response.status).toBe(200);
+    expect(await store.listSavedItems()).toHaveLength(1_000);
   });
 
   it("refuses an oversized bookmark finish before exceeding its D1 reserve", async () => {
@@ -598,9 +681,16 @@ describe("SqlStore over the D1 fake", () => {
       };
     };
     const app = buildApp({ store, xapi, maxPosts: 500, oauth: TEST_OAUTH });
+    const accountGeneration = await store.getOrCreateAccountGeneration(
+      SELF_ID,
+      crypto.randomUUID(),
+    );
     resetQueryCount();
 
-    const response = await app.request("/api/bookmarks/sync", { method: "POST" });
+    const response = await app.request(
+      "/api/bookmarks/sync",
+      withAccountGeneration(accountGeneration, { method: "POST" }),
+    );
 
     expect(response.status).toBe(409);
     expect(await response.json()).toMatchObject({
@@ -609,6 +699,96 @@ describe("SqlStore over the D1 fake", () => {
     expect(queryCount()).toBe(25);
     expect(queryCount()).toBeLessThanOrEqual(50);
     expect(await store.listSavedItems()).toEqual([]);
+  });
+
+  it("bounds a maximal own-post scan under 50 queries after worst-case profile polling", async () => {
+    const { store, queryCount, resetQueryCount } = await countedD1Store();
+    const now = Date.now();
+    const crashedUntil = now + 60_000;
+    await store.putOAuthTokens(SELF_ID, {
+      accessToken: "access",
+      refreshToken: "refresh",
+      expiresAt: now + 60 * 60 * 1000,
+      scope: "tweet.read users.read",
+    });
+    expect(
+      await store.claimUserProfileLease(
+        SELF_ID,
+        "refresh",
+        "crashed-holder",
+        crashedUntil,
+        now,
+      ),
+    ).toBe(true);
+
+    const claimProfile = store.claimUserProfileLease.bind(store);
+    let profilePasses = 0;
+    store.claimUserProfileLease = async (
+      id,
+      observedRefreshToken,
+      leaseId,
+      leaseUntil,
+      claimNow,
+      expectedAccountGeneration,
+    ) => {
+      profilePasses += 1;
+      return await claimProfile(
+        id,
+        observedRefreshToken,
+        leaseId,
+        profilePasses === 6 ? crashedUntil + 2 * 60_000 : leaseUntil,
+        profilePasses === 6 ? crashedUntil : claimNow,
+        expectedAccountGeneration,
+      );
+    };
+
+    const roots = new Map<string, ReturnType<typeof makePost>>();
+    const pages = Array.from({ length: 4 }, () =>
+      Array.from({ length: 50 }, (_, index) => {
+        const root = makePost({ authorId: index === 0 ? "account" : "someone-else" });
+        roots.set(root.id, root);
+        return makePost({
+          conversationId: root.id,
+          parentId: root.id,
+          authorId: "account",
+        });
+      }),
+    );
+    const xapi = new FakeXApi();
+    xapi.onGetMe = async (_token, opts) => {
+      await opts?.beforeRequest?.();
+      return { id: "account", username: "reader", name: "Reader" };
+    };
+    let pageIndex = 0;
+    xapi.onGetOwnPosts = () => ({ posts: pages[pageIndex++]!, nextToken: "more" });
+    xapi.onGetPostsByIds = (ids) => ({
+      posts: ids.flatMap((id) => {
+        const root = roots.get(id);
+        return root ? [root] : [];
+      }),
+      missing: [],
+    });
+    const app = buildApp({ store, xapi, maxPosts: 500, oauth: TEST_OAUTH });
+    const accountGeneration = await store.getOrCreateAccountGeneration(
+      SELF_ID,
+      crypto.randomUUID(),
+    );
+    resetQueryCount();
+
+    const response = await app.request(
+      "/api/me/posts?threads=50",
+      withAccountGeneration(accountGeneration),
+    );
+
+    expect(response.status).toBe(200);
+    expect(profilePasses).toBe(6);
+    expect(xapi.count("getMe")).toBe(1);
+    expect(xapi.count("getOwnPosts")).toBe(4);
+    expect(xapi.count("getPostsByIds")).toBe(4);
+    expect(await response.json()).toMatchObject({ hasMore: true });
+    // 16 first-profile statements + four pages at eight statements each.
+    expect(queryCount()).toBe(48);
+    expect(queryCount()).toBeLessThanOrEqual(50);
   });
 
   it("keeps the five-page default fixture with no ancillary work inside D1 Free's budget", async () => {

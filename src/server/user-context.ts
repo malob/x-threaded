@@ -24,10 +24,12 @@ const PROFILE_LEASE_MS = 2 * 60_000;
 const PROFILE_POLL_INITIAL_MS = 25;
 const PROFILE_POLL_MAX_MS = 1_600;
 /**
- * Seven read/claim pairs cost 14 statements. A final losing re-read costs 15;
- * a seventh-pass winner instead uses the two-statement profile finish: 16.
+ * Six read/claim pairs cost 12 statements. A final losing re-read costs 13;
+ * a sixth-pass winner uses the two-statement profile finish plus at most two
+ * generation checks for X's one permitted getMe retry: 16. This leaves the
+ * heavy bookmark and own-post routes inside D1 Free's 50-query ceiling.
  */
-const PROFILE_MAX_CLAIM_PASSES = 7;
+const PROFILE_MAX_CLAIM_PASSES = 6;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -47,15 +49,20 @@ export async function userContext(
   xapi: XApiClient,
   oauth: OAuthConfig | null,
   meter: SpendMeter,
-): Promise<{ token: string; userId: string }> {
+  expectedAccountGeneration?: string,
+): Promise<{ token: string; userId: string; refreshToken: string }> {
   let paidAttempts = 0;
   let claimPasses = 0;
   let pollMs = PROFILE_POLL_INITIAL_MS;
 
   for (;;) {
-    const grant = oauth ? await getUserGrantSnapshot(store, oauth) : null;
+    const grant = oauth
+      ? await getUserGrantSnapshot(store, oauth, {}, expectedAccountGeneration)
+      : null;
     if (!grant) throw new XApiError("user context is not configured — visit /auth/login", 401);
-    if (grant.userId) return { token: grant.accessToken, userId: grant.userId };
+    if (grant.userId) {
+      return { token: grant.accessToken, userId: grant.userId, refreshToken: grant.refreshToken };
+    }
     if (paidAttempts >= MAX_PROFILE_ATTEMPTS) throw new UserContextConflictError();
 
     const now = Date.now();
@@ -71,6 +78,7 @@ export async function userContext(
       leaseId,
       now + PROFILE_LEASE_MS,
       now,
+      expectedAccountGeneration,
     );
     if (!claimed) {
       // Re-read rather than trusting the snapshot that lost: the holder may
@@ -89,7 +97,25 @@ export async function userContext(
 
     let me: { id: string; username: string; name: string };
     try {
-      me = meter.charge(await xapi.getMe(grant.accessToken));
+      me = meter.charge(
+        await xapi.getMe(grant.accessToken, {
+          beforeRequest: expectedAccountGeneration
+            ? async () => {
+                if (
+                  !(await store.isOAuthGrantCurrent(
+                    SELF_ID,
+                    grant.refreshToken,
+                    expectedAccountGeneration,
+                  ))
+                ) {
+                  throw new UserContextConflictError(
+                    "X account changed before profile lookup; stopped",
+                  );
+                }
+              }
+            : undefined,
+        }),
+      );
     } catch (error) {
       // A failed getMe consumes no single-use credential, so there is no
       // ambiguity that warrants stranding the lease. Never replace the X
@@ -120,6 +146,8 @@ export async function userContext(
         displayName: me.name,
       },
     );
-    if (cached) return { token: grant.accessToken, userId: me.id };
+    if (cached) {
+      return { token: grant.accessToken, userId: me.id, refreshToken: grant.refreshToken };
+    }
   }
 }
